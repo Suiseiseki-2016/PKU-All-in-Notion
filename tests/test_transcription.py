@@ -120,3 +120,67 @@ def test_unknown_backend_is_rejected(tmp_path):
         transcription.transcribe(
             tmp_path / "v.mp4", tmp_path / "t.json", make_settings("carrier-pigeon")
         )
+
+
+def test_upload_retries_once_on_transport_error(tmp_path, monkeypatch):
+    """A failover between hosts kills the in-flight request once; absorb it."""
+    import httpx
+
+    calls = {"n": 0}
+
+    class FlakyClient:
+        def __init__(self, *args, **kwargs): ...
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.TransportError("connection killed mid-upload")
+            return httpx.Response(
+                200, json={"segments": [{"start": 0.0, "text": "重试"}]}
+            )
+
+    monkeypatch.setattr(httpx, "Client", FlakyClient)
+    monkeypatch.setattr(transcription, "_RETRY_DELAY", 0.0)
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"fake-audio")
+    payload = transcription._upload(
+        "https://relay.example/v1/transcribe", "m-key", audio
+    )
+    assert calls["n"] == 2
+    assert payload["segments"][0]["text"] == "重试"
+
+
+def test_upload_never_retries_http_answers(tmp_path, monkeypatch):
+    """401/402/503 are real answers (auth/quota/vendor); retrying helps nobody."""
+    import httpx
+
+    calls = {"n": 0}
+
+    class Always402:
+        def __init__(self, *args, **kwargs): ...
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *args, **kwargs):
+            calls["n"] += 1
+            return httpx.Response(402, json={"detail": "quota exhausted"})
+
+    monkeypatch.setattr(httpx, "Client", Always402)
+    monkeypatch.setattr(transcription, "_RETRY_DELAY", 0.0)
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"fake-audio")
+    with pytest.raises(RuntimeError, match="HTTP 402"):
+        transcription._upload(
+            "https://relay.example/v1/transcribe", "m-key", audio
+        )
+    assert calls["n"] == 1

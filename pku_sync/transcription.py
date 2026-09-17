@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,19 +59,36 @@ def _extract_audio(video: Path, out: Path) -> Path:
     return out
 
 
+_RETRY_DELAY = 2.0  # covers an edge/failover reconnect window; tests zero it
+
+
 def _upload(url: str, key: str, audio: Path) -> dict:
-    """POST the audio to the relay; the relay answers with the transcript."""
+    """POST the audio to the relay; the relay answers with the transcript.
+
+    One transport-level retry: a failover between relay hosts (the
+    no-perception switch, SERVICE_PLAN §1.7) kills the in-flight request
+    once, and that failure is absorbed here. HTTP status answers are
+    real answers (quota, auth) -- never retried.
+    """
     import httpx
 
-    try:
-        with httpx.Client(timeout=600.0) as client:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {key}"},
-                files={"audio": (audio.name, audio.read_bytes(), "audio/mp4")},
-            )
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"cloud transcription upload failed: {exc}") from exc
+    for attempt in (1, 2):
+        try:
+            with httpx.Client(timeout=600.0) as client:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {key}"},
+                    files={"audio": (audio.name, audio.read_bytes(), "audio/mp4")},
+                )
+            break
+        except httpx.TransportError as exc:
+            if attempt == 2:
+                raise RuntimeError(
+                    f"cloud transcription upload failed: {exc}"
+                ) from exc
+            time.sleep(_RETRY_DELAY)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"cloud transcription upload failed: {exc}") from exc
     if response.status_code != 200:
         raise RuntimeError(
             f"cloud transcription rejected the upload (HTTP {response.status_code}): "
