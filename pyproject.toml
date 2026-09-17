@@ -1,0 +1,40 @@
+[project]
+name = "pku-course-sync"
+version = "0.1.0"
+description = "Daily sync of PKU Teaching Network course materials and lecture recordings"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "cryptography>=42",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "rich>=13.7",
+    "textual>=0.79",
+    "beautifulsoup4>=4.12",
+    "mcp>=1.12,<2",
+    "faster-whisper>=1.0",
+    "opencv-python>=4.10",
+    "openai>=1.40",
+    # the localhost panel (pku_sync/panel/) is a core product feature (M1b)
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+pku-sync = "pku_sync.cli:app"
+pkutui = "pku_sync.cli:tui_cmd"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pku_sync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

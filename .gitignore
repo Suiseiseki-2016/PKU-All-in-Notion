@@ -1,0 +1,15 @@
+.env
+# no trailing slash: the venv may be a symlink to storage outside an
+# iCloud-synced folder (see docs/USER_GUIDE.md §7)
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest-basetemp/
+.ruff_cache/
+
+# synced course material and derived artifacts
+data/
+logs/
+*.mp4
+*.ts
