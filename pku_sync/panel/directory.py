@@ -350,6 +350,36 @@ def build_course_payload(course, data: DirectoryData, sync: dict) -> dict:
     }
 
 
+ACTIVITY_LIMIT = 3  # the dashboard's 最近动态 feed length
+
+
+def build_activity(data: DirectoryData) -> list[dict]:
+    """The newest indexed rows, as the dashboard's 最近动态 entries.
+
+    Derived entirely from the adapter's read: a row only appears once it
+    carries a real last-edited timestamp, and the serialized keys stay inside
+    the material allowlist (identity + course scope + type/status + updated).
+    """
+    rows: list[tuple] = []
+    for course in data.courses:
+        for item in data.materials_by_course.get(course.id, []):
+            if item.updated:
+                rows.append((item.updated, item.title, item, course))
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [
+        {
+            "id": item.id,
+            "url": item.url,
+            "title": item.title,
+            "course": course.title,
+            "type": item.type or UNDEFINED_TYPE_LABEL,
+            "status": item.status,
+            "updated": item.updated,
+        }
+        for _, _, item, course in rows[:ACTIVITY_LIMIT]
+    ]
+
+
 def build_directory_payload(data: DirectoryData, sync: dict) -> dict:
     indexed = sum(
         1
@@ -368,6 +398,7 @@ def build_directory_payload(data: DirectoryData, sync: dict) -> dict:
         "sync": dict(sync),
         "hub": build_hub_payload(data, sync),
         "stats": stats,
+        "activity": build_activity(data),
         "courses": [build_course_payload(course, data, sync) for course in data.courses],
     }
 
@@ -588,6 +619,8 @@ __all__ = [
     "MATERIAL_VIEW_ALL",
     "MATERIAL_VIEWS",
     "UNDEFINED_TYPE_LABEL",
+    "ACTIVITY_LIMIT",
+    "build_activity",
     "ASSOCIATION_NONE",
     "ASSOCIATION_PENDING",
     "ASSOCIATION_CONFIRMED",

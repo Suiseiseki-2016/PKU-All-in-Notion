@@ -198,6 +198,9 @@ def material_schema() -> dict:
     }
 
 
+DEFAULT_ROW_UPDATED = "2026-09-18T08:30:00.000Z"
+
+
 def material_row(
     row_id: str,
     *,
@@ -208,6 +211,7 @@ def material_row(
     source_path: str = SOURCE_PATH_VALUE,
     remarks: str = "",
     lecture_url: str = "",
+    updated: str = DEFAULT_ROW_UPDATED,
 ) -> dict:
     props: dict = {
         "资料": {"type": "title", "title": [{"plain_text": title}]},
@@ -225,7 +229,7 @@ def material_row(
         "object": "page",
         "id": row_id,
         "url": notion_url(row_id),
-        "last_edited_time": "2026-09-18T08:30:00.000Z",
+        "last_edited_time": updated,
         "parent": {"type": "database_id", "database_id": DB_INDEX},
         "properties": props,
     }
@@ -364,6 +368,8 @@ def build_panel_workspace() -> FakeWorkspace:
     }
     # 计算机网络 rows: explicit link (备注 URL → NET_L1, channel ii), inferred
     # subsections, and plain course-level materials.
+    # Distinct last-edited timestamps: the dashboard's 最近动态 feed is derived
+    # from them, so the seeds must have a real (verifiable) ordering.
     ws.rows[DB_INDEX] = [
         material_row(
             NET_ROWS[0],
@@ -372,6 +378,7 @@ def build_panel_workspace() -> FakeWorkspace:
             type_="课堂课件",
             status="已索引",
             remarks=f"关联讲次页：{notion_url(NET_L1)}",
+            updated="2026-09-18T01:12:00.000Z",
         ),
         material_row(
             NET_ROWS[1],
@@ -380,6 +387,7 @@ def build_panel_workspace() -> FakeWorkspace:
             type_="课堂课件",
             status="已索引",
             remarks=REMARKS_VALUE,
+            updated="2026-09-17T12:40:00.000Z",
         ),
         material_row(
             NET_ROWS[2],
@@ -387,6 +395,7 @@ def build_panel_workspace() -> FakeWorkspace:
             course="计算机网络",
             type_="讲义",
             status="待阅读",
+            updated="2026-09-18T03:05:00.000Z",
         ),
         material_row(
             NET_ROWS[3],
@@ -394,6 +403,7 @@ def build_panel_workspace() -> FakeWorkspace:
             course="计算机网络",
             type_="课程手册",
             status="已索引",
+            updated="2026-09-16T02:00:00.000Z",
         ),
         material_row(
             NET_ROWS[4],
@@ -401,6 +411,7 @@ def build_panel_workspace() -> FakeWorkspace:
             course="计算机网络",
             type_="复习资料",
             status="重点",
+            updated="2026-09-15T02:00:00.000Z",
         ),
         material_row(
             DEV_ROWS[0],
@@ -409,6 +420,7 @@ def build_panel_workspace() -> FakeWorkspace:
             type_="讲义",
             status="已索引",
             source_path=SOURCE_PATH_VALUE,
+            updated="2026-09-18T06:20:00.000Z",
         ),
         material_row(
             DEV_ROWS[1],
@@ -418,6 +430,7 @@ def build_panel_workspace() -> FakeWorkspace:
             status="待确认",
             source_path=SOURCE_PATH_VALUE,
             remarks=REMARKS_VALUE,
+            updated="2026-09-14T09:00:00.000Z",
         ),
         material_row(
             CS_ROW,
@@ -425,6 +438,7 @@ def build_panel_workspace() -> FakeWorkspace:
             course="计算概论B",
             type_="课程手册",
             status="已索引",
+            updated="2026-09-13T09:00:00.000Z",
         ),
     ]
     return ws

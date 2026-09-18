@@ -27,8 +27,29 @@
     directory: null,
     directoryError: "",
     directoryLoading: false,
+    view: "dashboard",
+    courseId: null,
+    lectureId: null,
+    materialView: "lecture",
+    materials: null,
+    materialsError: "",
+    materialsLoading: false,
+    overview: null,
+    overviewError: "",
+    overviewLoading: false,
     notice: "",
     noticeKind: "hint"
+  };
+
+  var GLYPH = {
+    home: "⌂",
+    courses: "▦",
+    sync: "↻",
+    notes: "✎",
+    arrow: "→",
+    launch: "↗",
+    book: "▤",
+    quiz: "✓"
   };
 
   function esc(value) {
@@ -39,23 +60,139 @@
       .replace(/"/g, "&quot;");
   }
 
+  function template(text, values) {
+    return String(text === null || text === undefined ? "" : text).replace(
+      /\{(\w+)\}/g,
+      function (whole, key) {
+        return values && values[key] !== undefined ? String(values[key]) : "";
+      }
+    );
+  }
+
+  /* Multi-line approved copy keeps its line breaks without allowing markup. */
+  function lines(text) {
+    return String(text === null || text === undefined ? "" : text)
+      .split("\n")
+      .map(esc)
+      .join("<br>");
+  }
+
+  function glyph(name) {
+    return '<span aria-hidden="true">' + esc(GLYPH[name] || "·") + "</span>";
+  }
+
   function button(label, action, options) {
     var opts = options || {};
     var classes = ["btn"];
     if (opts.primary) classes.push("btn-primary");
     if (opts.small) classes.push("btn-small");
     if (opts.quiet) classes.push("btn-quiet");
+    var extra = "";
+    if (opts.attrs) {
+      for (var key in opts.attrs) {
+        if (Object.prototype.hasOwnProperty.call(opts.attrs, key)) {
+          extra += " " + key + '="' + esc(opts.attrs[key]) + '"';
+        }
+      }
+    }
     return (
       '<button type="button" class="' +
       classes.join(" ") +
       '" data-action="' +
       esc(action) +
       '"' +
+      extra +
       (opts.disabled ? " disabled" : "") +
       ">" +
+      (opts.icon ? glyph(opts.icon) : "") +
       esc(label) +
       "</button>"
     );
+  }
+
+  /* -- time readouts (never a frozen timestamp in the markup) ------------- */
+
+  function parseTime(value) {
+    if (!value) return null;
+    var when = new Date(value);
+    return isNaN(when.getTime()) ? null : when;
+  }
+
+  function relativeParts(iso) {
+    var copy = COPY.time;
+    var when = parseTime(iso);
+    if (!when) return { value: copy.never, unit: "" };
+    var diff = Date.now() - when.getTime();
+    if (diff < 0) diff = 0;
+    var minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return { value: copy.just_now, unit: "" };
+    if (minutes < 60) return { value: String(minutes), unit: copy.minutes };
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) return { value: String(hours), unit: copy.hours };
+    return { value: String(Math.floor(hours / 24)), unit: copy.days };
+  }
+
+  function relativeText(iso) {
+    var parts = relativeParts(iso);
+    return parts.unit ? parts.value + " " + parts.unit : parts.value;
+  }
+
+  function sameDay(left, right) {
+    return (
+      left.getFullYear() === right.getFullYear() &&
+      left.getMonth() === right.getMonth() &&
+      left.getDate() === right.getDate()
+    );
+  }
+
+  function friendlyTime(iso) {
+    var when = parseTime(iso);
+    if (!when) return "";
+    var pad = function (value) {
+      return (value < 10 ? "0" : "") + value;
+    };
+    var stamp = pad(when.getHours()) + ":" + pad(when.getMinutes());
+    var now = new Date();
+    if (sameDay(when, now)) return COPY.time.today + " " + stamp;
+    if (sameDay(when, new Date(now.getTime() - 86400000))) {
+      return COPY.time.yesterday + " " + stamp;
+    }
+    return (
+      template(COPY.time.date, { month: when.getMonth() + 1, day: when.getDate() }) +
+      " " +
+      stamp
+    );
+  }
+
+  function dayLabel(value) {
+    var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+    if (!match) return "";
+    return template(COPY.time.full_date, {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3])
+    });
+  }
+
+  /* The lecture hint's topic: the scheduled day/period when Notion's title
+     carries them, otherwise the title's own scope tail — never invented. */
+  function lectureTopic(lecture) {
+    var bits = [];
+    var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(lecture.date || ""));
+    if (match) {
+      bits.push(
+        template(COPY.time.date, { month: Number(match[2]), day: Number(match[3]) })
+      );
+    }
+    if (lecture.period) bits.push(lecture.period);
+    if (bits.length) return bits.join(" ");
+    var parts = String(lecture.title || "").split("·");
+    var tail = parts.length > 1 ? parts.slice(1).join("·") : "";
+    tail = tail
+      .replace(/[（(][^）)]*[）)]/g, "")
+      .replace(/[》」』]/g, "")
+      .trim();
+    return tail || lecture.scope || "";
   }
 
   function brand(compact) {
@@ -118,6 +255,57 @@
         state.directoryError =
           (result.body && result.body.detail) || COPY.directory.error.title;
       }
+    });
+  }
+
+  function materialsUrl(courseId, view, lectureId) {
+    var url =
+      "/api/courses/" + encodeURIComponent(courseId) + "/materials?view=" +
+      encodeURIComponent(view);
+    if (view === "lecture") url += "&lecture_id=" + encodeURIComponent(lectureId || "");
+    return url;
+  }
+
+  function loadMaterials() {
+    if (!state.courseId) return Promise.resolve();
+    if (state.materialView === "lecture" && !state.lectureId) return Promise.resolve();
+    state.materialsLoading = true;
+    state.materialsError = "";
+    render();
+    return requestJson(
+      materialsUrl(state.courseId, state.materialView, state.lectureId)
+    ).then(function (result) {
+      state.materialsLoading = false;
+      if (result.ok && result.body) {
+        state.materials = result.body;
+        state.materialsError = "";
+      } else {
+        state.materials = null;
+        state.materialsError =
+          (result.body && result.body.detail) || COPY.lecture.materials.error;
+      }
+      render();
+    });
+  }
+
+  /* The course screen's 课程资料概览 rows ARE the 按资料类型 groups, so the
+     overview and the type view can never disagree about a count. */
+  function loadOverview() {
+    if (!state.courseId) return Promise.resolve();
+    state.overviewLoading = true;
+    state.overviewError = "";
+    render();
+    return requestJson(materialsUrl(state.courseId, "type")).then(function (result) {
+      state.overviewLoading = false;
+      if (result.ok && result.body) {
+        state.overview = result.body;
+        state.overviewError = "";
+      } else {
+        state.overview = null;
+        state.overviewError =
+          (result.body && result.body.detail) || COPY.course.materials.error;
+      }
+      render();
     });
   }
 
@@ -281,8 +469,13 @@
       brand(false) +
       '<p class="side-kicker">' +
       esc(COPY.nav.kicker) +
-      '</p><nav class="nav"><button type="button" class="active" data-nav="dashboard" aria-current="page">' +
-      '<span class="nav-icon" aria-hidden="true">⌂</span>' +
+      '</p><nav class="nav"><button type="button" class="' +
+      (state.view === "dashboard" ? "active" : "") +
+      '" data-nav="dashboard" data-action="open-dashboard"' +
+      (state.view === "dashboard" ? ' aria-current="page"' : "") +
+      '><span class="nav-icon" aria-hidden="true">' +
+      esc(GLYPH.home) +
+      "</span>" +
       esc(COPY.nav.dashboard) +
       '</button></nav><div class="sidebar-spacer"></div>' +
       connectionCard() +
@@ -350,21 +543,96 @@
     );
   }
 
+  /* -- dashboard --------------------------------------------------------- */
+
+  function statCard(key, tone, symbol, label, value, unit, foot) {
+    return (
+      '<article class="stat-card ' +
+      tone +
+      '" data-stat="' +
+      esc(key) +
+      '"><div class="stat-top"><span>' +
+      esc(label) +
+      '</span><span class="stat-symbol" aria-hidden="true">' +
+      esc(GLYPH[symbol]) +
+      '</span></div><strong class="stat-value" data-field="value">' +
+      esc(value) +
+      (unit ? "<span>" + esc(unit) + "</span>" : "") +
+      '</strong><span class="stat-foot">' +
+      esc(foot) +
+      "</span></article>"
+    );
+  }
+
+  function statsSection() {
+    var stats = state.directory.stats;
+    var copy = COPY.dashboard.stats;
+    var sync = relativeParts(state.directory.sync.last_sync_at);
+    return (
+      '<section aria-labelledby="overview-title">' +
+      '<div class="section-label"><h2 id="overview-title">' +
+      esc(COPY.dashboard.overview.title) +
+      "</h2><p>" +
+      esc(COPY.dashboard.overview.note) +
+      '</p></div><div class="stats-grid">' +
+      statCard(
+        "lectures",
+        "green",
+        "book",
+        copy.lectures.label,
+        stats.lectures,
+        copy.lectures.unit,
+        template(copy.lectures.foot, { courses: stats.courses })
+      ) +
+      statCard(
+        "materials",
+        "blue",
+        "courses",
+        copy.materials.label,
+        stats.materials,
+        copy.materials.unit,
+        copy.materials.foot
+      ) +
+      statCard(
+        "sync",
+        "gold",
+        "sync",
+        copy.sync.label,
+        sync.value,
+        sync.unit,
+        copy.sync.foot
+      ) +
+      "</div></section>"
+    );
+  }
+
   function courseGrid() {
     var directory = state.directory;
+    var synced = relativeText(directory.sync.last_sync_at);
     var cards = directory.courses
       .map(function (course) {
-        var counts = COPY.directory.course_counts
-          .replace("{lectures}", String(course.counts.lectures))
-          .replace("{materials}", String(course.counts.materials));
+        var counts = template(COPY.directory.course_counts, {
+          lectures: course.counts.lectures,
+          materials: course.counts.materials,
+          synced: synced
+        });
         return (
-          '<article class="course-card"><span class="course-meta">' +
+          '<article class="course-card" data-course="' +
+          esc(course.id) +
+          '"><span class="course-icon" aria-hidden="true">' +
+          esc(GLYPH.book) +
+          '</span><div class="course-content"><span class="course-meta">' +
           esc(course.scope) +
           "</span><h3>" +
           esc(course.title) +
-          "</h3><p>" +
+          '</h3><p data-field="course-counts">' +
           esc(counts) +
-          "</p></article>"
+          "</p></div>" +
+          button(COPY.dashboard.course_action, "open-course", {
+            small: true,
+            attrs: { "data-course": course.id }
+          }) +
+          "</article>"
         );
       })
       .join("");
@@ -380,34 +648,551 @@
     );
   }
 
-  function dashboard() {
-    var connected = state.connection.connected;
-    var pill =
-      '<span class="sync-pill' +
-      (connected ? "" : " off") +
-      '" data-field="connection-status"><span class="status-dot" aria-hidden="true"></span>' +
-      esc(state.connection.status_label) +
-      "</span>";
-    var body;
-    if (!connected) body = disconnectedDirectoryState();
-    else if (state.directoryLoading) body = loadingDirectoryState();
-    else if (state.directoryError) body = errorDirectoryState();
-    else if (!state.directory || !state.directory.courses.length) body = emptyDirectoryState();
-    else body = courseGrid();
-    return shell(
+  function activitySection() {
+    var copy = COPY.dashboard.activity;
+    var entries = state.directory.activity || [];
+    if (!entries.length) return "";
+    var rows = entries
+      .map(function (entry) {
+        return (
+          '<div class="activity-item" data-activity="' +
+          esc(entry.id) +
+          '"><span class="activity-bullet" aria-hidden="true">' +
+          esc(GLYPH.sync) +
+          "</span><span><strong>" +
+          esc(template(copy.item, { title: entry.title })) +
+          "</strong><small>" +
+          esc(template(copy.detail, { course: entry.course, type: entry.type })) +
+          "</small></span><time>" +
+          esc(friendlyTime(entry.updated)) +
+          "</time></div>"
+        );
+      })
+      .join("");
+    return (
+      '<section aria-labelledby="activity-title">' +
+      '<div class="section-label"><h2 id="activity-title">' +
+      esc(copy.title) +
+      "</h2><p>" +
+      esc(copy.note) +
+      '</p></div><div class="activity-list">' +
+      rows +
+      "</div></section>"
+    );
+  }
+
+  function topPill() {
+    if (!state.connection.connected || !state.directory) {
+      return (
+        '<span class="sync-pill' +
+        (state.connection.connected ? "" : " off") +
+        '" data-field="connection-status"><span class="status-dot" aria-hidden="true"></span>' +
+        esc(state.connection.status_label) +
+        "</span>"
+      );
+    }
+    return (
+      '<span class="sync-pill" data-field="sync-pill">' +
+      '<span class="status-dot" aria-hidden="true"></span>' +
+      esc(
+        template(COPY.dashboard.sync_pill, {
+          relative: relativeText(state.directory.sync.last_sync_at)
+        })
+      ) +
+      "</span>"
+    );
+  }
+
+  function directoryBody() {
+    if (!state.connection.connected) return disconnectedDirectoryState();
+    if (state.directoryLoading) return loadingDirectoryState();
+    if (state.directoryError) return errorDirectoryState();
+    if (!state.directory || !state.directory.courses.length) {
+      return emptyDirectoryState();
+    }
+    return null;
+  }
+
+  function dashboardScreen() {
+    var fallback = directoryBody();
+    var body = fallback
+      ? fallback
+      : statsSection() + courseGrid() + activitySection();
+    return (
       '<div class="topline"><div><h1 class="page-title">' +
-        esc(COPY.directory.title) +
-        '</h1><p class="page-desc">' +
-        esc(COPY.directory.desc) +
-        '</p></div><div class="top-actions">' +
-        pill +
-        "</div></div>" +
-        body
+      esc(COPY.directory.title) +
+      '</h1><p class="page-desc">' +
+      esc(COPY.directory.desc) +
+      '</p></div><div class="top-actions">' +
+      topPill() +
+      (fallback
+        ? ""
+        : button(COPY.dashboard.sync_action, "reload-directory", {
+            primary: true,
+            icon: "sync"
+          })) +
+      "</div></div>" +
+      body
+    );
+  }
+
+  /* -- course detail ----------------------------------------------------- */
+
+  function currentCourse() {
+    if (!state.directory || !state.courseId) return null;
+    var courses = state.directory.courses;
+    for (var i = 0; i < courses.length; i += 1) {
+      if (courses[i].id === state.courseId) return courses[i];
+    }
+    return null;
+  }
+
+  function currentLecture() {
+    var course = currentCourse();
+    if (!course || !state.lectureId) return null;
+    for (var i = 0; i < course.lectures.length; i += 1) {
+      if (course.lectures[i].id === state.lectureId) return course.lectures[i];
+    }
+    return null;
+  }
+
+  function breadcrumb(trail) {
+    var parts = trail.map(function (item) {
+      if (!item.action) return "<span>" + esc(item.label) + "</span>";
+      var attrs = "";
+      if (item.course) attrs = ' data-course="' + esc(item.course) + '"';
+      return (
+        '<button type="button" data-action="' +
+        esc(item.action) +
+        '"' +
+        attrs +
+        ">" +
+        esc(item.label) +
+        "</button>"
+      );
+    });
+    return (
+      '<div class="breadcrumb">' +
+      parts.join('<span aria-hidden="true">/</span>') +
+      "</div>"
+    );
+  }
+
+  function lectureHint(lecture) {
+    var copy = COPY.course.lectures;
+    if (lecture.mapping_state !== "mapped") return copy.hint_unmapped;
+    return template(copy.hint_mapped, {
+      topic: lectureTopic(lecture),
+      count: lecture.counts.related_materials
+    });
+  }
+
+  function lectureList(course) {
+    var copy = COPY.course.lectures;
+    if (!course.lectures.length) {
+      return '<div class="empty-materials"><strong>' + esc(copy.empty) + "</strong></div>";
+    }
+    var items = course.lectures
+      .map(function (lecture) {
+        var number = String(lecture.number);
+        if (number.length < 2) number = "0" + number;
+        return (
+          '<button type="button" class="lecture-item" data-action="select-lecture" data-course="' +
+          esc(course.id) +
+          '" data-lecture="' +
+          esc(lecture.id) +
+          '"><span class="lecture-number">' +
+          esc(number) +
+          "</span><span><strong>" +
+          esc(lecture.title) +
+          '</strong><small data-field="lecture-hint">' +
+          esc(lectureHint(lecture)) +
+          '</small></span><span class="item-arrow" aria-hidden="true">' +
+          esc(GLYPH.arrow) +
+          "</span></button>"
+        );
+      })
+      .join("");
+    return '<div class="lecture-list">' + items + "</div>";
+  }
+
+  function materialOverview(course) {
+    var copy = COPY.course.materials;
+    var body;
+    if (state.overviewLoading) {
+      body =
+        '<div class="empty-materials" role="status" aria-busy="true"><strong>' +
+        esc(copy.loading) +
+        "</strong></div>";
+    } else if (state.overviewError) {
+      body =
+        '<div class="empty-materials" role="alert"><strong>' +
+        esc(state.overviewError) +
+        "</strong></div>";
+    } else {
+      var groups = (state.overview && state.overview.groups) || [];
+      body = groups.length
+        ? '<div class="material-summary">' +
+          groups
+            .map(function (group) {
+              return (
+                '<div class="material-summary-row" data-type="' +
+                esc(group.type) +
+                '"><span>' +
+                esc(group.type) +
+                "</span><strong>" +
+                esc(template(copy.row_unit, { count: group.count })) +
+                "</strong></div>"
+              );
+            })
+            .join("") +
+          "</div>"
+        : '<div class="empty-materials"><strong>' + esc(copy.empty) + "</strong></div>";
+    }
+    return (
+      '<aside class="panel" aria-labelledby="course-materials-title">' +
+      '<div class="section-label" style="margin-top:0"><h2 id="course-materials-title">' +
+      esc(copy.title) +
+      "</h2><p>" +
+      esc(copy.note) +
+      '</p></div><div class="material-summary-total"><strong data-field="materials-total">' +
+      esc(course.counts.materials) +
+      "</strong><span>" +
+      esc(copy.total_unit) +
+      "</span></div>" +
+      body +
+      '<p class="material-source-note">' +
+      lines(copy.source_note) +
+      "</p></aside>"
+    );
+  }
+
+  function courseScreen() {
+    var course = currentCourse();
+    if (!course) return dashboardScreen();
+    var copy = COPY.course;
+    return (
+      breadcrumb([
+        { label: copy.breadcrumb_home, action: "open-dashboard" },
+        { label: copy.breadcrumb_courses }
+      ]) +
+      '<section class="course-hero" aria-labelledby="course-title"><div>' +
+      '<span class="course-kicker">' +
+      esc(template(copy.kicker, { scope: course.scope })) +
+      '</span><h1 id="course-title">' +
+      esc(course.title) +
+      "</h1><p>" +
+      esc(copy.desc) +
+      '</p></div><div class="hero-actions">' +
+      button(copy.sync_action, "reload-directory", { primary: true, icon: "sync" }) +
+      "</div></section>" +
+      '<div class="course-layout"><section class="panel" aria-labelledby="lecture-list-title">' +
+      '<div class="section-label" style="margin-top:0"><h2 id="lecture-list-title">' +
+      esc(copy.lectures.title) +
+      "</h2><p>" +
+      esc(template(copy.lectures.note, { lectures: course.counts.lectures })) +
+      "</p></div>" +
+      lectureList(course) +
+      "</section>" +
+      materialOverview(course) +
+      "</div>"
+    );
+  }
+
+  /* -- lecture detail ---------------------------------------------------- */
+
+  function infoRow(label, value) {
+    return (
+      '<div class="material-summary-row" data-row="' +
+      esc(label) +
+      '"><span>' +
+      esc(label) +
+      "</span><strong>" +
+      esc(value) +
+      "</strong></div>"
+    );
+  }
+
+  function lectureInfo(lecture) {
+    var copy = COPY.lecture.info;
+    var mapped = lecture.mapping_state === "mapped";
+    var related =
+      template(copy.related_value, { count: lecture.counts.related_materials }) +
+      (mapped ? "" : copy.related_pending_suffix);
+    var page =
+      lecture.page_state === "ready"
+        ? copy.page_ready + (mapped ? "" : copy.page_pending_suffix)
+        : copy.page_missing;
+    return (
+      '<article class="panel" aria-labelledby="lecture-info-title">' +
+      '<h2 id="lecture-info-title">' +
+      esc(copy.title) +
+      '</h2><div class="material-summary">' +
+      infoRow(copy.date, dayLabel(lecture.date) || copy.unknown) +
+      infoRow(copy.duration, copy.unknown) +
+      infoRow(copy.sync, lecture.sync_label) +
+      infoRow(copy.related, related) +
+      infoRow(copy.page, page) +
+      '</div><p class="material-source-note">' +
+      lines(copy.source_note) +
+      "</p></article>"
+    );
+  }
+
+  function launchPanel(lecture) {
+    var copy = COPY.lecture.launch;
+    var item = function (entry, kind) {
+      return (
+        '<div class="launch-item"><div><strong>' +
+        esc(entry.title) +
+        "</strong><small>" +
+        esc(entry.detail) +
+        "</small></div>" +
+        button(entry.action, "launch", {
+          small: true,
+          icon: kind === "notes" ? "notes" : "launch",
+          attrs: { "data-kind": kind, "data-target": lecture.id }
+        }) +
+        "</div>"
+      );
+    };
+    return (
+      '<aside class="panel" aria-labelledby="launch-title"><h2 id="launch-title">' +
+      esc(copy.title) +
+      '</h2><div class="launch-list">' +
+      item(copy.notes, "notes") +
+      item(copy.quiz, "quiz") +
+      '</div><p class="launch-hint">' +
+      esc(copy.hint) +
+      "</p></aside>"
+    );
+  }
+
+  function materialControls() {
+    var copy = COPY.lecture.materials;
+    var keys = ["lecture", "type", "all"];
+    return (
+      '<div class="material-controls" role="group" aria-label="' +
+      esc(copy.controls_label) +
+      '">' +
+      keys
+        .map(function (key) {
+          var active = state.materialView === key;
+          return (
+            '<button type="button" class="material-view' +
+            (active ? " active" : "") +
+            '" data-material-view="' +
+            key +
+            '" aria-pressed="' +
+            (active ? "true" : "false") +
+            '">' +
+            esc(copy.views[key]) +
+            "</button>"
+          );
+        })
+        .join("") +
+      "</div>"
+    );
+  }
+
+  function materialRow(item) {
+    var copy = COPY.lecture.materials;
+    var label = item.linked_to_lecture
+      ? copy.linked
+      : item.association_state === "待确认"
+      ? copy.pending
+      : copy.course_level;
+    var badge = item.status === "已索引" ? "indexed" : "pending";
+    return (
+      '<div class="material-row" data-material="' +
+      esc(item.id) +
+      '"><div class="material-title"><strong>' +
+      esc(item.title) +
+      "</strong><small>" +
+      esc(label) +
+      '</small></div><span class="material-type">' +
+      esc(item.type) +
+      "</span>" +
+      (item.status
+        ? '<span class="status-badge ' + badge + '">' + esc(item.status) + "</span>"
+        : "<span></span>") +
+      '<span class="material-source">' +
+      esc(template(copy.source, { source: item.source })) +
+      "</span>" +
+      button(copy.open, "launch", {
+        small: true,
+        icon: "launch",
+        attrs: { "data-kind": "material", "data-target": item.id }
+      }) +
+      "</div>"
+    );
+  }
+
+  function groupLabel(text) {
+    return '<p class="material-group-label">' + esc(text) + "</p>";
+  }
+
+  function materialsBody() {
+    var copy = COPY.lecture.materials;
+    if (state.materialsLoading) {
+      return (
+        '<div class="empty-materials" role="status" aria-busy="true" data-state="loading"><strong>' +
+        esc(copy.loading) +
+        "</strong></div>"
+      );
+    }
+    if (state.materialsError) {
+      return (
+        '<div class="empty-materials" role="alert" data-state="error"><strong>' +
+        esc(state.materialsError) +
+        "</strong></div>"
+      );
+    }
+    var payload = state.materials;
+    if (!payload) return "";
+    if (payload.view === "lecture") {
+      if (!payload.mapped) {
+        var unmapped = copy.unmapped;
+        return (
+          '<div class="empty-materials" data-state="unmapped"><strong>' +
+          esc(unmapped.title) +
+          "</strong>" +
+          esc(unmapped.body) +
+          '<div style="margin-top:12px">' +
+          button(unmapped.action, "open-course", {
+            small: true,
+            attrs: { "data-course": state.courseId }
+          }) +
+          "</div></div>"
+        );
+      }
+      var confirmed = payload.confirmed || [];
+      var inferred = payload.inferred || [];
+      if (!confirmed.length && !inferred.length) {
+        return (
+          '<div class="empty-materials" data-state="empty"><strong>' +
+          esc(copy.empty.title) +
+          "</strong>" +
+          esc(copy.empty.body) +
+          "</div>"
+        );
+      }
+      return (
+        '<div class="material-list" aria-live="polite">' +
+        confirmed.map(materialRow).join("") +
+        (inferred.length
+          ? groupLabel(template(copy.pending_group, { count: inferred.length })) +
+            inferred.map(materialRow).join("")
+          : "") +
+        "</div>"
+      );
+    }
+    if (payload.view === "type") {
+      var groups = payload.groups || [];
+      if (!groups.length) {
+        return (
+          '<div class="empty-materials" data-state="empty"><strong>' +
+          esc(copy.empty.title) +
+          "</strong>" +
+          esc(copy.empty.body) +
+          "</div>"
+        );
+      }
+      return (
+        '<div class="material-list" aria-live="polite">' +
+        groups
+          .map(function (group) {
+            return (
+              groupLabel(
+                template(copy.group, { type: group.type, count: group.count })
+              ) + group.items.map(materialRow).join("")
+            );
+          })
+          .join("") +
+        "</div>"
+      );
+    }
+    var items = payload.items || [];
+    if (!items.length) {
+      return (
+        '<div class="empty-materials" data-state="empty"><strong>' +
+        esc(copy.empty.title) +
+        "</strong>" +
+        esc(copy.empty.body) +
+        "</div>"
+      );
+    }
+    return (
+      '<div class="material-list" aria-live="polite">' +
+      items.map(materialRow).join("") +
+      "</div>"
+    );
+  }
+
+  function materialsPanel() {
+    var copy = COPY.lecture.materials;
+    return (
+      '<section class="materials-panel" aria-labelledby="related-materials-title">' +
+      '<div class="materials-heading"><div><h2 id="related-materials-title">' +
+      esc(copy.title) +
+      "</h2><p>" +
+      esc(copy.note) +
+      "</p></div>" +
+      materialControls() +
+      "</div>" +
+      materialsBody() +
+      '<p class="materials-hint">' +
+      esc(copy.hint) +
+      "</p></section>"
+    );
+  }
+
+  function lectureScreen() {
+    var course = currentCourse();
+    var lecture = currentLecture();
+    if (!course) return dashboardScreen();
+    if (!lecture) return courseScreen();
+    var copy = COPY.lecture;
+    return (
+      breadcrumb([
+        { label: COPY.course.breadcrumb_home, action: "open-dashboard" },
+        { label: course.title, action: "open-course", course: course.id },
+        { label: lecture.title }
+      ]) +
+      '<section class="detail-hero" aria-labelledby="lecture-title"><div>' +
+      '<span class="lecture-status" data-field="lecture-sync">' +
+      '<span class="status-dot" aria-hidden="true"></span>' +
+      esc(lecture.sync_label) +
+      '</span><h1 id="lecture-title">' +
+      esc(lecture.title) +
+      "</h1><p>" +
+      lines(template(copy.desc, { course: course.title, scope: course.scope })) +
+      '</p></div><div class="hero-actions">' +
+      button(copy.open_lecture, "launch", {
+        primary: true,
+        icon: "launch",
+        attrs: { "data-kind": "lecture", "data-target": lecture.id }
+      }) +
+      "</div></section>" +
+      '<div class="detail-grid">' +
+      lectureInfo(lecture) +
+      launchPanel(lecture) +
+      "</div>" +
+      materialsPanel()
     );
   }
 
   function render() {
-    app.innerHTML = state.activated ? dashboard() : onboarding();
+    if (!state.activated) {
+      app.innerHTML = onboarding();
+      return;
+    }
+    var screen;
+    if (directoryBody()) screen = dashboardScreen();
+    else if (state.view === "course") screen = courseScreen();
+    else if (state.view === "lecture") screen = lectureScreen();
+    else screen = dashboardScreen();
+    app.innerHTML = shell(screen);
   }
 
   function showToast(message) {
@@ -458,6 +1243,75 @@
         render();
         showToast(COPY.onboarding.activated_toast);
       });
+    });
+  }
+
+  /* -- navigation -------------------------------------------------------- */
+
+  function openDashboard() {
+    state.view = "dashboard";
+    state.lectureId = null;
+    state.materials = null;
+    state.materialsError = "";
+    render();
+  }
+
+  function openCourse(courseId) {
+    state.view = "course";
+    state.courseId = courseId || state.courseId;
+    state.overview = null;
+    state.overviewError = "";
+    render();
+    return loadOverview();
+  }
+
+  function selectLecture(courseId, lectureId) {
+    state.view = "lecture";
+    state.courseId = courseId || state.courseId;
+    state.lectureId = lectureId;
+    // selecting a lecture ALWAYS lands on 按讲次 — including re-selection
+    // after the material view was switched
+    state.materialView = "lecture";
+    state.materials = null;
+    state.materialsError = "";
+    render();
+    return loadMaterials();
+  }
+
+  function setMaterialView(view) {
+    if (state.materialView === view) return Promise.resolve();
+    state.materialView = view;
+    state.materials = null;
+    render();
+    return loadMaterials();
+  }
+
+  function syncNow() {
+    return loadDirectory().then(function () {
+      render();
+      if (state.view === "course") return loadOverview();
+      if (state.view === "lecture") return loadMaterials();
+      return null;
+    });
+  }
+
+  function launch(kind, targetId) {
+    return requestJson("/api/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_id: targetId,
+        course_id: state.courseId
+      })
+    }).then(function (result) {
+      if (result.ok && result.body && result.body.url) {
+        showToast(COPY.launch[kind] || COPY.launch.lecture);
+        // the stored identity is opened as-is; no URL is ever built locally
+        var opened = window.open(result.body.url, "_blank", "noopener");
+        if (!opened) window.location.assign(result.body.url);
+        return;
+      }
+      showToast((result.body && result.body.detail) || COPY.launch.failed);
     });
   }
 
@@ -528,7 +1382,19 @@
     if (action === "activate") activate();
     else if (action === "revoke-notion") disconnectNotion();
     else if (action === "connect-notion") connectNotion();
-    else if (action === "reload-directory") loadDirectory().then(render);
+    else if (action === "reload-directory") syncNow();
+    else if (action === "open-dashboard") openDashboard();
+    else if (action === "open-course") openCourse(target.dataset.course);
+    else if (action === "select-lecture") {
+      selectLecture(target.dataset.course, target.dataset.lecture);
+    } else if (action === "launch") {
+      launch(target.dataset.kind, target.dataset.target);
+    }
+  });
+
+  document.addEventListener("click", function (event) {
+    var view = event.target.closest("[data-material-view]");
+    if (view) setMaterialView(view.dataset.materialView);
   });
 
   document.addEventListener("submit", function (event) {
