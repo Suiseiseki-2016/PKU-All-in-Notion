@@ -45,7 +45,7 @@ uv sync --all-extras
 uv run pku-sync setup         # 教学网账号 → agent 宿主 → Notion OAuth
 ```
 
-`uv run pku-sync setup` 把 PKU 账号和 `OPENAI_API_KEY` 写进 `.env`，并为所选 agent 宿主（Factory / Claude Code / Codex，`.env` 的 `AGENT_HOST`）注册两个 MCP server：官方 Notion MCP 与本包的只读课程 MCP。Notion 授权由宿主管理（浏览器点一次「允许」，凭证存宿主自己的 keyring）——项目不打包任何 client secret，用户也不需要复制 token。其余高级配置仍可手改 `.env`（全部可选项见 `.env.example`）：`DATA_DIR`（数据根目录，建议绝对路径）、`COURSE_ALLOWLIST/DENYLIST`、`COURSE_TERM`、`WHISPER_MODEL/DEVICE/COMPUTE_TYPE`、`DELETE_VIDEO_AFTER_PROCESSING`。
+`uv run pku-sync setup` 把 PKU 账号和 `OPENAI_API_KEY` 写进 `.env`，并为所选 agent 宿主（Factory / Claude Code / Codex，`.env` 的 `AGENT_HOST`）注册两个 MCP server：官方 Notion MCP 与本包的只读课程 MCP。Notion 授权由宿主管理（浏览器点一次「允许」，凭证存宿主自己的 keyring）——项目不打包任何 client secret，用户也不需要复制 token。首次打开 `uv run pku-sync panel` 后输入平台兑换码，面板会自动启用云端转写并把会话仅保存到本机 `.env`。其余高级配置仍可手改 `.env`（全部可选项见 `.env.example`）：`DATA_DIR`（数据根目录，建议绝对路径）、`COURSE_ALLOWLIST/DENYLIST`、`COURSE_TERM`、`WHISPER_MODEL/DEVICE/COMPUTE_TYPE`、`DELETE_VIDEO_AFTER_PROCESSING`。
 
 日常启动不需要激活虚拟环境，也不需要 profile 函数、包装器、`UV_NO_SYNC` 或 `--no-sync`：
 
