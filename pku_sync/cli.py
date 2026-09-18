@@ -804,6 +804,16 @@ def panel_cmd(
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="不自动打开浏览器")
     ] = False,
+    fake: Annotated[
+        bool, typer.Option("--fake", help="用内置演示数据启动（不需要连接 Notion）")
+    ] = False,
+    fake_variant: Annotated[
+        str,
+        typer.Option(
+            "--fake-variant",
+            help="演示数据变体：normal / slow / fault / fault-launch（仅 --fake）",
+        ),
+    ] = "normal",
 ) -> None:
     """启动 localhost 状态面板（server extra，只绑 127.0.0.1，8791→8792→8793 首个空闲）。"""
     import threading
@@ -815,6 +825,21 @@ def panel_cmd(
     from .panel.webapi import create_app
 
     host = "127.0.0.1"  # docs/SERVICE_PLAN.md §5.3：本地面板只绑回环地址
+    # The student directory service (real adapter by default; the seeded-fake
+    # mode for browser verification) is shared by the directory API routes.
+    # Built before binding so an invalid fake variant fails cleanly.
+    if fake:
+        from .panel.fake_directory import build_fake_directory_service
+
+        try:
+            directory_service = build_fake_directory_service(variant=fake_variant)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+    else:
+        from .panel.directory import make_directory_service
+
+        directory_service = make_directory_service()
     try:
         sock, bound_port = bind_panel(port)
     except PanelPortError as exc:
@@ -829,7 +854,12 @@ def panel_cmd(
     # Serve on the pre-bound socket (the port we probed is the port uvicorn
     # binds — never a check-then-rebind race, never an arbitrary port).
     uvicorn.Server(
-        uvicorn.Config(create_app(), host=host, port=bound_port, log_level="warning")
+        uvicorn.Config(
+            create_app(directory_service=directory_service),
+            host=host,
+            port=bound_port,
+            log_level="warning",
+        )
     ).run(sockets=[sock])
 
 

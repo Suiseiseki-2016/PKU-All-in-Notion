@@ -235,18 +235,33 @@ setInterval(poll, 3000);
 </html>"""
 
 
-def create_app(settings=None, runner: JobRunner | None = None) -> FastAPI:
-    """Build the panel app; every piece is injectable for tests."""
+def create_app(settings=None, runner: JobRunner | None = None, directory_service=None) -> FastAPI:
+    """Build the panel app; every piece is injectable for tests.
+
+    ``directory_service`` is the student directory service (real adapter by
+    default, seeded-fake for ``pku-sync panel --fake``). It is attached here
+    so the directory/sync/materials/launch routes share one service and its
+    honest sync state.
+    """
     if settings is None:
         from ..config import settings as default_settings
 
         settings = default_settings
     if runner is None:
         runner = make_runner(settings)
+    if directory_service is None:
+        from .directory import make_directory_service
+
+        directory_service = make_directory_service(settings)
 
     app = FastAPI(title="pku-sync panel", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.runner = runner
+    app.state.directory_service = directory_service
+
+    from .directory_api import add_directory_routes
+
+    add_directory_routes(app, directory_service)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
