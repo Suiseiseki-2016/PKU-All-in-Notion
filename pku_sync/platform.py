@@ -56,12 +56,13 @@ def activate(code: str, settings) -> dict:
 
 def quota(settings) -> dict:
     """Get the current cloud transcription balance without exposing the token."""
-    if not settings.platform_token:
+    token = (settings.platform_token or "").strip()
+    if not token:
         return {"active": False}
     try:
         response = httpx.get(
             _endpoint(settings.cloud_transcribe_url, "/v1/quota"),
-            headers={"Authorization": f"Bearer {settings.platform_token}"},
+            headers={"Authorization": f"Bearer {token}"},
             timeout=15,
         )
     except httpx.HTTPError:
@@ -69,8 +70,13 @@ def quota(settings) -> dict:
     if response.status_code != 200:
         return {"active": True, "available": False}
     payload = response.json()
-    return {
+    result = {
         "active": True,
         "available": True,
         "transcribe_seconds_remaining": payload.get("transcribe_seconds_remaining"),
     }
+    # LLM points surface alongside transcription seconds when the relay
+    # provides them (it always does); a missing key is never fabricated.
+    if payload.get("llm_points_remaining") is not None:
+        result["llm_points_remaining"] = payload.get("llm_points_remaining")
+    return result

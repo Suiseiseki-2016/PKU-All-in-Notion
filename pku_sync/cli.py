@@ -797,22 +797,40 @@ def automate_cmd(
 
 @app.command(name="panel")
 def panel_cmd(
-    port: Annotated[int, typer.Option("--port", help="面板端口")] = 8787,
-    no_browser: Annotated[bool, typer.Option("--no-browser", help="不自动打开浏览器")] = False,
+    port: Annotated[
+        int,
+        typer.Option("--port", help="首选面板端口：8791、8792 或 8793（被占用时自动选下一个）"),
+    ] = 8791,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="不自动打开浏览器")
+    ] = False,
 ) -> None:
-    """启动 localhost 状态面板（server extra，只绑 127.0.0.1）。"""
+    """启动 localhost 状态面板（server extra，只绑 127.0.0.1，8791→8792→8793 首个空闲）。"""
     import threading
     import webbrowser
 
     import uvicorn
 
+    from .panel.ports import PanelPortError, bind_panel
     from .panel.webapi import create_app
 
     host = "127.0.0.1"  # docs/SERVICE_PLAN.md §5.3：本地面板只绑回环地址
+    try:
+        sock, bound_port = bind_panel(port)
+    except PanelPortError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    # The chosen port is surfaced in startup output; uvicorn's own banner is
+    # suppressed at warning level, so this line is the user-facing proof.
+    console.print(f"[green]面板已启动[/green]：http://{host}:{bound_port}/")
     if not no_browser:
-        url = f"http://{host}:{port}/"
+        url = f"http://{host}:{bound_port}/"
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+    # Serve on the pre-bound socket (the port we probed is the port uvicorn
+    # binds — never a check-then-rebind race, never an arbitrary port).
+    uvicorn.Server(
+        uvicorn.Config(create_app(), host=host, port=bound_port, log_level="warning")
+    ).run(sockets=[sock])
 
 
 @app.command(name="tui")
