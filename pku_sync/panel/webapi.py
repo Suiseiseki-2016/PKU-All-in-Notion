@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from ..pipeline import collect_jobs, recording_stage
@@ -86,12 +86,15 @@ def _status_payload(settings, runner: JobRunner) -> dict:
         "daily": latest_daily(settings.data_dir / "logs"),
         "recordings": recording_status(settings.data_dir),
         "notion": notion_reports(settings.data_dir / "logs"),
+        "platform_active": bool(getattr(settings, "platform_token", "")),
     }
 
 
 def render_status(payload: dict) -> str:
     """The status area, as one HTML fragment (also embedded on first load)."""
     parts: list[str] = []
+    if payload["platform_active"]:
+        parts.append('<div class="cloud-ok">云端转写已启用</div>')
     running = payload["running"]
     if running:
         parts.append(
@@ -165,38 +168,43 @@ _PAGE = """<!doctype html>
 <title>PKU All in Notion 状态面板</title>
 <style>
  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 2rem auto;
-        max-width: 60rem; background: #111418; color: #e8e8e8; }
- h1 { font-size: 1.4rem; }
- button { padding: .55rem 1.1rem; margin-right: .8rem; font-size: .95rem;
-          cursor: pointer; border-radius: .35rem; border: 1px solid #444;
-          background: #1d232b; color: #e8e8e8; }
- button:hover { background: #2a3340; }
- .running { color: #ffd166; } .dim { color: #7a828c; }
+        max-width: 64rem; background: #f6f8fb; color: #1d2939; }
+ h1 { font-size: 1.7rem; margin-bottom: .2rem; } .sub { color: #667085; }
+ button { padding: .65rem 1rem; margin-right: .5rem; font-size: .95rem;
+          cursor: pointer; border-radius: .5rem; border: 0; background: #175cd3; color: white; }
+ button:hover { background: #1849a9; }
+ .card { background: white; padding: 1.2rem; border-radius: .8rem; margin: 1rem 0;
+         box-shadow: 0 1px 3px #10182818; }
+ .running { color: #b54708; } .dim { color: #667085; } .cloud-ok { color: #067647; font-weight: 600; }
  table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
- td, th { border-bottom: 1px solid #2b3038; padding: .32rem .6rem;
+ td, th { border-bottom: 1px solid #eaecf0; padding: .48rem .6rem;
           text-align: left; font-size: .92rem; }
- tr.course td { font-weight: 600; background: #181d23; }
- pre { white-space: pre-wrap; background: #181d23; padding: .8rem;
+ tr.course td { font-weight: 600; background: #f9fafb; }
+ pre { white-space: pre-wrap; background: #f9fafb; padding: .8rem;
        border-radius: .4rem; font-size: .85rem; }
  details { margin-top: 1rem; }
  h2.sec { margin: 1.6rem 0 .4rem; font-size: 1.05rem; }
  .op { padding: .18rem .55rem; margin-right: .3rem; font-size: .8rem;
        border-radius: .3rem; border: 1px solid #3a4149; background: #161b21;
        color: #7a828c; cursor: not-allowed; }
- .quota { margin-top: .6rem; color: #7a828c; font-size: .85rem; }
+ .quota { margin-top: .6rem; color: #475467; font-size: .95rem; }
  .rep { margin-top: .4rem; }
  button:disabled { opacity: .55; }
 </style>
 </head>
 <body>
-<h1>PKU All in Notion 状态面板</h1>
-<div id="actions">
+<h1>PKU All in Notion</h1><div class="sub">课程资料、课堂录像与学习笔记，都在这里。</div>
+<div class="card" id="activation">
+ <b>云端转写</b><div class="quota" id="quota">正在检查账户状态…</div>
+ <div id="activate-form"><input id="code" placeholder="输入兑换码" autocomplete="off">
+ <button onclick="activate()">激活云端转写</button></div>
+</div>
+<div class="card" id="actions">
  <button onclick="act('daily')">跑 daily（同步 → 下载 → 转写 → 简报）</button>
  <button onclick="act('automate')">跑 automate（daily + Notion 晨检/建页）</button>
  <span id="msg"></span>
 </div>
-<div class="quota">云端配额：未连接平台 —— M2 接入后显示 转写分钟 / LLM 配额（账号制，用户不持有任何 key）</div>
-<div id="status">__STATUS__</div>
+<div class="card" id="status">__STATUS__</div>
 <script>
 async function act(kind) {
   const r = await fetch('/actions/' + kind, {method: 'POST'});
@@ -204,10 +212,23 @@ async function act(kind) {
       r.ok ? '已开始' : (r.status === 409 ? '上一个任务还在跑' : '触发失败');
   poll();
 }
+async function quota() {
+  const r = await fetch('/api/platform/quota'); const p = await r.json();
+  const el = document.getElementById('quota');
+  if (!p.active) { el.textContent = '还没有激活。输入兑换码后可使用云端转写。'; return; }
+  document.getElementById('activate-form').style.display = 'none';
+  el.textContent = p.available ? ('剩余 ' + Math.floor((p.transcribe_seconds_remaining || 0) / 60) + ' 分钟转写额度') : '账户已激活，暂时无法读取额度。';
+}
+async function activate() {
+  const r = await fetch('/api/platform/activate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:document.getElementById('code').value})});
+  const p = await r.json(); document.getElementById('quota').textContent = r.ok ? ('激活成功，剩余 ' + Math.floor(p.transcribe_seconds_remaining / 60) + ' 分钟。') : (p.detail || '激活失败');
+  if (r.ok) { document.getElementById('activate-form').style.display='none'; poll(); }
+}
 async function poll() {
   const r = await fetch('/partials/status');
   document.getElementById('status').innerHTML = await r.text();
 }
+quota();
 setInterval(poll, 3000);
 </script>
 </body>
@@ -238,6 +259,21 @@ def create_app(settings=None, runner: JobRunner | None = None) -> FastAPI:
     @app.get("/api/status")
     def status_json() -> dict:
         return _status_payload(settings, runner)
+
+    @app.get("/api/platform/quota")
+    def platform_quota() -> dict:
+        from ..platform import quota
+
+        return quota(settings)
+
+    @app.post("/api/platform/activate")
+    def platform_activate(code: str = Body(..., embed=True)) -> dict:
+        from ..platform import PlatformError, activate
+
+        try:
+            return activate(code, settings)
+        except PlatformError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/actions/{kind}")
     def trigger(kind: str) -> dict:

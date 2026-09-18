@@ -34,7 +34,12 @@ class FakeRunner:
 
 
 def make_settings(tmp_path) -> SimpleNamespace:
-    return SimpleNamespace(data_dir=tmp_path)
+    return SimpleNamespace(
+        data_dir=tmp_path,
+        cloud_transcribe_url="https://pku.aeoluswu.info/v1/transcribe",
+        platform_token="",
+        transcription_backend="local",
+    )
 
 
 def write_index(tmp_path) -> None:
@@ -60,10 +65,9 @@ def test_index_page_renders(tmp_path):
     assert "跑 daily" in text
     assert "认知心理学" in text
     assert "第一讲 绪论" in text
-    # Product-GUI preview: quiz/organize actions per course + quota placeholder
-    # (disabled until M2) and the Notion reports section.
+    # The student surface has code activation, course actions, and reports.
+    assert "激活云端转写" in text
     assert "生成小测" in text
-    assert "云端配额：未连接平台" in text
     assert "Notion 报告" in text
 
 

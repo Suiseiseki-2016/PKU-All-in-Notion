@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # PLATFORM_TOKEN is the account session the app writes automatically
     # at activation (devs may fill it by hand); empty values keep the
     # cloud backend refusing loudly until the relay is deployed.
-    cloud_transcribe_url: str = ""
+    cloud_transcribe_url: str = "https://pku.aeoluswu.info/v1/transcribe"
     platform_token: str = ""
 
     delete_video_after_processing: bool = True
