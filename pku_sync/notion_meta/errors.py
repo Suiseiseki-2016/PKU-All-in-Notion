@@ -11,6 +11,28 @@ from __future__ import annotations
 class NotionMetaError(RuntimeError):
     """Base class for metadata-adapter failures (user-safe copy)."""
 
+    retryable = False
+
+
+class NotionRetryableError(NotionMetaError):
+    """Notion is temporarily unavailable or the workspace hit its usage cap.
+
+    The client's existing retry policy (429/5xx with Retry-After, 3 attempts)
+    has ALREADY run by the time this surfaces — this state asks the user to
+    retry later. A failed read never renders as an empty directory
+    (VAL-META-010). The message is pinned generic copy: it never echoes the
+    provider body, status details, or any token.
+    """
+
+    retryable = True
+
+    def __init__(self, *, status: int | None = None):
+        super().__init__(
+            "Notion 读取未完成：服务暂时不可用或工作区用量已达上限，请稍后重试。"
+            "本次读取不会显示为空目录。"
+        )
+        self.status = status
+
 
 class HubNotFoundError(NotionMetaError):
     """No current-semester 'Class Notes …' hub matched the search surface."""

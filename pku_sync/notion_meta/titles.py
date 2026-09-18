@@ -90,6 +90,20 @@ def is_noise_child(title: str) -> bool:
 _DATED_SUFFIX_RE = re.compile(r"[（(]\s*\d{4}-\d{1,2}-\d{1,2}\s*[）)]\s*$")
 
 
+# -- exercise pages ---------------------------------------------------------------
+
+# Exercise-family title vocabulary: the product/prototype copy says 练习, the
+# quiz runbook says 小测; 测验/试题/习题 are the same family. Lecture
+# recognition runs FIRST, so a lecture-titled child is never typed as an
+# exercise even when its title mentions the markers.
+EXERCISE_TITLE_MARKERS = ("练习", "小测", "测验", "试题", "习题")
+
+
+def is_exercise_title(title: str) -> bool:
+    normalized = normalize_title(title)
+    return any(marker in normalized for marker in EXERCISE_TITLE_MARKERS)
+
+
 # -- lecture titles --------------------------------------------------------------
 
 
@@ -131,6 +145,11 @@ _PAREN_RE = re.compile(
     r"[（(]\s*(?P<date>\d{4}-\d{2}-\d{2})?\s*"
     r"(?P<period>第\s*\d+(?:\s*[-–—]\s*\d+)?\s*节)?\s*[）)]\s*[》」』]?\s*$"
 )
+
+
+def parse_lecture_number(raw: str) -> int | None:
+    """Public numeral parse for lecture-number tokens ('一'/'1'/'二十四')."""
+    return _chinese_number(raw)
 
 
 def parse_lecture_title(title: str) -> LectureTitle | None:

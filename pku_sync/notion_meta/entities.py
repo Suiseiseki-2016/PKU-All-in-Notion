@@ -103,7 +103,13 @@ class MaterialEntity(BaseModel):
 
 
 class NoteEntryEntity(BaseModel):
-    """A 课堂录像笔记 link line: identity IS the target lecture page."""
+    """A 课堂录像笔记 link line: identity IS the target lecture page.
+
+    Channel (i) explicit association: a line resolving to a lecture page id
+    is confirmed-linked to that lecture. A line whose target is not one of
+    the directory's lectures keeps its stored identity but stays visibly
+    待确认 (never confirmed without directory verification).
+    """
 
     id: str  # target lecture page id (the explicit link channel)
     url: str
@@ -112,6 +118,25 @@ class NoteEntryEntity(BaseModel):
     type: str = NOTE_TYPE_LABEL
     source: str = SOURCE_RECORDING_NOTES
     parent: str  # the 课堂录像笔记 course subpage carrying the line
+    association: Association = Field(default_factory=Association)
+
+
+class ExerciseEntity(BaseModel):
+    """A course-page exercise child surfaced as METADATA ONLY (VAL-EXER-037).
+
+    The pinned allowlist is identity + course scope + state signals + updated
+    time. The body scan extracts presence booleans only; question text,
+    answer text, explanations, and rubrics never cross the adapter boundary.
+    """
+
+    id: str
+    url: str
+    title: str
+    course: str
+    parent: str  # the course page id
+    updated: str = ""
+    marker_present: bool = False  # grading-marker heading present (已批改 signal)
+    answer_present: bool = False  # a pinned answer area/marker is present
 
 
 class DirectoryData(BaseModel):
@@ -126,12 +151,38 @@ class DirectoryData(BaseModel):
     lectures: list[LectureEntity] = Field(default_factory=list)
     materials: list[MaterialEntity] = Field(default_factory=list)
     notes: list[NoteEntryEntity] = Field(default_factory=list)
+    exercises: list[ExerciseEntity] = Field(default_factory=list)
     materials_by_course: dict[str, list[MaterialEntity]] = Field(default_factory=dict)
     notes_by_course: dict[str, list[NoteEntryEntity]] = Field(default_factory=dict)
     lectures_by_course: dict[str, list[LectureEntity]] = Field(default_factory=dict)
+    exercises_by_course: dict[str, list[ExerciseEntity]] = Field(default_factory=dict)
     course_unknown_materials: list[MaterialEntity] = Field(default_factory=list)
     course_unknown_notes: list[NoteEntryEntity] = Field(default_factory=list)
     diagnostics: dict = Field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return self.model_dump()
+
+    def confirmed_materials_for_lecture(self, lecture_id: str) -> list[MaterialEntity]:
+        """Explicitly linked (confirmed) materials of one lecture.
+
+        Inference never enters this query: title-pattern associations are
+        待确认 and excluded here (VAL-META-011/012).
+        """
+        return [
+            material
+            for material in self.materials
+            if material.association.state == ASSOCIATION_CONFIRMED
+            and material.association.lecture is not None
+            and material.association.lecture.id == lecture_id
+        ]
+
+    def inferred_materials_for_lecture(self, lecture_id: str) -> list[MaterialEntity]:
+        """Title-inferred (待确认) materials hinting at one lecture — never confirmed."""
+        return [
+            material
+            for material in self.materials
+            if material.association.state == ASSOCIATION_PENDING
+            and material.association.lecture is not None
+            and material.association.lecture.id == lecture_id
+        ]
