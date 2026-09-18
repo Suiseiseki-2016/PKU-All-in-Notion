@@ -406,14 +406,14 @@ def _markdown_source(content_file: str | None, text: str | None) -> str:
 @notion_app.command("login")
 def notion_login(
     port: Annotated[
-        int, typer.Option("--port", help="本地回调端口；须与集成登记的 redirect URI 一致")
+        int, typer.Option("--port", help="首选回调端口：8765 或 8766（被占用时自动用另一个）")
     ] = 8765,
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="不自动开浏览器，打印链接手动打开（SSH/无头场景）")
     ] = False,
     timeout: Annotated[float, typer.Option("--timeout", help="等待授权完成的秒数")] = 300.0,
 ) -> None:
-    """REST fallback 的自有 OAuth；普通用户请用 `pku-sync mcp configure`。"""
+    """Notion 浏览器授权：授权码经平台 relay 交换，token 只写入本地 .env（需先激活）。"""
     from . import notion_login as notion_login_mod
     from .config import settings
     from .notion import NotionError
@@ -426,7 +426,7 @@ def notion_login(
         console.print("勾选要分享的课程 hub 后点「允许」，等待回调…")
 
     try:
-        info = notion_login_mod.login(
+        info = notion_login_mod.login_via_relay(
             settings,
             port=port,
             open_browser=not no_browser,
@@ -437,6 +437,7 @@ def notion_login(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     console.print(f"[green]授权成功[/green]：workspace「{info.get('workspace_name') or '?'}」")
+    console.print(f"本地回调端口：{info.get('callback_port') or '?'}")
     console.print(f"NOTION_TOKEN 已写入 {info['env_path']}（该文件在 .gitignore 里，不要外传）")
     try:
         console.print(f"[green]验证通过[/green]：{notion_login_mod.verify_token()}")
