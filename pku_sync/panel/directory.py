@@ -473,6 +473,15 @@ class DirectoryService:
         self.sync.succeed(data)
         return build_directory_payload(data, self.sync.snapshot())
 
+    def invalidate(self) -> None:
+        """Drop the cached directory (used when the Notion token is cleared).
+
+        A disconnected panel must not serve the index it read while
+        connected, and the next read must go back to the workspace.
+        """
+        with self._lock:
+            self._data = None
+
     def ensure_loaded(self) -> DirectoryData:
         with self._lock:
             data = self._data

@@ -828,18 +828,31 @@ def panel_cmd(
     # The student directory service (real adapter by default; the seeded-fake
     # mode for browser verification) is shared by the directory API routes.
     # Built before binding so an invalid fake variant fails cleanly.
+    # In --fake mode the connection and platform bridges are faked too, so a
+    # verification run can drive activation and connect/disconnect without any
+    # network call and without touching the student's real credentials.
     if fake:
+        from .panel.connection import build_fake_connection_service
         from .panel.fake_directory import build_fake_directory_service
+        from .panel.platform_bridge import FakePlatformBridge
 
         try:
             directory_service = build_fake_directory_service(variant=fake_variant)
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
+        connection_service = build_fake_connection_service(
+            directory_service=directory_service
+        )
+        platform_service = FakePlatformBridge()
     else:
         from .panel.directory import make_directory_service
 
         directory_service = make_directory_service()
+        # None → create_app builds the production connection/platform bridges
+        # against the loaded settings
+        connection_service = None
+        platform_service = None
     try:
         sock, bound_port = bind_panel(port)
     except PanelPortError as exc:
@@ -855,7 +868,11 @@ def panel_cmd(
     # binds — never a check-then-rebind race, never an arbitrary port).
     uvicorn.Server(
         uvicorn.Config(
-            create_app(directory_service=directory_service),
+            create_app(
+                directory_service=directory_service,
+                connection_service=connection_service,
+                platform_service=platform_service,
+            ),
             host=host,
             port=bound_port,
             log_level="warning",

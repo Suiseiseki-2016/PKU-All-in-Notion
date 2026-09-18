@@ -194,6 +194,7 @@ _PAGE = """<!doctype html>
 </head>
 <body>
 <h1>PKU All in Notion</h1><div class="sub">课程资料、课堂录像与学习笔记，都在这里。</div>
+<div class="sub"><a href="/app">打开学生面板</a>（学生端界面；本页是工程状态面板）</div>
 <div class="card" id="activation">
  <b>云端转写</b><div class="quota" id="quota">正在检查账户状态…</div>
  <div id="activate-form"><input id="code" placeholder="输入兑换码" autocomplete="off">
@@ -235,13 +236,21 @@ setInterval(poll, 3000);
 </html>"""
 
 
-def create_app(settings=None, runner: JobRunner | None = None, directory_service=None) -> FastAPI:
+def create_app(
+    settings=None,
+    runner: JobRunner | None = None,
+    directory_service=None,
+    connection_service=None,
+    platform_service=None,
+) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
     ``directory_service`` is the student directory service (real adapter by
     default, seeded-fake for ``pku-sync panel --fake``). It is attached here
     so the directory/sync/materials/launch routes share one service and its
-    honest sync state.
+    honest sync state. ``connection_service`` owns the Notion connection
+    state (revoke clears the local token and drops that cached directory),
+    and ``platform_service`` is the relay bridge behind activation/quota.
     """
     if settings is None:
         from ..config import settings as default_settings
@@ -253,15 +262,31 @@ def create_app(settings=None, runner: JobRunner | None = None, directory_service
         from .directory import make_directory_service
 
         directory_service = make_directory_service(settings)
+    if connection_service is None:
+        from .connection import make_connection_service
+
+        connection_service = make_connection_service(
+            settings, directory_service=directory_service
+        )
+    if platform_service is None:
+        from .platform_bridge import RealPlatformBridge
+
+        platform_service = RealPlatformBridge(settings)
 
     app = FastAPI(title="pku-sync panel", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.runner = runner
     app.state.directory_service = directory_service
+    app.state.connection_service = connection_service
+    app.state.platform_service = platform_service
 
+    from .connection_api import add_connection_routes
     from .directory_api import add_directory_routes
+    from .student_ui import add_student_ui_routes
 
     add_directory_routes(app, directory_service)
+    add_connection_routes(app, connection_service)
+    add_student_ui_routes(app)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -277,16 +302,14 @@ def create_app(settings=None, runner: JobRunner | None = None, directory_service
 
     @app.get("/api/platform/quota")
     def platform_quota() -> dict:
-        from ..platform import quota
-
-        return quota(settings)
+        return platform_service.quota()
 
     @app.post("/api/platform/activate")
     def platform_activate(code: str = Body(..., embed=True)) -> dict:
-        from ..platform import PlatformError, activate
+        from ..platform import PlatformError
 
         try:
-            return activate(code, settings)
+            return platform_service.activate(code)
         except PlatformError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
