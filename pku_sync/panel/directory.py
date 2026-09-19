@@ -509,6 +509,8 @@ class DirectoryService:
         self.grading_record_store = None
         self.sync = SyncTracker(clock=clock)
         self._data: DirectoryData | None = None
+        self._data_generation = 0
+        self._refresh_generation = 0
         self._organized_exercises: dict[str, object] = {}
         self._lock = threading.Lock()
 
@@ -516,37 +518,48 @@ class DirectoryService:
         return self.sync.snapshot()
 
     def load(self) -> dict:
-        """One full directory read with honest sync-state transitions.
+        """Read and publish one generation of directory metadata.
 
-        Any failure lands in the error state with a user-safe reason and
-        raises :class:`DirectoryApiError` (503) so the API never serves an
-        empty directory as success.
+        Provider I/O happens outside the lock, but publication and sync-state
+        transitions are generation guarded.  A late result from an older
+        refresh can never erase or overwrite a newer snapshot.
         """
-        self.sync.begin()
+        with self._lock:
+            self._refresh_generation += 1
+            generation = self._refresh_generation
+            self.sync.begin()
         try:
             data = self.provider.load()
-        except Exception as exc:  # noqa: BLE001 - every read failure is an explicit state
+        except Exception as exc:  # noqa: BLE001 - every read failure is explicit
             try:
                 reason = user_safe_reason(exc)
             except Exception:  # never let reason mapping itself leak anything
                 reason = SYNC_ERROR_GENERIC
             with self._lock:
-                self._data = None
-            self.sync.fail(reason)
+                if generation == self._refresh_generation:
+                    self._data = None
+                    self._data_generation = generation
+                    self.sync.fail(reason)
             raise DirectoryApiError(503, reason) from exc
         with self._lock:
+            if generation != self._refresh_generation:
+                raise DirectoryApiError(503, SYNC_ERROR_UNAVAILABLE)
             for entity in self._organized_exercises.values():
                 if all(item.id != entity.id for item in data.exercises):
                     data.exercises.append(entity)
                     data.exercises_by_course.setdefault(entity.parent, []).append(entity)
             self._data = data
-        self.sync.succeed(data)
-        return build_directory_payload(
+            self._data_generation = generation
+            self.sync.succeed(data)
+            sync = self.sync.snapshot()
+        payload = build_directory_payload(
             data,
-            self.sync.snapshot(),
+            sync,
             launched_exercise_ids=self.exercise_events.launched_ids(),
             local_grading_records=self.local_grading_records,
         )
+        self._validate_snapshot(data, generation)
+        return payload
 
     def record_grading(self, exercise_id: str, record: dict) -> None:
         self.local_grading_records[str(exercise_id)] = dict(record)
@@ -565,39 +578,63 @@ class DirectoryService:
                 self._data.exercises.append(entity)
                 self._data.exercises_by_course.setdefault(entity.parent, []).append(entity)
     def invalidate(self) -> None:
-        """Drop the cached directory (used when the Notion token is cleared).
-
-        A disconnected panel must not serve the index it read while
-        connected, and the next read must go back to the workspace.
-        """
+        """Drop the cached directory and invalidate in-flight loads."""
         with self._lock:
+            self._refresh_generation += 1
             self._data = None
+            self._data_generation = self._refresh_generation
 
-    def ensure_loaded(self) -> DirectoryData:
+    def _snapshot(self) -> tuple[DirectoryData, int]:
+        """Return a directory snapshot only while its sync state is usable."""
         with self._lock:
             data = self._data
-        sync = self.sync.snapshot()
-        if sync["state"] == STATE_ERROR:
-            raise DirectoryApiError(503, sync["error_reason"] or SYNC_ERROR_GENERIC)
-        if data is not None:
-            return data
+            generation = self._data_generation
+            sync = self.sync.snapshot()
+            if sync["state"] == STATE_ERROR:
+                raise DirectoryApiError(503, sync["error_reason"] or SYNC_ERROR_GENERIC)
+            if data is not None:
+                return data, generation
         self.load()  # first read uses the same sync/error semantics
         with self._lock:
-            return self._data
+            data = self._data
+            generation = self._data_generation
+            sync = self.sync.snapshot()
+            if data is not None and sync["state"] != STATE_ERROR:
+                return data, generation
+            raise DirectoryApiError(503, sync["error_reason"] or SYNC_ERROR_GENERIC)
+
+    def _validate_snapshot(self, data: DirectoryData, generation: int) -> None:
+        """Reject a payload built from a snapshot invalidated while reading."""
+        with self._lock:
+            sync = self.sync.snapshot()
+            if (
+                generation != self._refresh_generation
+                or self._data is not data
+                or self._data_generation != generation
+                or sync["state"] == STATE_ERROR
+            ):
+                raise DirectoryApiError(503, sync["error_reason"] or SYNC_ERROR_GENERIC)
+
+    def ensure_loaded(self) -> DirectoryData:
+        data, _ = self._snapshot()
+        return data
 
     def material_view(
         self, course_id: str, view: str, *, lecture_id: str | None = None
     ) -> dict:
         if view not in MATERIAL_VIEWS:
             raise DirectoryApiError(400, f"未知的资料视图：{view}。")
-        data = self.ensure_loaded()
+        data, generation = self._snapshot()
         course = _find_course(data, course_id)
         if view == MATERIAL_VIEW_LECTURE:
             lecture = _find_lecture(data, course, lecture_id)
-            return build_lecture_view(data, course, lecture)
-        if view == MATERIAL_VIEW_TYPE:
-            return build_type_view(data, course)
-        return build_all_view(data, course)
+            payload = build_lecture_view(data, course, lecture)
+        elif view == MATERIAL_VIEW_TYPE:
+            payload = build_type_view(data, course)
+        else:
+            payload = build_all_view(data, course)
+        self._validate_snapshot(data, generation)
+        return payload
 
     def resolve_exercise_launch(self, exercise_id: str) -> LaunchResult:
         """Resolve one listed exercise and its owning course fallback.
