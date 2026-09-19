@@ -157,7 +157,7 @@ DIRECTORY_COPY = {
         "grade_notice": "批改入口将在练习服务就绪后开放。",
         "grading": {
             "working": "正在批改「{title}」",
-            "explanation": "请稍候，完成后会显示分数和结算。",
+            "explanation": "后端正在读取 Notion 中的答案，按需调用 AI 评分并写回解析。请稍候。",
             "estimate": "预计 1–5 AI 点 · 完成后按实际用量结算",
             "completed": "批改完成",
             "settlement": "本次消耗 {points} AI 点",

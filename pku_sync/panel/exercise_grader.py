@@ -2,6 +2,7 @@
 from __future__ import annotations
 import datetime
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -114,17 +115,39 @@ def _grading_prompt(target: GradeTarget, blocks: list[dict]) -> tuple[str, list[
     unanswered: list[str] = []
     if fixture_at is not None:
         question_count = sum(1 for block in blocks[:fixture_at] if block.get("type") == "heading_3")
-        answers = [text for block, text in zip(blocks[fixture_at + 1:], texts[fixture_at + 1:]) if block.get("type") in ("numbered_list_item", "bulleted_list_item") and text]
+        answer_blocks = blocks[fixture_at + 1:]
+        answers = [_fixture_answer(text) for block, text in zip(answer_blocks, texts[fixture_at + 1:]) if block.get("type") in ("numbered_list_item", "bulleted_list_item")]
+        unanswered = [f"第 {index} 题" for index, answer in enumerate(answers, 1) if not answer]
+        if len(answers) < question_count:
+            unanswered.extend(f"第 {number} 题" for number in range(len(answers) + 1, question_count + 1))
+        unanswered = list(dict.fromkeys(unanswered))
         if not answers: unanswered = ["没有可批改的答案"]
-        elif question_count > len(answers): unanswered = [f"第 {number} 题" for number in range(len(answers) + 1, question_count + 1)]
     else:
         teacher_at = next((i for i, text in enumerate(texts) if text == "教师区（答案）"), len(texts))
         question_count = sum(1 for block in blocks[:teacher_at] if block.get("type") == "heading_3")
-        answers = [text for text in texts[:teacher_at] if text.startswith("答案：") and text[3:].strip()]
+        answers = _section_answers(texts[:teacher_at])
         if not answers: unanswered = ["没有可批改的答案"]
-        elif question_count > len(answers): unanswered = [f"第 {number} 题" for number in range(len(answers) + 1, question_count + 1)]
+        else:
+            unanswered = [f"第 {index} 题" for index, answer in enumerate(answers, 1) if not answer]
+            if len(answers) < question_count:
+                unanswered.extend(f"第 {number} 题" for number in range(len(answers) + 1, question_count + 1))
+            unanswered = list(dict.fromkeys(unanswered))
     payload = {"operation": "grade", "target": {"page_id": target.page_id, "page_url": target.page_url, "course_id": target.course_id, "course_title": target.course_title, "scope": target.scope}, "blocks": blocks}
     return json.dumps(payload, ensure_ascii=False), unanswered
+
+
+def _fixture_answer(text: str) -> str:
+    """Remove only the numbered-list prefix, preserving answer content privately."""
+    return re.sub(r"^\s*\d+[.、)]\s*", "", text).strip()
+
+
+def _section_answers(texts: list[str]) -> list[str]:
+    """Return answer slots in question order, including blank middle slots."""
+    answers: list[str] = []
+    for text in texts:
+        if text.startswith("答案："):
+            answers.append(text[len("答案："):].strip())
+    return answers
 def _result_markdown(content: str, *, score: float, graded_at: str) -> str:
     return f"## 批改结果\n\n批改时间：{graded_at}\n\n总分：{score}\n\n```json\n{content}\n```"
 def make_grading_service(settings, directory_service, relay):

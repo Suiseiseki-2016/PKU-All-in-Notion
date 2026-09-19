@@ -668,6 +668,10 @@
     var copy = COPY.directory.exercises.launch;
     return '<div class="exercise-mapping-missing" role="status" data-state="page_identity_missing"><strong>' + esc(copy.missing_title) + '</strong><span>' + esc(copy.missing_body) + '</span>' + button(copy.fallback, "launch-exercise-fallback", { small: true, attrs: { "data-exercise": row.id } }) + '</div>';
   }
+  function gradingScreen() {
+    return gradingCard();
+  }
+
   function gradingCard() {
     var g = state.grading;
     if (!g || g.status === "idle") return "";
@@ -807,6 +811,7 @@
   }
 
   function dashboardScreen() {
+    if (state.grading.status !== "idle") return gradingScreen();
     var fallback = directoryBody();
     var body = fallback
       ? fallback
@@ -1331,7 +1336,8 @@
       return;
     }
     var screen;
-    if (directoryBody()) screen = dashboardScreen();
+    if (state.grading.status !== "idle") screen = gradingScreen();
+    else if (directoryBody()) screen = dashboardScreen();
     else if (state.view === "course") screen = courseScreen();
     else if (state.view === "lecture") screen = lectureScreen();
     else screen = dashboardScreen();
@@ -1527,6 +1533,9 @@
           if (next.body && next.body.status === "running" && attempts < POLL_MAX_ATTEMPTS) { window.setTimeout(pollGrade, 250); return; }
           if (next.body && next.body.status === "completed") { state.grading.status = "completed"; state.grading.result = next.body; }
           else { state.grading.status = "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.unanswered = next.body && next.body.unanswered || []; }
+          if (next.body && typeof next.body.points_remaining === "number" && state.quota) {
+            state.quota.llm_points_remaining = next.body.points_remaining;
+          }
           render();
         }).catch(function () { state.grading.status = "blocked"; state.grading.blocked = COPY.directory.exercises.grading.blocked; render(); });
       }
