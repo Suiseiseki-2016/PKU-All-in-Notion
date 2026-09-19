@@ -26,9 +26,9 @@ def test_true_mismatch_row_keeps_warning_flag_and_ui_alert_surface():
     entity = SimpleNamespace(
         id="exercise-mismatch", url="https://example.test/exercise-mismatch",
         title="?????", course="?????", marker_present=False,
-        answer_present=True, mismatch_notice=True,
+        answer_present=True,
     )
-    row = exercise_row(entity)
+    row = exercise_row(entity, local_record={"status": "graded"})
     assert row["mismatch_notice"] is True
     html = TestClient(create_app(directory_service=build_fake_directory(workspace=build_panel_workspace()))).get("/app").text
     app_js = TestClient(create_app(directory_service=build_fake_directory(workspace=build_panel_workspace()))).get("/app/app.js").text

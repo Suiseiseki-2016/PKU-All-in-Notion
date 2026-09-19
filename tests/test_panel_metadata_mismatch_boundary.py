@@ -44,3 +44,10 @@ def test_boundary_warning_does_not_override_marker_authoritative_status():
     assert row["status"] == "graded"
     assert row["mismatch_notice"] is True
     assert "mismatch_notice" not in exercise_row(_entity(marker=True))
+
+
+def test_boundary_ignores_legacy_warning_attribute_without_record_disagreement():
+    entity = _entity(marker=False)
+    entity.mismatch_notice = True
+    assert mismatch_notice_for(entity) is False
+    assert 'mismatch_notice' not in exercise_row(entity)

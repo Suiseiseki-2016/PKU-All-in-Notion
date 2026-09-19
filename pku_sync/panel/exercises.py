@@ -64,10 +64,6 @@ def mismatch_notice_for(entity: Any, local_record: Any = None) -> bool:
     The Notion marker remains authoritative for the row status.  Missing or
     malformed local state is deliberately treated as unknown, not a mismatch.
     """
-    # Accept the old panel-only attribute for callers that already attach
-    # derived state to a view object; ExerciseEntity itself no longer has it.
-    if local_record is None and isinstance(getattr(entity, "mismatch_notice", None), bool):
-        return bool(entity.mismatch_notice)
     local_graded = _local_record_is_graded(local_record)
     return local_graded is not None and local_graded != bool(entity.marker_present)
 
