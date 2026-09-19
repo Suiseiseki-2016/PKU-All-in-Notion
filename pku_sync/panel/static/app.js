@@ -921,6 +921,9 @@
       .map(function (lecture) {
         var number = String(lecture.number);
         if (number.length < 2) number = "0" + number;
+        if (lecture.page_state === "missing") {
+          return '<div class="missing-lecture-entry" data-state="missing-page" data-lecture="' + esc(lecture.id) + '"><strong>' + esc(copy.missing_page) + '</strong><small>' + esc(lecture.title) + '</small><small>' + esc(copy.missing_page_copy) + '</small>' + button(COPY.lecture.open_lecture, "launch", { small: true, disabled: true, attrs: { "data-kind": "lecture", "data-target": lecture.id } }) + button(copy.missing_page_fallback, "launch", { small: true, attrs: { "data-kind": "course", "data-target": course.id } }) + '</div>';
+        }
         return (
           '<button type="button" class="lecture-item" data-action="select-lecture" data-course="' +
           esc(course.id) +
@@ -1076,6 +1079,7 @@
         button(entry.action, "launch", {
           small: true,
           icon: kind === "notes" ? "notes" : "launch",
+          disabled: lecture.page_state === "missing",
           attrs: { "data-kind": kind, "data-target": lecture.id }
         }) +
         "</div>"
@@ -1098,6 +1102,7 @@
     if (!current) return "";
     var copy = COPY.launch;
     if (current.status === "opening") return '<div class="launch-feedback" role="status" aria-live="polite">' + esc(copy.opening) + '</div>';
+    if (current.status === "missing") return '<div class="launch-feedback error" role="alert" aria-live="polite"><strong>待建讲次页</strong><span>讲次页尚未建立 · 整理完成后自动出现</span>' + (current.fallback && current.fallback.url ? button("查看课程页", "launch-fallback", { small: true, primary: true, attrs: { "data-url": current.fallback.url } }) : "") + '</div>';
     return '<div class="launch-feedback" role="alert" aria-live="polite"><strong>打开没有成功</strong><span>' + esc(copy.failed) + '</span>' + button(copy.retry, "retry-launch", { small: true, primary: true, attrs: { "data-kind": current.kind, "data-target": current.targetId } }) + '</div>';
   }
 
@@ -1353,6 +1358,7 @@
       button(copy.open_lecture, "launch", {
         primary: true,
         icon: "launch",
+        disabled: lecture.page_state === "missing",
         attrs: { "data-kind": "lecture", "data-target": lecture.id }
       }) +
       "</div></section>" +
@@ -1627,15 +1633,30 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        target_id: targetId
+        target_id: targetId,
+        course_id: state.courseId ? state.courseId : null
       })
     }).then(function (result) {
-      if (result.ok && result.body && result.body.url) {
-        showToast(COPY.launch[kind] || COPY.launch.lecture);
-        // the stored identity is opened as-is; no URL is ever built locally
-        window.location.assign(result.body.url);
-        return;
+      if (result.ok) {
+        if (result.body) {
+          if (result.body.url) {
+            showToast(COPY.launch[kind] ? COPY.launch[kind] : COPY.launch.lecture);
+            window.location.assign(result.body.url);
+            return;
+          }
+        }
       }
+      if (result.body) {
+        if (result.body.status === "missing_mapping") {
+          state.launch = { kind: kind, targetId: targetId, status: "missing", fallback: result.body.fallback };
+        } else {
+          state.launch = { kind: kind, targetId: targetId, status: "failed" };
+        }
+      } else {
+        state.launch = { kind: kind, targetId: targetId, status: "failed" };
+      }
+      render();
+    }).catch(function () {
       state.launch = { kind: kind, targetId: targetId, status: "failed" };
       render();
     });
@@ -1743,6 +1764,8 @@
       launch(target.dataset.kind, target.dataset.target);
     } else if (action === "retry-launch") {
       launch(target.dataset.kind, target.dataset.target);
+    } else if (action === "launch-fallback") {
+      if (target.dataset.url) window.location.assign(target.dataset.url);
     }
   });
 

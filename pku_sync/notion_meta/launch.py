@@ -61,7 +61,7 @@ class LaunchResolver:
         explicit missing-mapping result with the course-level fallback."""
         normalized = self._normalize(target_id)
         url = self._urls.get(normalized)
-        if url is not None:
+        if url:
             return LaunchResult(status=LAUNCH_OPENED, target_id=normalized, url=url)
         course = self._courses.get(course_id) if course_id else None
         fallback = (

@@ -52,6 +52,7 @@ _FAKE_VARIANTS = (
     "grade-slow",
     "fault",
     "fault-launch",
+    "missing-lecture",
     "empty",
     "usage-cap",
     "low-balance",
@@ -93,6 +94,18 @@ class FaultLaunchProvider(PanelDirectoryProvider):
                 fallback=None,
             )
         return super().resolve_launch(data, target_id, course_id=course_id)
+
+
+class MissingLectureProvider(PanelDirectoryProvider):
+    """Keep a populated course lecture row whose page identity is absent."""
+
+    def load(self) -> DirectoryData:
+        data = super().load()
+        from .fake_workspace import NET_L2
+        for lecture in data.lectures:
+            if lecture.id == NET_L2:
+                lecture.url = ""
+        return data
 
 
 class ExerciseFaultLaunchProvider(PanelDirectoryProvider):
@@ -179,6 +192,8 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "fault-launch":
         provider = FaultLaunchProvider(ws, semester=semester)
+    elif variant == "missing-lecture":
+        provider = MissingLectureProvider(ws, semester=semester)
     elif variant == "empty":
         # Keep the hub and its special children, but remove course pages. The
         # real adapter therefore returns a successful empty directory rather
@@ -213,6 +228,7 @@ __all__ = [
     "SLOW_DELAY",
     "PanelDirectoryProvider",
     "FaultLaunchProvider",
+    "MissingLectureProvider",
     "ExerciseFaultLaunchProvider",
     "ExerciseMissingIdentityProvider",
     "UsageCapProvider",

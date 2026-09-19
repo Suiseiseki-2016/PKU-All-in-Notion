@@ -321,7 +321,7 @@ def build_lecture_payload(lecture, course, data: DirectoryData, sync: dict) -> d
         ),
         "scope": course.title,
         "mapping_state": state,
-        "page_state": "ready",
+        "page_state": "ready" if lecture.url else "missing",
     }
 
 
