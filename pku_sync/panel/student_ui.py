@@ -34,6 +34,11 @@ from .connection import (
     REVOKE_LABEL,
 )
 from .directory import LAUNCH_FAILED_COPY
+from .exercises import (
+    EXERCISE_IDENTITY_MISSING_COPY,
+    EXERCISE_IDENTITY_MISSING_REASON,
+    EXERCISE_IDENTITY_MISSING_TITLE,
+)
 
 STUDENT_UI_PATH = "/app"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -150,6 +155,16 @@ DIRECTORY_COPY = {
         "actions": {"organized": "\u5728 Notion \u4f5c\u7b54", "pending-answer": "\u5728 Notion \u4f5c\u7b54", "pending-grade": "\u6279\u6539\u5df2\u63d0\u4ea4\u7b54\u6848", "graded": "\u5728 Notion \u67e5\u770b\u89e3\u6790"},
         "empty": "\u8fd8\u6ca1\u6709\u5df2\u6574\u7406\u7684\u7ec3\u4e60\u3002\u5b8c\u6210\u7ec4\u7ec7\u540e\uff0c\u7ec3\u4e60\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002",
         "grade_notice": "\u6279\u6539\u5165\u53e3\u5c06\u5728\u7ec3\u4e60\u670d\u52a1\u5c31\u7eea\u540e\u5f00\u653e\u3002",
+        "launch": {
+            "opening": "\u6b63\u5728\u6253\u5f00 Notion",
+            "failed_title": "\u6253\u5f00\u6ca1\u6709\u6210\u529f",
+            "failed_body": "Notion \u9875\u9762\u6682\u65f6\u6ca1\u6709\u6253\u5f00\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u8bd5\uff1b\u4f60\u7684\u7ec3\u4e60\u76ee\u5f55\u4e0e\u8bb0\u5f55\u90fd\u4e0d\u53d7\u5f71\u54cd\u3002",
+            "retry": "\u91cd\u65b0\u6253\u5f00",
+            "missing_title": EXERCISE_IDENTITY_MISSING_TITLE,
+            "missing_body": EXERCISE_IDENTITY_MISSING_COPY,
+            "grade_missing": EXERCISE_IDENTITY_MISSING_REASON,
+            "fallback": "\u67e5\u770b\u8bfe\u7a0b\u9875",
+        },
         "organize": {
             "title": "整理一套练习到 Notion",
             "body": "选择课程和讲次，整理一套混合题型练习页。题目、答案和解析只写入 Notion。",

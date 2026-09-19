@@ -13,9 +13,14 @@ import logging
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..notion_meta import LAUNCH_MISSING_MAPPING, LAUNCH_OPENED
+from .exercises import (
+    EXERCISE_IDENTITY_MISSING_COPY,
+    EXERCISE_IDENTITY_MISSING_REASON,
+    PAGE_IDENTITY_MISSING,
+)
 from .directory import (
     LAUNCH_FAILED,
     LAUNCH_FAILED_COPY,
@@ -27,6 +32,11 @@ from .directory import (
 
 logger = logging.getLogger(__name__)
 
+
+class ExerciseLaunchRequest(BaseModel):
+    """Exercise launch intent; the URL is always resolved server-side."""
+
+    purpose: str = Field(pattern="^(answer|result)$")
 
 class LaunchRequest(BaseModel):
     """Identity-only launch payload: the stored target id and optional
@@ -60,6 +70,64 @@ def add_directory_routes(app, service: DirectoryService) -> None:
         service.mark_exercise_launched(exercise_id)
         return {"status": "recorded", "exercise_id": exercise_id}
 
+    @app.post("/api/exercises/{exercise_id}/launch")
+    def exercise_launch_endpoint(exercise_id: str, request: ExerciseLaunchRequest):
+        result = service.resolve_exercise_launch(exercise_id)
+        if result.status == LAUNCH_OPENED:
+            if request.purpose == "answer":
+                service.mark_exercise_launched(exercise_id)
+            logger.info("panel exercise launch resolved url=%s", result.url)
+            return {
+                "status": LAUNCH_OPENED,
+                "target_id": result.target_id,
+                "url": result.url,
+                "fallback": None,
+            }
+        if result.status == LAUNCH_FAILED:
+            logger.info("panel exercise launch failed target_id=%s", result.target_id)
+            return JSONResponse(status_code=502, content={"detail": LAUNCH_FAILED_COPY})
+        fallback = result.fallback.model_dump() if result.fallback else None
+        logger.info("panel exercise launch missing-mapping target_id=%s", result.target_id)
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": EXERCISE_IDENTITY_MISSING_COPY,
+                "status": PAGE_IDENTITY_MISSING,
+                "target_id": result.target_id,
+                "url": None,
+                "fallback": fallback,
+            },
+        )
+
+    @app.post("/api/exercises/{exercise_id}/grade")
+    def exercise_grade_identity_guard(exercise_id: str):
+        result = service.resolve_exercise_launch(exercise_id)
+        if result.status == LAUNCH_OPENED:
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "status": "grading_not_available",
+                    "reason": "批改服务尚未就绪。",
+                },
+            )
+        if result.status == LAUNCH_FAILED:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": LAUNCH_FAILED,
+                    "reason": LAUNCH_FAILED_COPY,
+                    "fallback": None,
+                },
+            )
+        fallback = result.fallback.model_dump() if result.fallback else None
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": PAGE_IDENTITY_MISSING,
+                "reason": EXERCISE_IDENTITY_MISSING_REASON,
+                "fallback": fallback,
+            },
+        )
     @app.get("/api/sync/state")
     def sync_state_endpoint() -> dict:
         return service.sync_snapshot()

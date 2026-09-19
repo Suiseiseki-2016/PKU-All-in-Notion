@@ -20,6 +20,7 @@
     activated: false,
     quota: null,
     organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "" },
+    exerciseLaunch: null,
     connection: {
       state: "disconnected",
       connected: false,
@@ -649,17 +650,36 @@
     return actions[row.status] ? actions[row.status] : actions.organized;
   }
 
+  function exerciseLaunchFeedback(row) {
+    var current = state.exerciseLaunch;
+    var copy = COPY.directory.exercises.launch;
+    if (!current || current.exerciseId !== row.id) return "";
+    if (current.status === "opening") {
+      return '<div class="exercise-launch-feedback" role="status" aria-live="polite">' + esc(copy.opening) + '</div>';
+    }
+    if (current.status === "failed") {
+      return '<div class="exercise-launch-feedback error" role="alert" aria-live="polite"><strong>' + esc(copy.failed_title) + '</strong><span>' + esc(copy.failed_body) + '</span>' + button(copy.retry, "retry-exercise-launch", { small: true, primary: true, attrs: { "data-exercise": row.id, "data-purpose": current.purpose } }) + '</div>';
+    }
+    return "";
+  }
+
+  function missingExerciseIdentity(row) {
+    var copy = COPY.directory.exercises.launch;
+    return '<div class="exercise-mapping-missing" role="status" data-state="page_identity_missing"><strong>' + esc(copy.missing_title) + '</strong><span>' + esc(copy.missing_body) + '</span>' + button(copy.fallback, "launch-exercise-fallback", { small: true, attrs: { "data-exercise": row.id } }) + '</div>';
+  }
   function exerciseDirectorySection() {
     var rows = state.directory.exercises ? state.directory.exercises : [];
     var copy = COPY.directory.exercises;
     if (!rows.length) return '<section aria-labelledby="exercise-directory-title" data-state="empty-exercises"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-empty">' + esc(copy.empty) + '</div></section>';
     var items = rows.map(function (row) {
+      var purpose = row.status === "graded" ? "result" : "answer";
       var actionName = row.status === "pending-grade" ? "grade-exercise" : "launch-exercise";
-      return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p></div><div class="exercise-actions">' + button(exerciseAction(row), actionName, { primary: row.status === "pending-grade", small: true, disabled: !state.connection.connected, attrs: { "data-exercise": row.id, "data-target": row.id } }) + '</div></article>';
+      var identityMissing = !row.url;
+      var action = button(exerciseAction(row), actionName, { primary: row.status === "pending-grade" || row.status === "graded", small: true, disabled: !state.connection.connected || identityMissing, attrs: { "data-exercise": row.id, "data-target": row.id, "data-purpose": purpose } });
+      return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p>' + (identityMissing ? missingExerciseIdentity(row) : exerciseLaunchFeedback(row)) + '</div><div class="exercise-actions">' + action + '</div></article>';
     }).join("");
     return '<section aria-labelledby="exercise-directory-title"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-directory" role="list" aria-label="' + esc(copy.list_label) + '">' + items + '</div></section>';
   }
-
   function courseGrid() {
     var directory = state.directory;
     var synced = relativeText(directory.sync.last_sync_at);
@@ -1470,10 +1490,42 @@
     }).then(function (result) { return finishOrganize(result, result.body && result.body.job_id); })
       .catch(function () { blockOrganize(copy.blocked); });
   }
-  function launchExercise(targetId) {
-    return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/answer-started", { method: "POST" }).then(function () { return launch("exercise", targetId); });
+  function launchExerciseFallback(targetId) {
+    return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ purpose: "answer" })
+    }).then(function (result) {
+      if (result.body && result.body.fallback && result.body.fallback.url) {
+        window.location.assign(result.body.fallback.url);
+      }
+    });
   }
-
+  function launchExercise(targetId, purpose) {
+    state.exerciseLaunch = { exerciseId: targetId, purpose: purpose, status: "opening" };
+    render();
+    return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ purpose: purpose })
+    }).then(function (result) {
+      if (result.ok && result.body && result.body.url) {
+        showToast(COPY.launch.opening);
+        window.location.assign(result.body.url);
+        return;
+      }
+      state.exerciseLaunch = {
+        exerciseId: targetId,
+        purpose: purpose,
+        status: result.body && result.body.status === "page_identity_missing" ? "missing" : "failed",
+        fallback: result.body && result.body.fallback
+      };
+      render();
+    }).catch(function () {
+      state.exerciseLaunch = { exerciseId: targetId, purpose: purpose, status: "failed" };
+      render();
+    });
+  }
   function launch(kind, targetId) {
     state.launch = { kind: kind, targetId: targetId, status: "opening" };
     render();
@@ -1576,7 +1628,11 @@
     else if (action === "select-lecture") {
       selectLecture(target.dataset.course, target.dataset.lecture);
     } else if (action === "launch-exercise") {
-      launchExercise(target.dataset.target);
+      launchExercise(target.dataset.target, target.dataset.purpose || "answer");
+    } else if (action === "retry-exercise-launch") {
+      launchExercise(target.dataset.exercise, target.dataset.purpose || "answer");
+    } else if (action === "launch-exercise-fallback") {
+      launchExerciseFallback(target.dataset.exercise);
     } else if (action === "grade-exercise") {
       showToast(COPY.directory.exercises.grade_notice);
     } else if (action === "launch") {

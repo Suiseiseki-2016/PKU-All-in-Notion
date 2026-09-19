@@ -1,4 +1,4 @@
-﻿"""Metadata-only exercise directory state and local launch events."""
+"""Metadata-only exercise directory state and local launch events."""
 from __future__ import annotations
 import json
 import re
@@ -11,6 +11,10 @@ EXERCISE_PENDING_GRADE = "pending-grade"
 EXERCISE_GRADED = "graded"
 EXERCISE_STATES = (EXERCISE_ORGANIZED, EXERCISE_PENDING_ANSWER, EXERCISE_PENDING_GRADE, EXERCISE_GRADED)
 STATUS_LABELS = {EXERCISE_ORGANIZED: "已整理", EXERCISE_PENDING_ANSWER: "待作答", EXERCISE_PENDING_GRADE: "待批改", EXERCISE_GRADED: "已批改"}
+PAGE_IDENTITY_MISSING = "page_identity_missing"
+EXERCISE_IDENTITY_MISSING_TITLE = "练习页映射缺失"
+EXERCISE_IDENTITY_MISSING_COPY = "该练习还没有对应的 Notion 页面，暂时无法作答或批改。可以先打开课程页查看。"
+EXERCISE_IDENTITY_MISSING_REASON = "练习页映射缺失，无法确定批改目标。"
 
 def derive_exercise_state(*, marker_present: bool, answer_present: bool, launch_started: bool) -> str:
     if marker_present:
@@ -60,4 +64,4 @@ class ExerciseEventStore:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 self.path.write_text(json.dumps({"answer_started": sorted(self._launched)}, ensure_ascii=False), encoding="utf-8")
 
-__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "derive_exercise_state", "exercise_scope", "exercise_row", "ExerciseEventStore"]
+__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "PAGE_IDENTITY_MISSING", "EXERCISE_IDENTITY_MISSING_TITLE", "EXERCISE_IDENTITY_MISSING_COPY", "EXERCISE_IDENTITY_MISSING_REASON", "derive_exercise_state", "exercise_scope", "exercise_row", "ExerciseEventStore"]

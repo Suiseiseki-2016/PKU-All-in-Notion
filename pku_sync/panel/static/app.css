@@ -954,8 +954,15 @@ h1, h2, h3, p { margin-top: 0; }
 .exercise-status { padding: 3px 8px; border-radius: 999px; color: var(--green-deep); background: var(--mint); font-size: 11px; font-weight: 800; }
 .exercise-status.pending-grade { color: #815c22; background: var(--gold-pale); }
 .exercise-status.graded { color: var(--blue); background: var(--blue-pale); }
+.exercise-main { flex: 1 1 auto; min-width: 0; }
+.exercise-actions { flex: 0 0 auto; }
+.exercise-launch-feedback, .exercise-mapping-missing { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding: 11px 13px; border-radius: 10px; background: #f0f7f1; color: var(--green-deep); font-size: 12px; }
+.exercise-launch-feedback.error, .exercise-mapping-missing { background: var(--rose-pale); color: var(--rose); }
+.exercise-launch-feedback span, .exercise-mapping-missing span { flex: 1 1 240px; }
+.exercise-mapping-missing .btn { margin-left: auto; }
 @media (max-width: 680px) {
   .exercise-toolbar, .exercise-row { align-items: stretch; flex-direction: column; }
+  .exercise-actions .btn, .exercise-mapping-missing .btn { width: 100%; margin-left: 0; }
   .toolbar-actions { justify-content: flex-start; }
   .scope-fields, .scope-fields label, .scope-fields select { width: 100%; max-width: none; }
   .insufficient { text-align: left; }

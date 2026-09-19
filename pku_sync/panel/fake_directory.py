@@ -26,6 +26,8 @@ from .directory import (
     LAUNCH_FAILED,
 )
 from .fake_workspace import (
+    COURSE_NET,
+    EXERCISE_GENERATED,
     AMBIG_HUB,
     LEARNING_CENTER,
     NOTES_HUB,
@@ -52,6 +54,8 @@ _FAKE_VARIANTS = (
     "empty",
     "usage-cap",
     "low-balance",
+    "exercise-fault-launch",
+    "exercise-missing",
 )
 
 
@@ -88,6 +92,39 @@ class FaultLaunchProvider(PanelDirectoryProvider):
                 fallback=None,
             )
         return super().resolve_launch(data, target_id, course_id=course_id)
+
+
+class ExerciseFaultLaunchProvider(PanelDirectoryProvider):
+    """Fail one exercise launch once so the browser can verify retry."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._remaining_failures = 1
+
+    def resolve_launch(
+        self, data: DirectoryData, target_id: str, *, course_id: str | None = None
+    ) -> LaunchResult:
+        raw = (target_id or "").strip()
+        if raw == EXERCISE_GENERATED and self._remaining_failures:
+            self._remaining_failures -= 1
+            return LaunchResult(
+                status=LAUNCH_FAILED,
+                target_id=raw,
+                url=None,
+                fallback=None,
+            )
+        return super().resolve_launch(data, target_id, course_id=course_id)
+
+
+class ExerciseMissingIdentityProvider(PanelDirectoryProvider):
+    """Keep a directory record whose exercise page identity is absent."""
+
+    def load(self) -> DirectoryData:
+        data = super().load()
+        for item in data.exercises:
+            if item.id == EXERCISE_GENERATED:
+                item.url = ""
+        return data
 
 
 class UsageCapProvider(PanelDirectoryProvider):
@@ -141,6 +178,10 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "usage-cap":
         provider = UsageCapProvider(ws, semester=semester)
+    elif variant == "exercise-fault-launch":
+        provider = ExerciseFaultLaunchProvider(ws, semester=semester)
+    elif variant == "exercise-missing":
+        provider = ExerciseMissingIdentityProvider(ws, semester=semester)
     else:  # low-balance changes only the platform fixture in cli.py
         provider = PanelDirectoryProvider(ws, semester=semester)
     return DirectoryService(provider, clock=clock)
@@ -157,6 +198,8 @@ __all__ = [
     "SLOW_DELAY",
     "PanelDirectoryProvider",
     "FaultLaunchProvider",
+    "ExerciseFaultLaunchProvider",
+    "ExerciseMissingIdentityProvider",
     "UsageCapProvider",
     "build_fake_directory",
     "build_fake_directory_service",

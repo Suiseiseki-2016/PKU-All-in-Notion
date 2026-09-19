@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / fault / fault-launch / empty / usage-cap / low-balance（需配合 --fake）",
+            help="演示状态：normal / slow / fault / fault-launch / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:

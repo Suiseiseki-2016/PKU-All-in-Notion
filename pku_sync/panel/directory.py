@@ -41,6 +41,7 @@ from ..notion_meta import (
     NOTE_TYPE_LABEL,
     DirectoryData,
     LaunchResult,
+    PageRef,
 )
 
 logger = logging.getLogger(__name__)
@@ -567,6 +568,33 @@ class DirectoryService:
         if view == MATERIAL_VIEW_TYPE:
             return build_type_view(data, course)
         return build_all_view(data, course)
+
+    def resolve_exercise_launch(self, exercise_id: str) -> LaunchResult:
+        """Resolve one listed exercise and its owning course fallback.
+
+        The lookup is entirely against the last directory snapshot. Missing
+        or blank identity is explicit and never falls back to another
+        exercise (including a most-recent page).
+        """
+        raw = (exercise_id or "").strip()
+        with self._lock:
+            data = self._data
+        if data is None:
+            return LaunchResult(status=LAUNCH_MISSING_MAPPING, target_id=raw)
+        entity = next((item for item in data.exercises if item.id == raw), None)
+        course_id = entity.parent if entity is not None else None
+        if entity is not None and entity.url:
+            return self.provider.resolve_launch(data, entity.id, course_id=course_id)
+        course = next((item for item in data.courses if item.id == course_id), None)
+        fallback = None
+        if course is not None:
+            fallback = PageRef(id=course.id, url=course.url, title=course.title)
+        return LaunchResult(
+            status=LAUNCH_MISSING_MAPPING,
+            target_id=raw,
+            url=None,
+            fallback=fallback,
+        )
 
     def resolve_launch(
         self, target_id: str, *, course_id: str | None = None
