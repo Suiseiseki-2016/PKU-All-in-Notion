@@ -134,8 +134,10 @@ DIRECTORY_COPY = {
     "empty": {
         "title": "还没有已索引的课程",
         "body": "连接课程并完成首次同步后，讲次与资料索引会出现在这里。",
+        "action": "重新同步",
     },
     "error": {"title": "同步遇到问题", "action": "重新同步"},
+    "success": {"title": "同步完成", "action": "回到总览"},
     "disconnected": {
         "title": DISCONNECTED_DIRECTORY_TITLE,
         "body": DISCONNECTED_DIRECTORY_COPY,
@@ -199,6 +201,9 @@ COURSE_COPY = {
         "hint_mapped": "{topic} · {count} 份关联资料",
         "hint_unmapped": "资料映射待确认 · 可先查看课程资料",
         "empty": "还没有讲次页；完成整理后会自动出现在这里。",
+        "missing_page": "待建讲次页",
+        "missing_page_copy": "讲次页尚未建立 · 整理完成后自动出现",
+        "missing_page_fallback": "查看课程页",
     },
     "materials": {
         "title": "课程资料概览",
@@ -292,6 +297,8 @@ LAUNCH_COPY = {
     "material": "正在打开 Notion 中的资料页。",
     "course": "正在打开 Notion 课程页。",
     "failed": LAUNCH_FAILED_COPY,
+    "retry": "重新打开",
+    "opening": "正在打开 Notion",
 }
 
 PANEL_COPY = {

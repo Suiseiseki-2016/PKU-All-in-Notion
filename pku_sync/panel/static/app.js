@@ -27,6 +27,7 @@
     directory: null,
     directoryError: "",
     directoryLoading: false,
+    syncCompleted: false,
     view: "dashboard",
     courseId: null,
     lectureId: null,
@@ -539,7 +540,19 @@
       esc(COPY.directory.empty.title) +
       "</h2><p>" +
       esc(COPY.directory.empty.body) +
-      "</p></section>"
+      "</p>" +
+      button(COPY.directory.empty.action, "reload-directory", { primary: true, small: true }) +
+      "</section>"
+    );
+  }
+
+  function successDirectoryState() {
+    return (
+      '<section class="state-card wide" role="status" data-state="success"><div class="state-icon" aria-hidden="true">✓</div><h2>' +
+      esc(COPY.directory.success.title) +
+      "</h2>" +
+      button(COPY.directory.success.action, "dismiss-sync-success", { primary: true, small: true }) +
+      "</section>"
     );
   }
 
@@ -710,6 +723,7 @@
     if (!state.directory || !state.directory.courses.length) {
       return emptyDirectoryState();
     }
+    if (state.syncCompleted) return successDirectoryState();
     return null;
   }
 
@@ -790,7 +804,7 @@
   function lectureList(course) {
     var copy = COPY.course.lectures;
     if (!course.lectures.length) {
-      return '<div class="empty-materials"><strong>' + esc(copy.empty) + "</strong></div>";
+      return '<div class="missing-lecture-entry" data-state="missing-page"><strong>' + esc(copy.missing_page) + '</strong><small>' + esc(copy.missing_page_copy) + '</small>' + button(copy.missing_page_fallback, "launch", { small: true, primary: true, attrs: { "data-kind": "course", "data-target": course.id } }) + '</div>';
     }
     var items = course.lectures
       .map(function (lecture) {
@@ -966,6 +980,14 @@
       esc(copy.hint) +
       "</p></aside>"
     );
+  }
+
+  function launchFeedback() {
+    var current = state.launch;
+    if (!current) return "";
+    var copy = COPY.launch;
+    if (current.status === "opening") return '<div class="launch-feedback" role="status" aria-live="polite">' + esc(copy.opening) + '</div>';
+    return '<div class="launch-feedback" role="alert" aria-live="polite"><strong>打开没有成功</strong><span>' + esc(copy.failed) + '</span>' + button(copy.retry, "retry-launch", { small: true, primary: true, attrs: { "data-kind": current.kind, "data-target": current.targetId } }) + '</div>';
   }
 
   function materialControls() {
@@ -1209,6 +1231,7 @@
       "</h1><p>" +
       lines(template(copy.desc, { course: course.title, scope: course.scope })) +
       '</p></div><div class="hero-actions">' +
+      launchFeedback() +
       button(copy.open_lecture, "launch", {
         primary: true,
         icon: "launch",
@@ -1328,7 +1351,9 @@
   }
 
   function syncNow() {
+    state.syncCompleted = false;
     return loadDirectory().then(function () {
+      state.syncCompleted = Boolean(state.directory && state.directory.sync && state.directory.sync.state === "done");
       render();
       if (state.view === "course") return loadOverview();
       if (state.view === "lecture") return loadMaterials();
@@ -1337,22 +1362,23 @@
   }
 
   function launch(kind, targetId) {
+    state.launch = { kind: kind, targetId: targetId, status: "opening" };
+    render();
     return requestJson("/api/launch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        target_id: targetId,
-        course_id: state.courseId
+        target_id: targetId
       })
     }).then(function (result) {
       if (result.ok && result.body && result.body.url) {
         showToast(COPY.launch[kind] || COPY.launch.lecture);
         // the stored identity is opened as-is; no URL is ever built locally
-        var opened = window.open(result.body.url, "_blank", "noopener");
-        if (!opened) window.location.assign(result.body.url);
+        window.location.assign(result.body.url);
         return;
       }
-      showToast((result.body && result.body.detail) || COPY.launch.failed);
+      state.launch = { kind: kind, targetId: targetId, status: "failed" };
+      render();
     });
   }
 
@@ -1424,11 +1450,17 @@
     else if (action === "revoke-notion") disconnectNotion();
     else if (action === "connect-notion") connectNotion();
     else if (action === "reload-directory") syncNow();
+    else if (action === "dismiss-sync-success") {
+      state.syncCompleted = false;
+      openDashboard();
+    }
     else if (action === "open-dashboard") openDashboard();
     else if (action === "open-course") openCourse(target.dataset.course);
     else if (action === "select-lecture") {
       selectLecture(target.dataset.course, target.dataset.lecture);
     } else if (action === "launch") {
+      launch(target.dataset.kind, target.dataset.target);
+    } else if (action === "retry-launch") {
       launch(target.dataset.kind, target.dataset.target);
     }
   });

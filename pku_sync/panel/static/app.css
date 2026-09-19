@@ -912,3 +912,9 @@ h1, h2, h3, p { margin-top: 0; }
   .connection-item { flex-wrap: wrap; }
   .state-card { min-height: 200px; }
 }
+
+.missing-lecture-entry { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px; border: 1px dashed #d6dcd5; border-radius: 12px; background: #fbfcfa; }
+.missing-lecture-entry strong { color: #344054; }
+.missing-lecture-entry small { color: #667085; flex: 1 1 240px; }
+.launch-feedback { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 12px 16px; border-radius: 12px; background: #f0f7f1; color: #245b37; }
+.launch-feedback[role="alert"] { background: #fff3f0; color: #a33724; }
