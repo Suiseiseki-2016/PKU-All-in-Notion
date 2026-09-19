@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def default_cache_path(data_dir: Path | str) -> Path:
@@ -32,6 +32,10 @@ class IdentityCache:
             "semester_page": data.semester_page.model_dump() if data.semester_page else None,
             "notes_hub": data.notes_hub.model_dump() if data.notes_hub else None,
             "material_database": data.material_database.model_dump(),
+            "wrong_answer_database": (
+                data.wrong_answer_database.model_dump()
+                if data.wrong_answer_database is not None else None
+            ),
             "courses": [course.model_dump() for course in data.courses],
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,5 +51,13 @@ class IdentityCache:
         except (OSError, ValueError):
             return None
         if not isinstance(raw, dict) or raw.get("version") != CACHE_VERSION:
+            return None
+        if "wrong_answer_database" not in raw:
+            return None
+        target = raw["wrong_answer_database"]
+        if target is not None and (
+            not isinstance(target, dict)
+            or not all(str(target.get(key) or "").strip() for key in ("id", "url", "title"))
+        ):
             return None
         return raw

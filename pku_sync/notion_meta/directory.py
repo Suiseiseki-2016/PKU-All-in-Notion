@@ -50,6 +50,8 @@ from .titles import (
 # FIRST; only the exhausted error reaches the adapter. Workspace usage caps
 # are real (hit 2026-09-17) and may not arrive as a plain 429, so the pinned
 # rate/usage phrases also mark an error retryable.
+WRONG_ANSWER_DATABASE_TITLE = "\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898"
+
 _RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
 _RETRYABLE_TEXT_PATTERNS = (
     "rate_limit",
@@ -110,6 +112,26 @@ class NotionDirectory:
         material_database = PageRef(
             id=index_block["id"], url=canonical_url(index_block["id"]), title=index_block["title"]
         )
+        wrong_matches = [
+            db for db in databases if db["title"] == WRONG_ANSWER_DATABASE_TITLE
+        ]
+        wrong_answer_database = None
+        wrong_answer_setup_error = ""
+        if len(wrong_matches) == 1:
+            wrong_block = wrong_matches[0]
+            wrong_answer_database = PageRef(
+                id=wrong_block["id"],
+                url=canonical_url(wrong_block["id"]),
+                title=wrong_block["title"],
+            )
+        elif not wrong_matches:
+            wrong_answer_setup_error = (
+                "\u672a\u627e\u5230\u300c\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898\u300d\u6570\u636e\u5e93\uff0c\u8bf7\u5728\u5f53\u524d\u5b66\u671f Class Notes hub \u4e0b\u5efa\u7acb\u8be5\u6570\u636e\u5e93\u3002"
+            )
+        else:
+            wrong_answer_setup_error = (
+                f"\u627e\u5230 {len(wrong_matches)} \u4e2a\u300c\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898\u300d\u6570\u636e\u5e93\uff0c\u8bf7\u4fdd\u7559\u552f\u4e00\u7684\u76f4\u63a5\u5b50\u6570\u636e\u5e93\u540e\u91cd\u8bd5\u3002"
+            )
 
         # Schema first, then rows (VAL-META-004): an explicit error on any
         # missing/renamed/wrong-type property, never a silent empty directory.
@@ -149,6 +171,8 @@ class NotionDirectory:
             semester=label,
             hub=hub,
             material_database=material_database,
+            wrong_answer_database=wrong_answer_database,
+            wrong_answer_setup_error=wrong_answer_setup_error,
             semester_page=semester_pages[0] if semester_pages else None,
             notes_hub=notes_hubs[0] if notes_hubs else None,
             courses=courses,

@@ -49,7 +49,6 @@ class Settings(BaseSettings):
     # Internal integration token for the native Notion REST client
     # fallback. The default path uses the official Notion MCP server instead.
     notion_token: str = ""
-    notion_wrong_answer_hub_id: str = ""
 
     # Optional self-hosted REST OAuth fallback. Normal users do not need these:
     # Claude, Codex, or Factory owns the official Notion MCP OAuth session.

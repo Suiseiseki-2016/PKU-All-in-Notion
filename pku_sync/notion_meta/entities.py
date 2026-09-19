@@ -145,6 +145,10 @@ class DirectoryData(BaseModel):
     semester: str
     hub: HubInfo
     material_database: PageRef
+    # Backend-only grading authority. Exclusion keeps it out of generic
+    # metadata serialization and therefore out of every panel payload.
+    wrong_answer_database: PageRef | None = Field(default=None, exclude=True)
+    wrong_answer_setup_error: str = Field(default="", exclude=True)
     semester_page: PageRef | None = None
     notes_hub: PageRef | None = None
     courses: list[CourseEntity] = Field(default_factory=list)

@@ -150,8 +150,10 @@ class NotionClient:
             self.append_blocks(page["id"], children[_BLOCK_BATCH:])
         return page
 
-    def create_database_row(self, database_id: str, properties: dict) -> dict:
-        """Create one row in a database (registration step; never overwrite)."""
+    def create_database_row(
+        self, database_id: str, properties: dict, *, retry: bool = True
+    ) -> dict:
+        """Create one row; callers may disable retries for ambiguous writes."""
         return self._request(
             "POST",
             "/v1/pages",
@@ -159,6 +161,7 @@ class NotionClient:
                 "parent": {"database_id": _norm_id(database_id)},
                 "properties": properties,
             },
+            retry=retry,
         )
 
     def update_page_properties(self, page_id: str, properties: dict) -> dict:
@@ -276,9 +279,10 @@ class NotionClient:
         return self._request("GET", f"/v1/databases/{_norm_id(database_id)}")
 
     def query_database(
-        self, database_id: str, *, filter: dict | None = None, page_size: int = 100
+        self, database_id: str, *, filter: dict | None = None,
+        page_size: int = 100, max_results: int | None = None,
     ) -> list[dict]:
-        """Rows as raw page objects, following pagination."""
+        """Rows as raw page objects, optionally stopping at a safe bound."""
         rows: list[dict] = []
         cursor: str | None = None
         while True:
@@ -291,6 +295,8 @@ class NotionClient:
                 "POST", f"/v1/databases/{_norm_id(database_id)}/query", json_body=payload
             )
             rows.extend(data.get("results") or [])
+            if max_results is not None and len(rows) >= max_results:
+                return rows[:max_results]
             if not data.get("has_more"):
                 return rows
             cursor = data.get("next_cursor")

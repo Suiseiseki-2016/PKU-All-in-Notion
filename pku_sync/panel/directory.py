@@ -664,6 +664,22 @@ class DirectoryService:
             fallback=fallback,
         )
 
+    def wrong_answer_database_identity(self) -> PageRef:
+        """Return the current generation's backend-only wrong-answer target."""
+        data, generation = self._snapshot()
+        identity = data.wrong_answer_database
+        if identity is None:
+            reason = data.wrong_answer_setup_error or (
+                "\u300c\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898\u300d\u6570\u636e\u5e93\u4e0d\u53ef\u7528\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u5e76\u68c0\u67e5 Notion \u8bbe\u7f6e\u3002"
+            )
+            raise DirectoryApiError(503, reason)
+        if not identity.id or not identity.url or not identity.title:
+            raise DirectoryApiError(
+                503, "\u300c\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898\u300d\u6570\u636e\u5e93\u8eab\u4efd\u4e0d\u5b8c\u6574\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u540e\u91cd\u8bd5\u3002"
+            )
+        self._validate_snapshot(data, generation)
+        return identity
+
     def exercise_grade_target(self, exercise_id: str) -> dict | None:
         """Build one grade target from the cached selected exercise only."""
         raw = (exercise_id or "").strip()

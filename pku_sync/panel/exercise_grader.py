@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from ..notion import get_client, markdown_to_blocks
+from ..notion import get_client, markdown_to_blocks, prop_title
 from ..notion_meta import ANSWER_AREA_MARKERS, GRADING_MARKERS
 from .exercises import exercise_scope
 
@@ -75,8 +75,41 @@ class GradeSettlementError(RuntimeError):
 class RealGradingPageAdapter:
     """Read one selected page; write only an append/update grading section."""
 
-    def __init__(self, settings):
+    def __init__(self, settings, directory_service=None):
         self.settings = settings
+        self.directory_service = directory_service
+        self._wrong_answer_database = None
+        self._wrong_answer_title_property = ""
+
+    def preflight_wrong_answer_database(self) -> None:
+        """Resolve identity and real title property before any relay charge."""
+        # Resolve against the current directory generation for every grading
+        # prepare. A refreshed workspace must never inherit a stale target.
+        if self.directory_service is None:
+            raise GradeBlocked("\u9519\u9898\u6570\u636e\u5e93\u4e0d\u53ef\u7528\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u5e76\u68c0\u67e5 Notion \u8bbe\u7f6e\u3002")
+        try:
+            identity = self.directory_service.wrong_answer_database_identity()
+        except Exception as exc:
+            reason = getattr(exc, "message", str(exc))
+            raise GradeBlocked(reason or "\u9519\u9898\u6570\u636e\u5e93\u4e0d\u53ef\u7528\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u5e76\u68c0\u67e5 Notion \u8bbe\u7f6e\u3002") from exc
+        with get_client(self.settings) as client:
+            schema = client.get_database(identity.id)
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        title_names = [
+            name for name, prop in (properties or {}).items()
+            if isinstance(prop, dict) and prop.get("type") == "title"
+        ]
+        if len(title_names) != 1:
+            raise GradeBlocked(
+                "\u300c\u77e5\u8bc6\u70b9\u4e0e\u9519\u9898\u300d\u6570\u636e\u5e93\u5fc5\u987b\u6709\u4e14\u4ec5\u6709\u4e00\u4e2a\u6807\u9898\u5c5e\u6027\uff0c\u8bf7\u4fee\u6b63 Notion \u8bbe\u7f6e\u540e\u91cd\u8bd5\u3002"
+            )
+        self._wrong_answer_database = identity
+        self._wrong_answer_title_property = title_names[0]
+
+    def _wrong_answer_target(self):
+        if self._wrong_answer_database is None or not self._wrong_answer_title_property:
+            self.preflight_wrong_answer_database()
+        return self._wrong_answer_database, self._wrong_answer_title_property
 
     def read_for_grading(self, target: GradeTarget) -> GradingInput:
         with get_client(self.settings) as client:
@@ -200,51 +233,62 @@ class RealGradingPageAdapter:
 
     def ensure_wrong_answer(self, target: GradeTarget, question: dict[str, Any], *,
                             key: str, operation_id: str) -> None:
-        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
-        if not hub_id:
+        if self.directory_service is None:
             raise GradeBlocked("\u9519\u9898\u672c\u672a\u914d\u7f6e\uff0c\u65e0\u6cd5\u5b8c\u6210\u9519\u9898\u767b\u8bb0\u3002")
+        identity, title_property = self._wrong_answer_target()
         if self.verify_wrong_answer(target, question, key=key, operation_id=operation_id):
             return
-        title = f"{target.title} \u7b2c{question.get('number')}\u9898 \u00b7 {key}"
-        children = markdown_to_blocks(
-            f"\u767b\u8bb0\u952e\uff1a{key}\n\n\u6765\u6e90\u7ec3\u4e60\uff1a{target.title}\n\n\u9898\u53f7\uff1a{question.get('number')}\n\n\u9898\u578b\uff1a{question.get('type')}"
-        )
+        title = _wrong_answer_row_title(target, question, key)
         with get_client(self.settings) as client:
             try:
-                client.create_page(hub_id, title, children=children, retry=False)
+                client.create_database_row(
+                    identity.id, {title_property: prop_title(title)}, retry=False
+                )
             except Exception:
-                if not self.verify_wrong_answer(target, question, key=key, operation_id=operation_id):
+                if not self.verify_wrong_answer(
+                    target, question, key=key, operation_id=operation_id
+                ):
                     raise
+        if not self.verify_wrong_answer(
+            target, question, key=key, operation_id=operation_id
+        ):
+            raise GradeBlocked("\u9519\u9898\u767b\u8bb0\u5199\u5165\u540e\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
 
     def verify_wrong_answer(self, target: GradeTarget, question: dict[str, Any], *,
                             key: str, operation_id: str) -> bool:
-        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
-        if not hub_id:
+        if self.directory_service is None:
             return False
+        identity, _title_property = self._wrong_answer_target()
+        title = _wrong_answer_row_title(target, question, key)
         with get_client(self.settings) as client:
-            rows = client.list_child_pages(hub_id)
-        return any(str(row.get("title") or "").endswith(f" \u00b7 {key}") for row in rows)
+            rows = client.query_database(
+                identity.id,
+                filter={"property": self._wrong_answer_title_property,
+                        "title": {"equals": title}},
+                page_size=2,
+                max_results=2,
+            )
+        if len(rows) > 1:
+            raise GradeBlocked(
+                "\u9519\u9898\u767b\u8bb0\u952e\u5b58\u5728\u91cd\u590d\u884c\uff0c\u65e0\u6cd5\u5b89\u5168\u7ee7\u7eed\uff0c\u8bf7\u68c0\u67e5 Notion \u6570\u636e\u5e93\u3002"
+            )
+        return len(rows) == 1
 
     def wrong_answer_exists(self, target: GradeTarget, question: dict[str, Any]) -> bool:
-        """Use an explicitly configured hub only; never search by title."""
-        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
-        if not hub_id:
+        key = str(question.get("wrong_answer_key") or question.get("number") or "")
+        if not key:
             return False
-        with get_client(self.settings) as client:
-            rows = client.list_child_pages(hub_id)
-        marker = str(question.get("wrong_answer_key") or question.get("number") or "")
-        return any(marker and marker in str(row.get("title") or "") for row in rows)
+        return self.verify_wrong_answer(
+            target, question, key=key, operation_id="legacy"
+        )
 
     def create_wrong_answer(self, target: GradeTarget, question: dict[str, Any]) -> None:
-        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
-        if not hub_id:
-            return
-        title = str(question.get("wrong_answer_key") or f"{target.title} 第{question.get('number')}题")
-        children = markdown_to_blocks(
-            f"来源练习：{target.title}\n\n题号：{question.get('number')}\n\n题型：{question.get('type')}"
+        key = str(question.get("wrong_answer_key") or question.get("number") or "")
+        if not key:
+            raise GradeBlocked("\u9519\u9898\u7f3a\u5c11\u53ef\u8bc6\u522b\u7684\u9898\u53f7\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+        self.ensure_wrong_answer(
+            target, question, key=key, operation_id="legacy"
         )
-        with get_client(self.settings) as client:
-            client.create_page(hub_id, title, children=children)
 
 
 class FakeGradingPageAdapter:
@@ -313,6 +357,9 @@ class ExerciseGrader:
         if target is None:
             raise GradeBlocked("\u7ec3\u4e60\u9875\u6620\u5c04\u7f3a\u5931\uff0c\u65e0\u6cd5\u786e\u5b9a\u6279\u6539\u76ee\u6807\u3002")
         grade_target = GradeTarget(operation="grade", page_id=target["page_id"], page_url=target["page_url"], title=target["title"], course_id=target["course_id"], course_title=target["course_title"], scope=target["scope"])
+        preflight = getattr(self.page_adapter, "preflight_wrong_answer_database", None)
+        if preflight is not None:
+            preflight()
         verify_parent = getattr(self.page_adapter, "verify_parent", None)
         if verify_parent is not None:
             verify_parent(grade_target)
@@ -590,6 +637,13 @@ class ExerciseGrader:
             for row in rows:
                 if not exists(target, row):
                     create(target, row)
+
+
+def _wrong_answer_row_title(
+    target: GradeTarget, question: dict[str, Any], key: str
+) -> str:
+    return f"{target.title} \u7b2c{question.get('number')}\u9898 \u00b7 {key}"
+
 
 def _wrong_answer_operation_key(operation_id: str, question: dict[str, Any]) -> str:
     logical = str(question.get("wrong_answer_key") or question.get("number") or "").strip()
@@ -912,7 +966,7 @@ def _result_markdown(content: str, *, score: float, graded_at: str) -> str:
 
 
 def make_grading_service(settings, directory_service, relay):
-    return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=RealGradingPageAdapter(settings))
+    return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=RealGradingPageAdapter(settings, directory_service))
 
 
 def make_fake_grading_service(directory_service, relay):
