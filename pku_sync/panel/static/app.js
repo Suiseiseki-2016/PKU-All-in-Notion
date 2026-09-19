@@ -736,7 +736,10 @@
     }
     if (g.status === "completed" && g.result) {
       var r = g.result;
-      return '<section class="exercise-toolbar grading-summary" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><h2>' + esc(r.title) + '</h2><p>得分：' + esc(r.score) + '</p><p>批改时间：' + esc(r.graded_at) + '</p><span class="cost-pill">' + esc(template(copy.settlement, { points: r.points_charged })) + '</span><div class="toolbar-actions">' + button(copy.result, "grading-result", { primary: true, attrs: { "data-url": r.result_page_url } }) + button(copy.back, "grading-back", { quiet: true }) + '</div></section>';
+      var settlement = typeof r.points_charged === "number"
+        ? template(copy.settlement, { points: r.points_charged })
+        : COPY.directory.exercises.settlement_unknown;
+      return '<section class="exercise-toolbar grading-summary" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><h2>' + esc(r.title) + '</h2><p>\u5f97\u5206\uff1a' + esc(r.score) + '</p><p>\u6279\u6539\u65f6\u95f4\uff1a' + esc(r.graded_at) + '</p><span class="cost-pill">' + esc(settlement) + '</span><div class="toolbar-actions">' + button(copy.result, "grading-result", { primary: true, attrs: { "data-url": r.result_page_url } }) + button(copy.back, "grading-back", { quiet: true }) + '</div></section>';
     }
     return "";
   }
