@@ -14,6 +14,13 @@ class _GradeJob:
     job_id: str = ""
     title: str = ""
     result: dict[str, Any] | None = None
+_RELAY_BLOCKED_REASONS = {
+    401: "云端登录已失效，请重新激活后重试。",
+    402: "AI 点不足，请兑换新额度后重试。",
+    503: "AI 服务暂未配置，请联系管理员后重试。",
+}
+_RELAY_RETRY_REASON = "AI 服务暂时没有完成请求，请稍后重试。"
+
 class GradeJobController:
     def __init__(self, service): self.service = service; self._lock = threading.Lock(); self._job = _GradeJob()
     def start(self, exercise_id: str):
@@ -38,7 +45,14 @@ class GradeJobController:
     def _execute(self, job_id, prepared):
         try: result = self.service.grade(prepared)
         except GradeBlocked as exc: result = {"status": "blocked", "reason": exc.reason, "unanswered": exc.unanswered}
-        except Exception: result = {"status": "failed", "reason": "批改没有完成，请稍后重试。"}
+        except Exception as exc:
+            relay_status = getattr(exc, "status_code", None)
+            if relay_status in (401, 402, 503):
+                result = {"status": "blocked", "reason": _RELAY_BLOCKED_REASONS[relay_status]}
+            elif relay_status == 502:
+                result = {"status": "failed", "reason": _RELAY_RETRY_REASON, "retryable": True}
+            else:
+                result = {"status": "failed", "reason": "批改没有完成，请稍后重试。"}
         with self._lock:
             if self._job.job_id == job_id: self._job.state = "done"; self._job.result = result
     def snapshot(self, job_id):

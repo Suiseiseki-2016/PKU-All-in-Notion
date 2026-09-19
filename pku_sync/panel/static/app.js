@@ -682,6 +682,9 @@
     if (g.status === "blocked") {
       return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.blocked) + '</strong><span>' + esc(g.blocked) + '</span>' + (g.unanswered.length ? '<span>未回答：' + esc(g.unanswered.join("、")) + '</span>' : '') + button(copy.back, "grading-back", { small: true, primary: true }) + '</section>';
     }
+    if (g.status === "failed") {
+      return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.failed) + '</strong><span>' + esc(g.blocked) + '</span>' + button(copy.retry, "grading-retry", { small: true, primary: true, attrs: { "data-exercise": g.exerciseId } }) + button(copy.back, "grading-back", { small: true, quiet: true }) + '</section>';
+    }
     if (g.status === "completed" && g.result) {
       var r = g.result;
       return '<section class="exercise-toolbar grading-summary" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><h2>' + esc(r.title) + '</h2><p>得分：' + esc(r.score) + '</p><p>批改时间：' + esc(r.graded_at) + '</p><span class="cost-pill">' + esc(template(copy.settlement, { points: r.points_charged })) + '</span><div class="toolbar-actions">' + button(copy.result, "grading-result", { primary: true, attrs: { "data-url": r.result_page_url } }) + button(copy.back, "grading-back", { quiet: true }) + '</div></section>';
@@ -1521,7 +1524,7 @@
     render();
     requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/grade", { method: "POST" }).then(function (result) {
       if (!result.ok || !result.body || result.body.status !== "running") {
-        state.grading.status = "blocked";
+        state.grading.status = result.body && result.body.status === "failed" ? "failed" : "blocked";
         state.grading.blocked = result.body && (result.body.reason || result.body.detail) || COPY.directory.exercises.grading.blocked;
         state.grading.unanswered = result.body && result.body.unanswered || []; render(); return;
       }
@@ -1532,7 +1535,7 @@
         requestJson("/api/exercises/grade/status?job_id=" + encodeURIComponent(state.grading.jobId)).then(function (next) {
           if (next.body && next.body.status === "running" && attempts < POLL_MAX_ATTEMPTS) { window.setTimeout(pollGrade, 250); return; }
           if (next.body && next.body.status === "completed") { state.grading.status = "completed"; state.grading.result = next.body; }
-          else { state.grading.status = "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.unanswered = next.body && next.body.unanswered || []; }
+          else { state.grading.status = next.body && next.body.status === "failed" ? "failed" : "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.unanswered = next.body && next.body.unanswered || []; }
           if (next.body && typeof next.body.points_remaining === "number" && state.quota) {
             state.quota.llm_points_remaining = next.body.points_remaining;
           }
@@ -1688,6 +1691,8 @@
       launchExerciseFallback(target.dataset.exercise);
     } else if (action === "grade-exercise") {
       startGrading(target.dataset.target);
+    } else if (action === "grading-retry") {
+      startGrading(target.dataset.exercise || state.grading.exerciseId);
     } else if (action === "grading-back") {
       state.grading = { exerciseId: null, title: "", status: "idle", jobId: null, result: null, blocked: "", unanswered: [] }; render();
     } else if (action === "grading-result") {

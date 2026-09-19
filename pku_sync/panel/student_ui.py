@@ -163,7 +163,9 @@ DIRECTORY_COPY = {
             "settlement": "本次消耗 {points} AI 点",
             "result": "在 Notion 查看解析",
             "back": "回到练习目录",
-            "blocked": "批改没有开始，请先完成作答。"
+            "blocked": "批改没有开始，请先完成作答。",
+            "failed": "批改服务暂时没有完成请求。",
+            "retry": "重试"
         },
         "launch": {
             "opening": "\u6b63\u5728\u6253\u5f00 Notion",
