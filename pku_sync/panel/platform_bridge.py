@@ -25,6 +25,10 @@ class RealPlatformBridge:
         from ..platform import llm
         return llm("quiz", prompt, self._settings)
 
+    def grade(self, prompt: str) -> dict:
+        from ..platform import llm
+        return llm("grade", prompt, self._settings)
+
 
 class FakePlatformBridge:
     """Seeded fake with deterministic local metering and no network."""
@@ -59,6 +63,16 @@ class FakePlatformBridge:
             {"type": "判断", "question": "练习题二", "source": "第一讲", "answer": "正确"},
             {"type": "填空", "question": "练习题三", "source": "第一讲", "answer": "分层"},
         ]}, ensure_ascii=False), "points_charged": self._points_charged}
+
+    def grade(self, prompt: str) -> dict:
+        if not self._activated:
+            raise PlatformError("云端登录已失效，请重新激活后重试。")
+        self.llm_calls.append({"operation": "grade"})
+        self._llm_points -= self._points_charged
+        return {
+            "content": json.dumps({"score": 88, "details": []}, ensure_ascii=False),
+            "points_charged": self._points_charged,
+        }
 
 
 __all__ = ["FAKE_TRANSCRIBE_SECONDS", "FAKE_LLM_POINTS", "RealPlatformBridge",

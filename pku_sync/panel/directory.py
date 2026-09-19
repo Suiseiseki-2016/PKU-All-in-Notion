@@ -30,7 +30,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Protocol
 
-from .exercises import ExerciseEventStore, exercise_row
+from .exercises import ExerciseEventStore, exercise_row, exercise_scope
 
 from ..notion_meta import (
     ASSOCIATION_CONFIRMED,
@@ -595,6 +595,29 @@ class DirectoryService:
             url=None,
             fallback=fallback,
         )
+
+    def exercise_grade_target(self, exercise_id: str) -> dict | None:
+        """Build one grade target from the cached selected exercise only."""
+        raw = (exercise_id or "").strip()
+        with self._lock:
+            data = self._data
+        if data is None:
+            return None
+        entity = next((item for item in data.exercises if item.id == raw), None)
+        if entity is None or not entity.id or not entity.url:
+            return None
+        course = next((item for item in data.courses if item.id == entity.parent), None)
+        if course is None:
+            return None
+        return {
+            "operation": "grade",
+            "page_id": entity.id,
+            "page_url": entity.url,
+            "title": entity.title,
+            "course_id": course.id,
+            "course_title": course.title,
+            "scope": exercise_scope(entity.title),
+        }
 
     def resolve_launch(
         self, target_id: str, *, course_id: str | None = None

@@ -99,35 +99,6 @@ def add_directory_routes(app, service: DirectoryService) -> None:
             },
         )
 
-    @app.post("/api/exercises/{exercise_id}/grade")
-    def exercise_grade_identity_guard(exercise_id: str):
-        result = service.resolve_exercise_launch(exercise_id)
-        if result.status == LAUNCH_OPENED:
-            return JSONResponse(
-                status_code=501,
-                content={
-                    "status": "grading_not_available",
-                    "reason": "批改服务尚未就绪。",
-                },
-            )
-        if result.status == LAUNCH_FAILED:
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "status": LAUNCH_FAILED,
-                    "reason": LAUNCH_FAILED_COPY,
-                    "fallback": None,
-                },
-            )
-        fallback = result.fallback.model_dump() if result.fallback else None
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": PAGE_IDENTITY_MISSING,
-                "reason": EXERCISE_IDENTITY_MISSING_REASON,
-                "fallback": fallback,
-            },
-        )
     @app.get("/api/sync/state")
     def sync_state_endpoint() -> dict:
         return service.sync_snapshot()

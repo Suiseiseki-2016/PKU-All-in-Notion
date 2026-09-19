@@ -154,7 +154,17 @@ DIRECTORY_COPY = {
         "list_label": "\u7ec3\u4e60\u5217\u8868",
         "actions": {"organized": "\u5728 Notion \u4f5c\u7b54", "pending-answer": "\u5728 Notion \u4f5c\u7b54", "pending-grade": "\u6279\u6539\u5df2\u63d0\u4ea4\u7b54\u6848", "graded": "\u5728 Notion \u67e5\u770b\u89e3\u6790"},
         "empty": "\u8fd8\u6ca1\u6709\u5df2\u6574\u7406\u7684\u7ec3\u4e60\u3002\u5b8c\u6210\u7ec4\u7ec7\u540e\uff0c\u7ec3\u4e60\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002",
-        "grade_notice": "\u6279\u6539\u5165\u53e3\u5c06\u5728\u7ec3\u4e60\u670d\u52a1\u5c31\u7eea\u540e\u5f00\u653e\u3002",
+        "grade_notice": "批改入口将在练习服务就绪后开放。",
+        "grading": {
+            "working": "正在批改「{title}」",
+            "explanation": "请稍候，完成后会显示分数和结算。",
+            "estimate": "预计 1–5 AI 点 · 完成后按实际用量结算",
+            "completed": "批改完成",
+            "settlement": "本次消耗 {points} AI 点",
+            "result": "在 Notion 查看解析",
+            "back": "回到练习目录",
+            "blocked": "批改没有开始，请先完成作答。"
+        },
         "launch": {
             "opening": "\u6b63\u5728\u6253\u5f00 Notion",
             "failed_title": "\u6253\u5f00\u6ca1\u6709\u6210\u529f",

@@ -21,6 +21,7 @@
     quota: null,
     organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "" },
     exerciseLaunch: null,
+    grading: { exerciseId: null, title: "", status: "idle", jobId: null, result: null, blocked: "", unanswered: [] },
     connection: {
       state: "disconnected",
       connected: false,
@@ -667,6 +668,23 @@
     var copy = COPY.directory.exercises.launch;
     return '<div class="exercise-mapping-missing" role="status" data-state="page_identity_missing"><strong>' + esc(copy.missing_title) + '</strong><span>' + esc(copy.missing_body) + '</span>' + button(copy.fallback, "launch-exercise-fallback", { small: true, attrs: { "data-exercise": row.id } }) + '</div>';
   }
+  function gradingCard() {
+    var g = state.grading;
+    if (!g || g.status === "idle") return "";
+    var copy = COPY.directory.exercises.grading;
+    if (g.status === "running") {
+      return '<section class="exercise-toolbar grading-card" aria-busy="true" aria-live="polite" role="status"><span class="spinner" aria-hidden="true"></span><strong>' + esc(template(copy.working, { title: g.title })) + '</strong><span>' + esc(copy.explanation) + '</span><span class="cost-pill">' + esc(copy.estimate) + '</span></section>';
+    }
+    if (g.status === "blocked") {
+      return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.blocked) + '</strong><span>' + esc(g.blocked) + '</span>' + (g.unanswered.length ? '<span>未回答：' + esc(g.unanswered.join("、")) + '</span>' : '') + button(copy.back, "grading-back", { small: true, primary: true }) + '</section>';
+    }
+    if (g.status === "completed" && g.result) {
+      var r = g.result;
+      return '<section class="exercise-toolbar grading-summary" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><h2>' + esc(r.title) + '</h2><p>得分：' + esc(r.score) + '</p><p>批改时间：' + esc(r.graded_at) + '</p><span class="cost-pill">' + esc(template(copy.settlement, { points: r.points_charged })) + '</span><div class="toolbar-actions">' + button(copy.result, "grading-result", { primary: true, attrs: { "data-url": r.result_page_url } }) + button(copy.back, "grading-back", { quiet: true }) + '</div></section>';
+    }
+    return "";
+  }
+
   function exerciseDirectorySection() {
     var rows = state.directory.exercises ? state.directory.exercises : [];
     var copy = COPY.directory.exercises;
@@ -675,7 +693,7 @@
       var purpose = row.status === "graded" ? "result" : "answer";
       var actionName = row.status === "pending-grade" ? "grade-exercise" : "launch-exercise";
       var identityMissing = !row.url;
-      var action = button(exerciseAction(row), actionName, { primary: row.status === "pending-grade" || row.status === "graded", small: true, disabled: !state.connection.connected || identityMissing, attrs: { "data-exercise": row.id, "data-target": row.id, "data-purpose": purpose } });
+      var action = button(exerciseAction(row), actionName, { primary: row.status === "pending-grade" || row.status === "graded", small: true, disabled: !state.connection.connected || identityMissing || state.grading.status === "running", attrs: { "data-exercise": row.id, "data-target": row.id, "data-purpose": purpose } });
       return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p>' + (identityMissing ? missingExerciseIdentity(row) : exerciseLaunchFeedback(row)) + '</div><div class="exercise-actions">' + action + '</div></article>';
     }).join("");
     return '<section aria-labelledby="exercise-directory-title"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-directory" role="list" aria-label="' + esc(copy.list_label) + '">' + items + '</div></section>';
@@ -792,7 +810,7 @@
     var fallback = directoryBody();
     var body = fallback
       ? fallback
-      : statsSection() + organizeCard() + exerciseDirectorySection() + courseGrid() + activitySection();
+      : statsSection() + organizeCard() + gradingCard() + exerciseDirectorySection() + courseGrid() + activitySection();
     return (
       '<div class="topline"><div><h1 class="page-title">' +
       esc(COPY.directory.title) +
@@ -1490,6 +1508,32 @@
     }).then(function (result) { return finishOrganize(result, result.body && result.body.job_id); })
       .catch(function () { blockOrganize(copy.blocked); });
   }
+  function startGrading(targetId) {
+    var row = (state.directory && state.directory.exercises || []).find(function (item) { return item.id === targetId; });
+    if (!row || !row.url) return;
+    state.grading = { exerciseId: targetId, title: row.title, status: "running", jobId: null, result: null, blocked: "", unanswered: [] };
+    render();
+    requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/grade", { method: "POST" }).then(function (result) {
+      if (!result.ok || !result.body || result.body.status !== "running") {
+        state.grading.status = "blocked";
+        state.grading.blocked = result.body && (result.body.reason || result.body.detail) || COPY.directory.exercises.grading.blocked;
+        state.grading.unanswered = result.body && result.body.unanswered || []; render(); return;
+      }
+      state.grading.jobId = result.body.job_id; render();
+      var attempts = 0;
+      function pollGrade() {
+        attempts += 1;
+        requestJson("/api/exercises/grade/status?job_id=" + encodeURIComponent(state.grading.jobId)).then(function (next) {
+          if (next.body && next.body.status === "running" && attempts < POLL_MAX_ATTEMPTS) { window.setTimeout(pollGrade, 250); return; }
+          if (next.body && next.body.status === "completed") { state.grading.status = "completed"; state.grading.result = next.body; }
+          else { state.grading.status = "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.unanswered = next.body && next.body.unanswered || []; }
+          render();
+        }).catch(function () { state.grading.status = "blocked"; state.grading.blocked = COPY.directory.exercises.grading.blocked; render(); });
+      }
+      pollGrade();
+    }).catch(function () { state.grading.status = "blocked"; state.grading.blocked = COPY.directory.exercises.grading.blocked; render(); });
+  }
+
   function launchExerciseFallback(targetId) {
     return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/launch", {
       method: "POST",
@@ -1634,7 +1678,11 @@
     } else if (action === "launch-exercise-fallback") {
       launchExerciseFallback(target.dataset.exercise);
     } else if (action === "grade-exercise") {
-      showToast(COPY.directory.exercises.grade_notice);
+      startGrading(target.dataset.target);
+    } else if (action === "grading-back") {
+      state.grading = { exerciseId: null, title: "", status: "idle", jobId: null, result: null, blocked: "", unanswered: [] }; render();
+    } else if (action === "grading-result") {
+      if (target.dataset.url) window.location.assign(target.dataset.url);
     } else if (action === "launch") {
       launch(target.dataset.kind, target.dataset.target);
     } else if (action === "retry-launch") {
