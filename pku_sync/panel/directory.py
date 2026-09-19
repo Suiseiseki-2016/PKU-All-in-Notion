@@ -489,6 +489,7 @@ class DirectoryService:
         self.exercise_events = exercise_events or ExerciseEventStore()
         self.sync = SyncTracker(clock=clock)
         self._data: DirectoryData | None = None
+        self._organized_exercises: dict[str, object] = {}
         self._lock = threading.Lock()
 
     def sync_snapshot(self) -> dict:
@@ -512,6 +513,10 @@ class DirectoryService:
             self.sync.fail(reason)
             raise DirectoryApiError(503, reason) from exc
         with self._lock:
+            for entity in self._organized_exercises.values():
+                if all(item.id != entity.id for item in data.exercises):
+                    data.exercises.append(entity)
+                    data.exercises_by_course.setdefault(entity.parent, []).append(entity)
             self._data = data
         self.sync.succeed(data)
         return build_directory_payload(
@@ -524,6 +529,13 @@ class DirectoryService:
         """Record a Notion answering launch without storing exercise content."""
         self.exercise_events.mark_launched(exercise_id)
 
+    def register_exercise(self, entity) -> None:
+        """Add a newly organized page to subsequent metadata-only payloads."""
+        with self._lock:
+            self._organized_exercises[entity.id] = entity
+            if self._data is not None and all(item.id != entity.id for item in self._data.exercises):
+                self._data.exercises.append(entity)
+                self._data.exercises_by_course.setdefault(entity.parent, []).append(entity)
     def invalidate(self) -> None:
         """Drop the cached directory (used when the Notion token is cleared).
 

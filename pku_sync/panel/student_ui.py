@@ -150,6 +150,23 @@ DIRECTORY_COPY = {
         "actions": {"organized": "\u5728 Notion \u4f5c\u7b54", "pending-answer": "\u5728 Notion \u4f5c\u7b54", "pending-grade": "\u6279\u6539\u5df2\u63d0\u4ea4\u7b54\u6848", "graded": "\u5728 Notion \u67e5\u770b\u89e3\u6790"},
         "empty": "\u8fd8\u6ca1\u6709\u5df2\u6574\u7406\u7684\u7ec3\u4e60\u3002\u5b8c\u6210\u7ec4\u7ec7\u540e\uff0c\u7ec3\u4e60\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002",
         "grade_notice": "\u6279\u6539\u5165\u53e3\u5c06\u5728\u7ec3\u4e60\u670d\u52a1\u5c31\u7eea\u540e\u5f00\u653e\u3002",
+        "organize": {
+            "title": "整理一套练习到 Notion",
+            "body": "选择课程和讲次，整理一套混合题型练习页。题目、答案和解析只写入 Notion。",
+            "action": "整理一套练习",
+            "scope_label": "选择练习范围",
+            "course_label": "课程",
+            "lecture_label": "讲次",
+            "estimate": "预计 1–5 AI 点 · 完成后按实际用量结算",
+            "confirm": "确认整理",
+            "cancel": "取消",
+            "insufficient": "AI 点不足，至少需要保留 5 AI 点才能开始整理。",
+            "working": "正在整理练习，请稍候。",
+            "completed": "练习已整理到 Notion",
+            "settlement": "本次消耗 {points} AI 点",
+            "blocked": "练习没有开始",
+            "retry": "重试",
+        },
     }
 }
 

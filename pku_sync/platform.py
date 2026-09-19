@@ -54,6 +54,36 @@ def activate(code: str, settings) -> dict:
     return {"transcribe_seconds_remaining": seconds}
 
 
+
+def llm(operation: str, prompt: str, settings) -> dict:
+    """Run one approved metered LLM operation through the relay."""
+    token = (settings.platform_token or "").strip()
+    if not token:
+        raise PlatformError("云端登录已失效，请重新激活后重试。")
+    try:
+        response = httpx.post(
+            _endpoint(settings.cloud_transcribe_url, "/v1/llm"),
+            headers={"Authorization": f"Bearer {token}"},
+            json={"operation": operation, "system": "你是课程练习整理助手。只返回请求指定的 JSON。", "user": prompt},
+            timeout=settings.llm_timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise PlatformError("无法连接云端服务，请稍后重试") from exc
+    if response.status_code != 200:
+        safe = {
+            401: "云端登录已失效，请重新激活后重试。",
+            402: "AI 点不足，请兑换新额度后重试。",
+            502: "AI 服务暂时没有完成请求，请稍后重试。",
+            503: "AI 服务暂未配置，请联系管理员后重试。",
+        }
+        error = PlatformError(safe.get(response.status_code, "云端服务暂时不可用，请稍后重试。"))
+        error.status_code = response.status_code
+        raise error
+    payload = response.json()
+    if not isinstance(payload.get("content"), str) or not isinstance(payload.get("points_charged"), (int, float)):
+        raise PlatformError("云端返回异常，请联系管理员")
+    return {"content": payload["content"], "points_charged": payload["points_charged"]}
+
 def quota(settings) -> dict:
     """Get the current cloud transcription balance without exposing the token."""
     token = (settings.platform_token or "").strip()

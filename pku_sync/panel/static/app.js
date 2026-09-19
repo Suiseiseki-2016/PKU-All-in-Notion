@@ -18,6 +18,8 @@
 
   var state = {
     activated: false,
+    quota: null,
+    organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "" },
     connection: {
       state: "disconnected",
       connected: false,
@@ -228,6 +230,7 @@
   function loadQuota() {
     return requestJson("/api/platform/quota").then(function (result) {
       state.activated = Boolean(result.ok && result.body && result.body.active);
+      state.quota = result.ok && result.body ? result.body : null;
     });
   }
 
@@ -619,6 +622,28 @@
     );
   }
 
+  function organizeCard() {
+    var copy = COPY.directory.exercises.organize;
+    var courses = state.directory.courses || [];
+    var selectedCourse = courses.find(function (course) { return course.id === state.organize.courseId; });
+    var lectures = selectedCourse ? (selectedCourse.lectures || []) : [];
+    var balance = state.quota && state.quota.llm_points_remaining;
+    var insufficient = typeof balance === "number" && balance < 5;
+    var status = "";
+    if (state.organize.working) {
+      status = '<div class="organize-status" aria-live="polite" aria-busy="true"><span class="spinner" aria-hidden="true"></span><strong>' + esc(copy.working) + '</strong></div>';
+    } else if (state.organize.blocked) {
+      status = '<div class="organize-status error" role="alert"><strong>' + esc(copy.blocked) + '</strong><p>' + esc(state.organize.blocked) + '</p>' + button(copy.retry, "organize-retry", { small: true, primary: true }) + '</div>';
+    } else if (state.organize.result) {
+      status = '<div class="organize-status success" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><span class="cost-pill">' + esc(template(copy.settlement, { points: state.organize.result.points_charged })) + '</span></div>';
+    }
+    if (!state.organize.open) {
+      return '<section class="exercise-toolbar" aria-labelledby="organize-title"><div><h2 id="organize-title">' + esc(copy.title) + '</h2><p>' + esc(copy.body) + '</p></div><div class="toolbar-actions">' + button(copy.action, "organize-open", { primary: true, icon: "quiz" }) + '<span class="cost-pill">' + esc(copy.estimate) + '</span></div>' + status + '</section>';
+    }
+    var courseOptions = '<option value="">' + esc(copy.course_label) + '</option>' + courses.map(function (course) { return '<option value="' + esc(course.id) + '"' + (course.id === state.organize.courseId ? ' selected' : '') + '>' + esc(course.title) + '</option>'; }).join("");
+    var lectureOptions = '<option value="">' + esc(copy.lecture_label) + '</option>' + lectures.map(function (lecture) { return '<option value="' + esc(lecture.id) + '"' + (lecture.id === state.organize.lectureId ? ' selected' : '') + '>' + esc(lecture.title) + '</option>'; }).join("");
+    return '<section class="exercise-toolbar organize-confirm" aria-labelledby="organize-scope-title"><div><h2 id="organize-scope-title">' + esc(copy.scope_label) + '</h2><p>' + esc(copy.body) + '</p><div class="scope-fields"><label>' + esc(copy.course_label) + '<select data-organize-field="course">' + courseOptions + '</select></label><label>' + esc(copy.lecture_label) + '<select data-organize-field="lecture">' + lectureOptions + '</select></label></div></div><div class="toolbar-actions"><span class="cost-pill">' + esc(copy.estimate) + '</span>' + (insufficient ? '<p class="insufficient" role="alert">' + esc(copy.insufficient) + '</p>' : '') + button(copy.confirm, "organize-confirm", { primary: true, disabled: insufficient || !state.organize.courseId || !state.organize.lectureId || state.organize.working }) + button(copy.cancel, "organize-cancel", { quiet: true, disabled: state.organize.working }) + '</div>' + status + '</section>';
+  }
   function exerciseAction(row) {
     var actions = COPY.directory.exercises.actions;
     return actions[row.status] ? actions[row.status] : actions.organized;
@@ -747,7 +772,7 @@
     var fallback = directoryBody();
     var body = fallback
       ? fallback
-      : statsSection() + exerciseDirectorySection() + courseGrid() + activitySection();
+      : statsSection() + organizeCard() + exerciseDirectorySection() + courseGrid() + activitySection();
     return (
       '<div class="topline"><div><h1 class="page-title">' +
       esc(COPY.directory.title) +
@@ -1377,6 +1402,74 @@
     });
   }
 
+  function organizeOpen() {
+    state.organize.open = true;
+    state.organize.blocked = "";
+    if (!state.organize.courseId && state.directory.courses.length) state.organize.courseId = state.directory.courses[0].id;
+    var course = state.directory.courses.find(function (item) { return item.id === state.organize.courseId; });
+    if (course && !state.organize.lectureId && course.lectures.length) state.organize.lectureId = course.lectures[0].id;
+    render();
+  }
+
+  function blockOrganize(reason) {
+    state.organize.working = false;
+    state.organize.blocked = reason || COPY.directory.exercises.organize.blocked;
+    render();
+  }
+
+  function finishOrganize(result, jobId, attempts) {
+    var copy = COPY.directory.exercises.organize;
+    var pollAttempts = attempts || 0;
+    if (!result.ok || !result.body || result.body.status === "blocked") {
+      blockOrganize(result.body && (result.body.reason || result.body.detail) || copy.blocked);
+      return Promise.resolve();
+    }
+    if (result.body.status === "running") {
+      var activeJobId = jobId || result.body.job_id;
+      if (!activeJobId || pollAttempts >= POLL_MAX_ATTEMPTS) {
+        blockOrganize(copy.blocked);
+        return Promise.resolve();
+      }
+      return new Promise(function (resolve) {
+        window.setTimeout(function () {
+          resolve(requestJson("/api/exercises/organize/status?job_id=" + encodeURIComponent(activeJobId))
+            .then(function (next) { return finishOrganize(next, activeJobId, pollAttempts + 1); })
+            .catch(function () { blockOrganize(copy.blocked); }));
+        }, 250);
+      });
+    }
+    if (result.body.status !== "completed") {
+      blockOrganize(copy.blocked);
+      return Promise.resolve();
+    }
+    state.organize.working = false;
+    state.organize.result = result.body;
+    if (state.quota && typeof result.body.points_remaining === "number") {
+      state.quota.llm_points_remaining = result.body.points_remaining;
+    }
+    state.organize.open = false;
+    return loadDirectory().then(render);
+  }
+
+  function organizeConfirm() {
+    var copy = COPY.directory.exercises.organize;
+    var balance = state.quota && state.quota.llm_points_remaining;
+    if (typeof balance === "number" && balance < 5) {
+      state.organize.blocked = copy.insufficient;
+      render();
+      return Promise.resolve();
+    }
+    state.organize.working = true;
+    state.organize.blocked = "";
+    state.organize.result = null;
+    render();
+    return requestJson("/api/exercises/organize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ course_id: state.organize.courseId, lecture_ids: [state.organize.lectureId] })
+    }).then(function (result) { return finishOrganize(result, result.body && result.body.job_id); })
+      .catch(function () { blockOrganize(copy.blocked); });
+  }
   function launchExercise(targetId) {
     return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/answer-started", { method: "POST" }).then(function () { return launch("exercise", targetId); });
   }
@@ -1475,6 +1568,10 @@
       openDashboard();
     }
     else if (action === "open-dashboard") openDashboard();
+    else if (action === "organize-open") organizeOpen();
+    else if (action === "organize-confirm") organizeConfirm();
+    else if (action === "organize-cancel") { state.organize.open = false; state.organize.blocked = ""; render(); }
+    else if (action === "organize-retry") { state.organize.blocked = ""; state.organize.open = true; render(); }
     else if (action === "open-course") openCourse(target.dataset.course);
     else if (action === "select-lecture") {
       selectLecture(target.dataset.course, target.dataset.lecture);
@@ -1494,6 +1591,18 @@
     if (view) setMaterialView(view.dataset.materialView);
   });
 
+  document.addEventListener("change", function (event) {
+    var field = event.target.closest("[data-organize-field]");
+    if (!field) return;
+    if (field.dataset.organizeField === "course") {
+      state.organize.courseId = field.value;
+      var course = state.directory.courses.find(function (item) { return item.id === field.value; });
+      state.organize.lectureId = course && course.lectures.length ? course.lectures[0].id : "";
+    } else {
+      state.organize.lectureId = field.value;
+    }
+    render();
+  });
   document.addEventListener("submit", function (event) {
     event.preventDefault();
     if (event.target.id === "activation-form") activate();

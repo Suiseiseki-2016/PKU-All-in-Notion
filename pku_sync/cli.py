@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="???????normal / slow / fault / fault-launch / empty / usage-cap?? --fake?",
+            help="演示状态：normal / slow / fault / fault-launch / empty / usage-cap / low-balance（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:
@@ -844,7 +844,30 @@ def panel_cmd(
         connection_service = build_fake_connection_service(
             directory_service=directory_service
         )
-        platform_service = FakePlatformBridge()
+        platform_service = FakePlatformBridge(activated=True, llm_points=4.0 if fake_variant == "low-balance" else 100.0)
+        from .notion_meta import canonical_url
+        from .panel.exercise_organizer import ExerciseOrganizer, MemoryOrganizeRecordStore
+
+        class _FakeNotes:
+            def for_scope(self, *, course_title, lecture_titles):
+                return [{"title": lecture_titles[0], "source": "课堂录像笔记", "notes": "演示笔记"}]
+
+        class _FakePages:
+            def __init__(self):
+                self.created = None
+
+            def create_page(self, parent_page_id, title, *, children):
+                if self.created is None:
+                    page_id = "2c000001-0000-4000-8000-000000000901"
+                    self.created = {"id": page_id, "url": canonical_url(page_id),
+                                    "last_edited_time": "2026-09-19T08:00:00.000Z"}
+                return dict(self.created)
+
+        organizer_service = ExerciseOrganizer(
+            directory_service=directory_service, relay=platform_service,
+            page_adapter=_FakePages(), notes_provider=_FakeNotes(),
+            record_store=MemoryOrganizeRecordStore(),
+        )
     else:
         from .panel.directory import make_directory_service
 
@@ -853,6 +876,7 @@ def panel_cmd(
         # against the loaded settings
         connection_service = None
         platform_service = None
+        organizer_service = None
     try:
         sock, bound_port = bind_panel(port)
     except PanelPortError as exc:
@@ -872,6 +896,7 @@ def panel_cmd(
                 directory_service=directory_service,
                 connection_service=connection_service,
                 platform_service=platform_service,
+                organizer_service=organizer_service,
             ),
             host=host,
             port=bound_port,

@@ -51,6 +51,7 @@ _FAKE_VARIANTS = (
     "fault-launch",
     "empty",
     "usage-cap",
+    "low-balance",
 )
 
 
@@ -138,8 +139,10 @@ def build_fake_directory(
             or child.get("id") in {LEARNING_CENTER, NOTES_HUB, NOISE_PAGE}
         ]
         provider = PanelDirectoryProvider(ws, semester=semester)
-    else:  # usage-cap
+    elif variant == "usage-cap":
         provider = UsageCapProvider(ws, semester=semester)
+    else:  # low-balance changes only the platform fixture in cli.py
+        provider = PanelDirectoryProvider(ws, semester=semester)
     return DirectoryService(provider, clock=clock)
 
 

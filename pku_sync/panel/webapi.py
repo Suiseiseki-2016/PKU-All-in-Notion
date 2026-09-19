@@ -242,6 +242,7 @@ def create_app(
     directory_service=None,
     connection_service=None,
     platform_service=None,
+    organizer_service=None,
 ) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
@@ -279,14 +280,20 @@ def create_app(
     app.state.directory_service = directory_service
     app.state.connection_service = connection_service
     app.state.platform_service = platform_service
+    if organizer_service is None:
+        from .exercise_organizer import make_organizer_service
+        organizer_service = make_organizer_service(settings, directory_service, platform_service)
+    app.state.organizer_service = organizer_service
 
     from .connection_api import add_connection_routes
     from .directory_api import add_directory_routes
     from .student_ui import add_student_ui_routes
+    from .exercise_api import add_organize_routes
 
     add_directory_routes(app, directory_service)
     add_connection_routes(app, connection_service)
     add_student_ui_routes(app)
+    add_organize_routes(app, organizer_service)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
