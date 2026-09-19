@@ -384,7 +384,11 @@ def build_activity(data: DirectoryData) -> list[dict]:
 
 
 def build_directory_payload(
-    data: DirectoryData, sync: dict, *, launched_exercise_ids=()
+    data: DirectoryData,
+    sync: dict,
+    *,
+    launched_exercise_ids=(),
+    local_grading_records=None,
 ) -> dict:
     indexed = sum(
         1
@@ -399,6 +403,7 @@ def build_directory_payload(
         "indexed_materials": indexed,
     }
     launched = set(launched_exercise_ids)
+    local_records = local_grading_records or {}
     return {
         "semester": data.semester,
         "sync": dict(sync),
@@ -407,7 +412,11 @@ def build_directory_payload(
         "activity": build_activity(data),
         "courses": [build_course_payload(course, data, sync) for course in data.courses],
         "exercises": [
-            exercise_row(item, launch_started=item.id in launched)
+            exercise_row(
+                item,
+                launch_started=item.id in launched,
+                local_record=local_records.get(item.id),
+            )
             for item in data.exercises
         ],
     }
@@ -484,10 +493,18 @@ class DirectoryService:
     """
 
     def __init__(
-        self, provider: DirectoryProvider, *, clock=None, exercise_events=None
+        self,
+        provider: DirectoryProvider,
+        *,
+        clock=None,
+        exercise_events=None,
+        local_grading_records=None,
     ):
         self.provider = provider
         self.exercise_events = exercise_events or ExerciseEventStore()
+        # Panel-owned state stays outside the Notion metadata entities.  The
+        # mapping is consumed only while building the panel payload.
+        self.local_grading_records = dict(local_grading_records or {})
         self.sync = SyncTracker(clock=clock)
         self._data: DirectoryData | None = None
         self._organized_exercises: dict[str, object] = {}
@@ -524,6 +541,7 @@ class DirectoryService:
             data,
             self.sync.snapshot(),
             launched_exercise_ids=self.exercise_events.launched_ids(),
+            local_grading_records=self.local_grading_records,
         )
 
     def mark_exercise_launched(self, exercise_id: str) -> None:

@@ -33,10 +33,49 @@ def exercise_scope(title: str) -> str:
         return "考前练习"
     return "课程练习"
 
-def exercise_row(entity: Any, *, launch_started: bool = False) -> dict:
+_LOCAL_GRADED_STATES = {"graded", "completed", "complete", "success"}
+_LOCAL_UNGRADED_STATES = {"organized", "pending", "pending-grade", "failed", "blocked"}
+
+
+def _local_record_is_graded(local_record: Any) -> bool | None:
+    """Read only an explicit local grading state at the panel boundary."""
+    if local_record is None:
+        return None
+    if isinstance(local_record, bool):
+        return local_record
+    if isinstance(local_record, dict):
+        for key in ("graded", "marker_present"):
+            if isinstance(local_record.get(key), bool):
+                return local_record[key]
+        for key in ("status", "state"):
+            value = local_record.get(key)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in _LOCAL_GRADED_STATES:
+                    return True
+                if normalized in _LOCAL_UNGRADED_STATES:
+                    return False
+    return None
+
+
+def mismatch_notice_for(entity: Any, local_record: Any = None) -> bool:
+    """Return a warning only for explicit marker/record disagreement.
+
+    The Notion marker remains authoritative for the row status.  Missing or
+    malformed local state is deliberately treated as unknown, not a mismatch.
+    """
+    # Accept the old panel-only attribute for callers that already attach
+    # derived state to a view object; ExerciseEntity itself no longer has it.
+    if local_record is None and isinstance(getattr(entity, "mismatch_notice", None), bool):
+        return bool(entity.mismatch_notice)
+    local_graded = _local_record_is_graded(local_record)
+    return local_graded is not None and local_graded != bool(entity.marker_present)
+
+
+def exercise_row(entity: Any, *, launch_started: bool = False, local_record: Any = None) -> dict:
     status = derive_exercise_state(marker_present=bool(entity.marker_present), answer_present=bool(entity.answer_present), launch_started=launch_started)
     row = {"id": entity.id, "url": entity.url, "title": entity.title, "course": entity.course, "scope": exercise_scope(entity.title), "status": status, "status_label": STATUS_LABELS[status], "score": None}
-    if bool(getattr(entity, "mismatch_notice", False)):
+    if mismatch_notice_for(entity, local_record):
         row["mismatch_notice"] = True
     return row
 
@@ -67,4 +106,4 @@ class ExerciseEventStore:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 self.path.write_text(json.dumps({"answer_started": sorted(self._launched)}, ensure_ascii=False), encoding="utf-8")
 
-__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "PAGE_IDENTITY_MISSING", "EXERCISE_IDENTITY_MISSING_TITLE", "EXERCISE_IDENTITY_MISSING_COPY", "EXERCISE_IDENTITY_MISSING_REASON", "derive_exercise_state", "exercise_scope", "exercise_row", "ExerciseEventStore"]
+__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "PAGE_IDENTITY_MISSING", "EXERCISE_IDENTITY_MISSING_TITLE", "EXERCISE_IDENTITY_MISSING_COPY", "EXERCISE_IDENTITY_MISSING_REASON", "derive_exercise_state", "exercise_scope", "mismatch_notice_for", "exercise_row", "ExerciseEventStore"]

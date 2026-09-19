@@ -137,7 +137,6 @@ class ExerciseEntity(BaseModel):
     updated: str = ""
     marker_present: bool = False  # grading-marker heading present (已批改 signal)
     answer_present: bool = False  # a pinned answer area/marker is present
-    mismatch_notice: bool = False  # local graded record disagrees with Notion marker
 
 
 class DirectoryData(BaseModel):
