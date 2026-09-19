@@ -1153,7 +1153,14 @@
   function materialRow(item) {
     var copy = COPY.lecture.materials;
     var assoc = associationLabel(item);
-    var badge = item.status === "已索引" ? "indexed" : "pending";
+    var statusClasses = {
+      "待阅读": "reading",
+      "已索引": "indexed",
+      "重点": "focus",
+      "待确认": "pending"
+    };
+    // Regression guard: the old "indexed" : "pending" fallback is intentionally gone.
+    var badge = statusClasses[item.status] ? statusClasses[item.status] : "reading";
     return (
       '<div class="material-row" data-material="' +
       esc(item.id) +

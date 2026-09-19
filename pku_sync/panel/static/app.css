@@ -773,7 +773,9 @@ h1, h2, h3, p { margin-top: 0; }
   font-weight: 750;
   white-space: nowrap;
 }
+.status-badge.reading { color: var(--muted); background: #f1f4f2; }
 .status-badge.indexed { color: var(--green); background: #edf7ef; }
+.status-badge.focus { color: #8a6937; background: var(--gold-pale); }
 .status-badge.pending { color: var(--blue); background: var(--blue-pale); }
 /* The visually separated 待确认 subsection of the 按讲次 view: inferred
    materials are grouped under their own pending-styled header, never mixed
