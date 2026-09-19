@@ -1,7 +1,9 @@
 """Metadata-only exercise directory state and local launch events."""
 from __future__ import annotations
 import json
+import os
 import re
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterable
@@ -93,11 +95,33 @@ class JsonGradingRecordStore:
         with self._lock:
             return {key: dict(value) for key, value in self._records.items()}
     def put(self, exercise_id: str, record: dict[str, Any]) -> None:
+        """Atomically persist the complete next snapshot before publishing it.
+
+        A failed write leaves both the live file and in-memory view unchanged,
+        which is required for pre-charge grading intent durability.
+        """
         with self._lock:
-            self._records[str(exercise_id)] = dict(record)
+            next_records = {key: dict(value) for key, value in self._records.items()}
+            next_records[str(exercise_id)] = dict(record)
             if self.path is not None:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                self.path.write_text(json.dumps(self._records, ensure_ascii=False), encoding="utf-8")
+                payload = json.dumps(next_records, ensure_ascii=False)
+                handle, temporary = tempfile.mkstemp(
+                    prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+                )
+                try:
+                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, self.path)
+                except Exception:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                    raise
+            self._records = next_records
 
 
 class ExerciseEventStore:

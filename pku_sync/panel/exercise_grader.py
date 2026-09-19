@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,18 @@ GRADE_MARKERS = ("批改结果", "E2E_GRADE_RESULT")
 ANSWER_PROVENANCE_KNOWN = "known"
 ANSWER_PROVENANCE_MARKER_ONLY = "marker-only"
 ANSWER_PROVENANCE_UNKNOWN = "unknown"
+PHASE_INTENT = "intent"
+PHASE_RELAY_STARTED = "relay_started"
+PHASE_RELAY_SUCCEEDED = "relay_succeeded"
+PHASE_RESULT_VERIFIED = "result_verified"
+PHASE_RESULT_RECONCILED = "result_reconciled"
+PHASE_WRONG_ANSWERS_VERIFIED = "wrong_answers_verified"
+PHASE_COMPLETED = "completed"
+_NONTERMINAL_PHASES = {
+    PHASE_INTENT, PHASE_RELAY_STARTED, PHASE_RELAY_SUCCEEDED,
+    PHASE_RESULT_VERIFIED, PHASE_RESULT_RECONCILED,
+    PHASE_WRONG_ANSWERS_VERIFIED,
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +53,7 @@ class GradingInput:
     existing_result: dict[str, Any] | None = None
     answer_fingerprint: str = ""
     answer_provenance: str | None = None
+    result_marker: str = GRADE_MARKERS[0]
 
 
 class GradeBlocked(RuntimeError):
@@ -77,6 +91,7 @@ class RealGradingPageAdapter:
             existing_result=_existing_result(blocks, marker, target),
             answer_fingerprint=fingerprint,
             answer_provenance=provenance,
+            result_marker=_plain(marker) if marker is not None else GRADE_MARKERS[0],
         )
 
     def verify_parent(self, target: GradeTarget) -> None:
@@ -114,6 +129,101 @@ class RealGradingPageAdapter:
                 if block_id and hasattr(client, "archive_block"):
                     client.archive_block(block_id)
             client.append_blocks(target.page_id, rendered[1:])
+
+    def ensure_result(self, target: GradeTarget, *, operation_id: str, content: str,
+                      score: float, graded_at: str, regrade: bool,
+                      result_marker: str = GRADE_MARKERS[0]) -> None:
+        """Append one operation envelope and verify ambiguous commits by reread."""
+        rendered = markdown_to_blocks(
+            _operation_result_markdown(operation_id, content, score=score, graded_at=graded_at,
+                                       marker=result_marker)
+        )
+        with get_client(self.settings) as client:
+            existing = client.list_children(target.page_id)
+            if _find_complete_operation(existing, operation_id, content=content, score=score,
+                                        graded_at=graded_at, marker=result_marker) is not None:
+                return
+            if _find_operation(existing, operation_id) is not None:
+                raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u4e3a\u907f\u514d\u91cd\u590d\u5199\u5165\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u5904\u7406\u3002")
+            try:
+                client.append_blocks(target.page_id, rendered, retry=False)
+            except Exception:
+                reread = client.list_children(target.page_id)
+                if _find_complete_operation(reread, operation_id, content=content, score=score,
+                                            graded_at=graded_at, marker=result_marker) is None:
+                    raise
+            verified = client.list_children(target.page_id)
+            if _find_complete_operation(verified, operation_id, content=content, score=score,
+                                        graded_at=graded_at, marker=result_marker) is None:
+                raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u540e\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+
+    def verify_result(self, target: GradeTarget, *, operation_id: str, content: str,
+                      score: float, graded_at: str, result_marker: str) -> bool:
+        with get_client(self.settings) as client:
+            blocks = client.list_children(target.page_id)
+        return _find_complete_operation(
+            blocks, operation_id, content=content, score=score,
+            graded_at=graded_at, marker=result_marker,
+        ) is not None
+
+    def result_cleanup_plan(self, target: GradeTarget, *, operation_id: str,
+                            content: str | None = None, score: float | None = None,
+                            graded_at: str = "", result_marker: str = GRADE_MARKERS[0]) -> list[str]:
+        """Return the exact stale app-owned block identities to retire."""
+        with get_client(self.settings) as client:
+            existing = client.list_children(target.page_id)
+        current = (
+            _find_complete_operation(existing, operation_id, content=content, score=score,
+                                     graded_at=graded_at, marker=result_marker)
+            if content is not None and score is not None else _find_operation(existing, operation_id)
+        )
+        if current is None:
+            raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u6807\u8bb0\u5df2\u5931\u6548\uff0c\u8bf7\u5237\u65b0\u540e\u91cd\u8bd5\u3002")
+        return [str(block["id"]) for block in _stale_result_blocks(existing, current) if block.get("id")]
+
+    def archive_result_block(self, target: GradeTarget, *, block_id: str) -> None:
+        """Archive one planned block, reconciling an ambiguous response by reread."""
+        with get_client(self.settings) as client:
+            if not any(str(block.get("id") or "") == block_id for block in client.list_children(target.page_id)):
+                return
+            try:
+                client.archive_block(block_id, retry=False)
+            except Exception:
+                remaining = client.list_children(target.page_id)
+                if any(str(block.get("id") or "") == block_id for block in remaining):
+                    raise
+
+    def cleanup_result(self, target: GradeTarget, *, operation_id: str, **_kwargs) -> None:
+        """Compatibility path for callers without a durable cleanup journal."""
+        for block_id in self.result_cleanup_plan(target, operation_id=operation_id):
+            self.archive_result_block(target, block_id=block_id)
+
+    def ensure_wrong_answer(self, target: GradeTarget, question: dict[str, Any], *,
+                            key: str, operation_id: str) -> None:
+        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
+        if not hub_id:
+            raise GradeBlocked("\u9519\u9898\u672c\u672a\u914d\u7f6e\uff0c\u65e0\u6cd5\u5b8c\u6210\u9519\u9898\u767b\u8bb0\u3002")
+        if self.verify_wrong_answer(target, question, key=key, operation_id=operation_id):
+            return
+        title = f"{target.title} \u7b2c{question.get('number')}\u9898 \u00b7 {key}"
+        children = markdown_to_blocks(
+            f"\u767b\u8bb0\u952e\uff1a{key}\n\n\u6765\u6e90\u7ec3\u4e60\uff1a{target.title}\n\n\u9898\u53f7\uff1a{question.get('number')}\n\n\u9898\u578b\uff1a{question.get('type')}"
+        )
+        with get_client(self.settings) as client:
+            try:
+                client.create_page(hub_id, title, children=children, retry=False)
+            except Exception:
+                if not self.verify_wrong_answer(target, question, key=key, operation_id=operation_id):
+                    raise
+
+    def verify_wrong_answer(self, target: GradeTarget, question: dict[str, Any], *,
+                            key: str, operation_id: str) -> bool:
+        hub_id = getattr(self.settings, "notion_wrong_answer_hub_id", "")
+        if not hub_id:
+            return False
+        with get_client(self.settings) as client:
+            rows = client.list_child_pages(hub_id)
+        return any(str(row.get("title") or "").endswith(f" \u00b7 {key}") for row in rows)
 
     def wrong_answer_exists(self, target: GradeTarget, question: dict[str, Any]) -> bool:
         """Use an explicitly configured hub only; never search by title."""
@@ -196,13 +306,12 @@ class ExerciseGrader:
         self.page_adapter = page_adapter
         self.clock = clock or _graded_now
         self._lock = threading.Lock()
-        # Keep charged operations until Notion and local provenance both settle.
         self._pending: dict[str, dict[str, Any]] = {}
 
     def prepare(self, exercise_id: str) -> tuple[GradeTarget, GradingInput]:
         target = self.directory_service.exercise_grade_target(exercise_id)
         if target is None:
-            raise GradeBlocked("练习页映射缺失，无法确定批改目标。")
+            raise GradeBlocked("\u7ec3\u4e60\u9875\u6620\u5c04\u7f3a\u5931\uff0c\u65e0\u6cd5\u786e\u5b9a\u6279\u6539\u76ee\u6807\u3002")
         grade_target = GradeTarget(operation="grade", page_id=target["page_id"], page_url=target["page_url"], title=target["title"], course_id=target["course_id"], course_title=target["course_title"], scope=target["scope"])
         verify_parent = getattr(self.page_adapter, "verify_parent", None)
         if verify_parent is not None:
@@ -212,98 +321,281 @@ class ExerciseGrader:
             raise GradeBlocked(INCOMPLETE_ANSWERS_REASON, unanswered=grading_input.unanswered)
         return grade_target, grading_input
 
+    def has_pending(self, exercise_id: str) -> bool:
+        record = self._record(exercise_id)
+        return isinstance(record, dict) and (
+            record.get("phase") in _NONTERMINAL_PHASES or record.get("status") == "pending"
+        )
+
     def grade(self, prepared: tuple[GradeTarget, GradingInput], *, force: bool = False) -> dict[str, Any]:
         target, grading_input = prepared
         with self._lock:
-            pending = self._pending.get(target.page_id)
-            if pending is None:
-                records = getattr(self.directory_service, "local_grading_records", {})
-                candidate = records.get(target.page_id) if isinstance(records, dict) else None
-                if isinstance(candidate, dict) and candidate.get("status") == "pending":
-                    pending = dict(candidate)
-            local_record = getattr(self.directory_service, "local_grading_records", {}).get(target.page_id)
+            pending = self._pending.get(target.page_id) or self._record(target.page_id)
+            if isinstance(pending, dict) and (
+                pending.get("phase") in _NONTERMINAL_PHASES or pending.get("status") == "pending"
+            ):
+                return self._resume(target, grading_input, dict(pending))
+
+            local_record = self._record(target.page_id)
             previous_fingerprint = local_record.get("answer_fingerprint") if isinstance(local_record, dict) else ""
             provenance = _resolved_provenance(grading_input)
             fingerprints_equal = bool(
                 provenance == ANSWER_PROVENANCE_KNOWN
-                and grading_input.answer_fingerprint
-                and previous_fingerprint
+                and grading_input.answer_fingerprint and previous_fingerprint
                 and grading_input.answer_fingerprint == previous_fingerprint
             )
-            if pending is not None:
-                return self._retry_pending(target, grading_input, pending)
             if grading_input.marker_present:
                 if provenance == ANSWER_PROVENANCE_MARKER_ONLY:
-                    return _reuse_result(
-                        grading_input.existing_result, target, settlement_known=_has_known_settlement(local_record)
-                    )
+                    return _reuse_result(grading_input.existing_result, target, settlement_known=_has_known_settlement(local_record))
                 if fingerprints_equal:
-                    return _reuse_result(
-                        grading_input.existing_result, target, settlement_known=True
-                    )
+                    return _reuse_result(grading_input.existing_result, target, settlement_known=True)
                 if not force:
                     raise GradeBlocked("\u65e0\u6cd5\u786e\u8ba4\u7b54\u6848\u662f\u5426\u672a\u53d8\uff0c\u8bf7\u786e\u8ba4\u91cd\u65b0\u6279\u6539\u3002")
+
+            operation_id = uuid.uuid4().hex
+            intent = {
+                "version": 2, "status": "pending", "phase": PHASE_INTENT,
+                "operation_id": operation_id, "operation": "grade",
+                "page_id": target.page_id, "page_url": target.page_url,
+                "course_id": target.course_id, "course_title": target.course_title,
+                "title": target.title, "scope": target.scope,
+                "answer_fingerprint": grading_input.answer_fingerprint,
+                "answer_provenance": provenance, "regrade": bool(grading_input.marker_present),
+                "result_marker": grading_input.result_marker if grading_input.result_marker in GRADE_MARKERS else GRADE_MARKERS[0],
+            }
+            # A configured record store is the durable boundary. Legacy
+            # injected test/services without one keep their in-memory behavior.
+            durable = getattr(self.directory_service, "grading_record_store", None) is not None
+            if durable:
+                # Intent failure is pre-charge. Do not invoke the relay.
+                self._persist(target.page_id, intent)
+            self._pending[target.page_id] = dict(intent)
             quota = self.relay.quota()
             before = quota.get("llm_points_remaining") if quota.get("available") else None
-            result = self.relay.grade(grading_input.prompt)
+            started = dict(intent, phase=PHASE_RELAY_STARTED)
+            if durable:
+                self._persist(target.page_id, started)
+            self._pending[target.page_id] = dict(started)
+            try:
+                result = self.relay.grade(grading_input.prompt)
+            except Exception as exc:
+                if _definitive_relay_failure(exc):
+                    if durable:
+                        self._persist(target.page_id, intent)
+                    self._pending[target.page_id] = dict(intent)
+                raise
             charge = result.get("points_charged")
             if not isinstance(charge, (int, float)):
+                if durable:
+                    self._persist(target.page_id, intent)
+                self._pending[target.page_id] = dict(intent)
                 raise GradeBlocked("\u4e91\u7aef\u6ca1\u6709\u8fd4\u56de\u6709\u6548\u7684\u7528\u91cf\u7ed3\u7b97\uff0c\u8bf7\u91cd\u8bd5\u3002")
             remaining = float(before) - float(charge) if isinstance(before, (int, float)) else None
+            charged = dict(
+                started, phase=PHASE_RELAY_SUCCEEDED, content=result.get("content"),
+                points_charged=float(charge), points_remaining=remaining,
+                result_page_url=target.page_url, graded_at=self.clock(),
+            )
+            self._pending[target.page_id] = dict(charged)
             try:
-                score = _score(result.get("content"))
-                graded_at = self.clock()
-                pending = {"status": "pending", "marker_present": False,
-                           "answer_fingerprint": grading_input.answer_fingerprint,
-                           "score": score, "graded_at": graded_at,
-                           "answer_provenance": ANSWER_PROVENANCE_KNOWN,
-                           "content": result["content"], "points_charged": float(charge),
-                           "points_remaining": remaining, "result_page_url": target.page_url}
-                self._pending[target.page_id] = pending
-                self._persist_record(target.page_id, pending)
-                self._write_and_register(target, grading_input, pending)
-                completed = dict(pending)
-                completed["status"] = "graded"
-                completed["marker_present"] = True
-                self._persist_record(target.page_id, completed)
-                self._pending.pop(target.page_id, None)
-                return _summary(target, completed)
+                # The relay response and authoritative settlement become durable
+                # before parsing or any Notion mutation.
+                self._persist(target.page_id, charged)
+                return self._resume(target, grading_input, charged)
+            except GradeSettlementError:
+                raise
             except GradeBlocked as exc:
                 raise GradeSettlementError(exc.reason, points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
             except Exception as exc:
                 raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
 
-    def _persist_record(self, exercise_id: str, record: dict[str, Any]) -> None:
+    def _invoke_relay_from_intent(self, target: GradeTarget, grading_input: GradingInput,
+                                  intent: dict[str, Any]) -> dict[str, Any]:
+        quota = self.relay.quota()
+        before = quota.get("llm_points_remaining") if quota.get("available") else None
+        started = dict(intent, phase=PHASE_RELAY_STARTED)
+        self._persist(target.page_id, started)
+        self._pending[target.page_id] = dict(started)
+        try:
+            result = self.relay.grade(grading_input.prompt)
+        except Exception as exc:
+            if _definitive_relay_failure(exc):
+                self._persist(target.page_id, intent)
+                self._pending[target.page_id] = dict(intent)
+            raise
+        charge = result.get("points_charged")
+        if not isinstance(charge, (int, float)):
+            self._persist(target.page_id, intent)
+            self._pending[target.page_id] = dict(intent)
+            raise GradeBlocked("\u4e91\u7aef\u6ca1\u6709\u8fd4\u56de\u6709\u6548\u7684\u7528\u91cf\u7ed3\u7b97\uff0c\u8bf7\u91cd\u8bd5\u3002")
+        remaining = float(before) - float(charge) if isinstance(before, (int, float)) else None
+        charged = dict(started, phase=PHASE_RELAY_SUCCEEDED,
+                       content=result.get("content"), points_charged=float(charge),
+                       points_remaining=remaining, result_page_url=target.page_url,
+                       graded_at=self.clock())
+        self._persist(target.page_id, charged)
+        self._pending[target.page_id] = dict(charged)
+        return self._resume(target, grading_input, charged)
+
+    def _record(self, exercise_id: str) -> dict[str, Any] | None:
+        records = getattr(self.directory_service, "local_grading_records", {})
+        value = records.get(exercise_id) if isinstance(records, dict) else None
+        return dict(value) if isinstance(value, dict) else None
+
+    def _persist(self, exercise_id: str, record: dict[str, Any]) -> None:
         persist = getattr(self.directory_service, "record_grading", None)
         if persist is not None:
             persist(exercise_id, record)
 
-    def _write_and_register(self, target: GradeTarget, grading_input: GradingInput, pending: dict[str, Any]) -> None:
-        writer = self.page_adapter.update_result if grading_input.marker_present else self.page_adapter.write_result
-        writer(target, content=pending["content"], score=pending["score"], graded_at=pending["graded_at"])
-        for question in _parse_grade_results(pending["content"]):
-            if not question.get("register_wrong"):
-                continue
-            exists = getattr(self.page_adapter, "wrong_answer_exists", None)
-            create = getattr(self.page_adapter, "create_wrong_answer", None)
-            if exists is not None and create is not None and not exists(target, question):
-                create(target, question)
-
-    def _retry_pending(self, target: GradeTarget, grading_input: GradingInput, pending: dict[str, Any]) -> dict[str, Any]:
-        """Finish a previously charged operation without another relay call."""
+    def _resume(self, target: GradeTarget, grading_input: GradingInput, record: dict[str, Any]) -> dict[str, Any]:
+        phase = record.get("phase")
+        if not phase and record.get("status") == "pending":
+            phase = PHASE_RELAY_SUCCEEDED
+            record.update(phase=phase, operation_id=record.get("operation_id") or uuid.uuid4().hex,
+                          regrade=bool(grading_input.marker_present))
+        if phase == PHASE_INTENT:
+            return self._invoke_relay_from_intent(target, grading_input, record)
+        if phase == PHASE_RELAY_STARTED:
+            # No settlement is knowable in the relay-commit/client-crash
+            # interval. Do not replay or fabricate zero-charge settlement.
+            raise GradeBlocked("\u65e0\u6cd5\u786e\u8ba4\u4e91\u7aef\u8bf7\u6c42\u662f\u5426\u5df2\u7ed3\u7b97\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u6838\u5bf9\u540e\u518d\u91cd\u8bd5\u3002")
+        charge = float(record.get("points_charged", 0))
+        remaining = record.get("points_remaining")
         try:
-            self._pending[target.page_id] = dict(pending)
-            self._write_and_register(target, grading_input, pending)
-            completed = dict(pending)
-            completed["status"] = "graded"
-            completed["marker_present"] = True
-            self._persist_record(target.page_id, completed)
-            self._pending.pop(target.page_id, None)
-            return _summary(target, completed)
+            content = record.get("content")
+            score = record.get("score")
+            if phase == PHASE_RELAY_SUCCEEDED:
+                score = _score(content)
+                record["score"] = score
+                self._ensure_result(target, record)
+                record["phase"] = PHASE_RESULT_VERIFIED
+                self._persist(target.page_id, record)
+                self._pending[target.page_id] = dict(record)
+                phase = PHASE_RESULT_VERIFIED
+
+            if phase == PHASE_RESULT_VERIFIED:
+                self._verify_current_result(target, record)
+                self._cleanup_result(target, record)
+                record["phase"] = PHASE_RESULT_RECONCILED
+                self._persist(target.page_id, record)
+                self._pending[target.page_id] = dict(record)
+                phase = PHASE_RESULT_RECONCILED
+
+            if phase == PHASE_RESULT_RECONCILED:
+                self._verify_current_result(target, record)
+                self._reconcile_wrong_answers(target, record)
+                record["phase"] = PHASE_WRONG_ANSWERS_VERIFIED
+                self._persist(target.page_id, record)
+                self._pending[target.page_id] = dict(record)
+                phase = PHASE_WRONG_ANSWERS_VERIFIED
+
+            if phase == PHASE_WRONG_ANSWERS_VERIFIED:
+                self._verify_current_result(target, record)
+                self._verify_all_wrong_answers(target, record)
+                transient = {"content", "wrong_answer_progress", "cleanup_block_ids", "cleanup_progress"}
+                completed = {key: value for key, value in record.items() if key not in transient}
+                completed.update(status="graded", marker_present=True, phase=PHASE_COMPLETED)
+                self._persist(target.page_id, completed)
+                self._pending.pop(target.page_id, None)
+                return _summary(target, completed)
+            if phase == PHASE_COMPLETED:
+                return _summary(target, record)
+            raise GradeBlocked("\u6279\u6539\u6062\u590d\u72b6\u6001\u65e0\u6548\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u3002")
+        except GradeSettlementError:
+            raise
         except GradeBlocked as exc:
-            raise GradeSettlementError(exc.reason, points_charged=float(pending.get("points_charged", 0)), points_remaining=pending.get("points_remaining")) from exc
+            raise GradeSettlementError(exc.reason, points_charged=charge, points_remaining=remaining) from exc
         except Exception as exc:
-            raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=float(pending.get("points_charged", 0)), points_remaining=pending.get("points_remaining")) from exc
+            raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=charge, points_remaining=remaining) from exc
+
+    def _ensure_result(self, target: GradeTarget, record: dict[str, Any]) -> None:
+        ensure = getattr(self.page_adapter, "ensure_result", None)
+        if ensure is not None:
+            ensure(target, operation_id=record["operation_id"], content=record["content"],
+                   score=record["score"], graded_at=record["graded_at"], regrade=bool(record.get("regrade")),
+                   result_marker=record.get("result_marker") or GRADE_MARKERS[0])
+            return
+        writer = self.page_adapter.update_result if record.get("regrade") else self.page_adapter.write_result
+        writer(target, content=record["content"], score=record["score"], graded_at=record["graded_at"])
+
+    def _verify_current_result(self, target: GradeTarget, record: dict[str, Any]) -> None:
+        verify = getattr(self.page_adapter, "verify_result", None)
+        if verify is None:
+            return
+        if not verify(target, operation_id=record["operation_id"], content=record["content"],
+                      score=record["score"], graded_at=record["graded_at"],
+                      result_marker=record.get("result_marker") or GRADE_MARKERS[0]):
+            raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u4e0d\u5b8c\u6574\uff0c\u65e0\u6cd5\u7ee7\u7eed\u6062\u590d\u3002")
+
+    def _verify_all_wrong_answers(self, target: GradeTarget, record: dict[str, Any]) -> None:
+        verify = getattr(self.page_adapter, "verify_wrong_answer", None)
+        if verify is None:
+            return
+        rows = [row for row in _parse_grade_results(record.get("content")) if row.get("register_wrong")]
+        for row in rows:
+            key = _wrong_answer_operation_key(record["operation_id"], row)
+            if not verify(target, row, key=key, operation_id=record["operation_id"]):
+                raise GradeBlocked("\u9519\u9898\u767b\u8bb0\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+
+    def _cleanup_result(self, target: GradeTarget, record: dict[str, Any]) -> None:
+        planner = getattr(self.page_adapter, "result_cleanup_plan", None)
+        archiver = getattr(self.page_adapter, "archive_result_block", None)
+        if planner is not None and archiver is not None:
+            if "cleanup_block_ids" not in record:
+                record["cleanup_block_ids"] = list(
+                    planner(target, operation_id=record["operation_id"], content=record["content"],
+                            score=record["score"], graded_at=record["graded_at"],
+                            result_marker=record.get("result_marker") or GRADE_MARKERS[0])
+                )
+                record["cleanup_progress"] = []
+                self._persist(target.page_id, record)
+                self._pending[target.page_id] = dict(record)
+            progress = list(record.get("cleanup_progress") or [])
+            for block_id in record["cleanup_block_ids"]:
+                # The archiver rereads actual Notion state even for journaled
+                # progress, so local state never substitutes for reconciliation.
+                archiver(target, block_id=block_id)
+                if block_id not in progress:
+                    progress.append(block_id)
+                    record["cleanup_progress"] = list(progress)
+                    self._persist(target.page_id, record)
+                    self._pending[target.page_id] = dict(record)
+            return
+        cleanup = getattr(self.page_adapter, "cleanup_result", None)
+        if cleanup is not None:
+            cleanup(target, operation_id=record["operation_id"], content=record["content"],
+                    score=record["score"], graded_at=record["graded_at"])
+
+    def _reconcile_wrong_answers(self, target: GradeTarget, record: dict[str, Any]) -> None:
+        rows = [row for row in _parse_grade_results(record.get("content")) if row.get("register_wrong")]
+        ensure = getattr(self.page_adapter, "ensure_wrong_answer", None)
+        verify = getattr(self.page_adapter, "verify_wrong_answer", None)
+        if ensure is not None and verify is not None:
+            progress = list(record.get("wrong_answer_progress") or [])
+            for row in rows:
+                key = _wrong_answer_operation_key(record["operation_id"], row)
+                if not verify(target, row, key=key, operation_id=record["operation_id"]):
+                    ensure(target, row, key=key, operation_id=record["operation_id"])
+                if not verify(target, row, key=key, operation_id=record["operation_id"]):
+                    raise GradeBlocked("\u9519\u9898\u767b\u8bb0\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+                if key not in progress:
+                    progress.append(key)
+                    record["wrong_answer_progress"] = list(progress)
+                    self._persist(target.page_id, record)
+                    self._pending[target.page_id] = dict(record)
+            return
+        exists = getattr(self.page_adapter, "wrong_answer_exists", None)
+        create = getattr(self.page_adapter, "create_wrong_answer", None)
+        if exists is not None and create is not None:
+            for row in rows:
+                if not exists(target, row):
+                    create(target, row)
+
+def _wrong_answer_operation_key(operation_id: str, question: dict[str, Any]) -> str:
+    logical = str(question.get("wrong_answer_key") or question.get("number") or "").strip()
+    if not logical:
+        raise GradeBlocked("\u9519\u9898\u7f3a\u5c11\u53ef\u8bc6\u522b\u7684\u9898\u53f7\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+    return f"{operation_id}:{logical}"
 
 
 def _summary(target: GradeTarget, record: dict[str, Any]) -> dict[str, Any]:
@@ -316,6 +608,11 @@ def _summary(target: GradeTarget, record: dict[str, Any]) -> dict[str, Any]:
 
 def _graded_now() -> str:
     return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).isoformat(timespec="seconds")
+
+
+def _definitive_relay_failure(exc: Exception) -> bool:
+    """Only an explicit HTTP response proves the request did not commit."""
+    return getattr(exc, "status_code", None) in {401, 402, 502, 503}
 
 
 def _authoritative_balance(relay, before, charge: float) -> float | None:
@@ -544,6 +841,72 @@ def _answer_fingerprint(blocks: list[dict]) -> str:
     return _answer_provenance(blocks)[1]
 
 
+def _operation_token(operation_id: str) -> str:
+    return f"PKU_GRADE_OPERATION:{operation_id}"
+
+
+def _operation_result_markdown(operation_id: str, content: str, *, score: float,
+                               graded_at: str, marker: str = GRADE_MARKERS[0]) -> str:
+    safe_marker = marker if marker in GRADE_MARKERS else GRADE_MARKERS[0]
+    return f"## {safe_marker}\n\n{_operation_token(operation_id)}\n\n\u6279\u6539\u65f6\u95f4\uff1a{graded_at}\n\n\u603b\u5206\uff1a{score}\n\n```json\n{content}\n```"
+
+
+def _find_operation(blocks: list[dict], operation_id: str) -> dict | None:
+    token = _operation_token(operation_id)
+    return next((block for block in blocks if _plain(block) == token), None)
+
+
+def _find_complete_operation(blocks: list[dict], operation_id: str, *, content: str,
+                             score: float, graded_at: str, marker: str) -> dict | None:
+    token = _find_operation(blocks, operation_id)
+    if token is None:
+        return None
+    index = blocks.index(token)
+    if index == 0 or _plain(blocks[index - 1]) != marker:
+        return None
+    expected = [f"\u6279\u6539\u65f6\u95f4\uff1a{graded_at}", f"\u603b\u5206\uff1a{score}"]
+    if index + 3 >= len(blocks):
+        return None
+    if [_plain(blocks[index + 1]), _plain(blocks[index + 2])] != expected:
+        return None
+    code = blocks[index + 3]
+    if code.get("type") != "code" or _plain(code) != str(content).strip():
+        return None
+    return token
+
+
+def _stale_result_blocks(blocks: list[dict], current_operation: dict) -> list[dict]:
+    """Return only structurally complete stale app-owned result envelopes."""
+    current_index = blocks.index(current_operation)
+    current_marker = next((index for index in range(current_index, -1, -1)
+                           if _plain(blocks[index]) in GRADE_MARKERS), None)
+    stale: list[dict] = []
+    for index, marker in enumerate(blocks):
+        if _plain(marker) not in GRADE_MARKERS or index == current_marker:
+            continue
+        following = blocks[index + 1:index + 5]
+        # Durable envelopes are exactly marker, operation token, timestamp,
+        # score, and JSON code. Never infer ownership from one matching block.
+        if len(following) >= 4 and (
+            _plain(following[0]).startswith("PKU_GRADE_OPERATION:")
+            and _plain(following[1]).startswith("\u6279\u6539\u65f6\u95f4\uff1a")
+            and _plain(following[2]).startswith("\u603b\u5206\uff1a")
+            and following[3].get("type") == "code"
+        ):
+            stale.extend([marker, *following[:4]])
+            continue
+        # Legacy pre-operation envelopes are exactly marker, timestamp, score,
+        # and JSON code. This permits safe migration without touching answers.
+        legacy = blocks[index + 1:index + 4]
+        if len(legacy) >= 3 and (
+            _plain(legacy[0]).startswith("\u6279\u6539\u65f6\u95f4\uff1a")
+            and _plain(legacy[1]).startswith("\u603b\u5206\uff1a")
+            and legacy[2].get("type") == "code"
+        ):
+            stale.extend([marker, *legacy[:3]])
+    return stale
+
+
 def _result_markdown(content: str, *, score: float, graded_at: str) -> str:
     return f"## 批改结果\n\n批改时间：{graded_at}\n\n总分：{score}\n\n```json\n{content}\n```"
 
@@ -556,4 +919,4 @@ def make_fake_grading_service(directory_service, relay):
     return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=FakeGradingPageAdapter())
 
 
-__all__ = ["ANSWER_PROVENANCE_KNOWN", "ANSWER_PROVENANCE_MARKER_ONLY", "ANSWER_PROVENANCE_UNKNOWN", "GRADE_ESTIMATE_LABEL", "INCOMPLETE_ANSWERS_REASON", "GradeTarget", "GradingInput", "GradeBlocked", "RealGradingPageAdapter", "FakeGradingPageAdapter", "ExerciseGrader", "make_grading_service", "make_fake_grading_service", "_parse_grade_results"]
+__all__ = ["PHASE_INTENT", "PHASE_RELAY_STARTED", "PHASE_RELAY_SUCCEEDED", "PHASE_RESULT_VERIFIED", "PHASE_RESULT_RECONCILED", "PHASE_WRONG_ANSWERS_VERIFIED", "PHASE_COMPLETED", "ANSWER_PROVENANCE_KNOWN", "ANSWER_PROVENANCE_MARKER_ONLY", "ANSWER_PROVENANCE_UNKNOWN", "GRADE_ESTIMATE_LABEL", "INCOMPLETE_ANSWERS_REASON", "GradeTarget", "GradingInput", "GradeBlocked", "RealGradingPageAdapter", "FakeGradingPageAdapter", "ExerciseGrader", "make_grading_service", "make_fake_grading_service", "_parse_grade_results"]

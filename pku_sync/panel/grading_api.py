@@ -67,7 +67,9 @@ class GradeJobController:
                     return ({"status": PAGE_IDENTITY_MISSING, "reason": exc.reason, "fallback": None}, status.HTTP_409_CONFLICT)
                 return ({"status": "blocked", "reason": exc.reason, "unanswered": exc.unanswered}, status.HTTP_409_CONFLICT)
             target, grading_input = prepared
-            if grading_input.marker_present and not (regrade and confirm):
+            has_pending = getattr(self.service, "has_pending", None)
+            recovering = bool(has_pending and has_pending(exercise_id))
+            if grading_input.marker_present and not recovering and not (regrade and confirm):
                 return ({"status": "confirm_required", "reason": "\u8fd9\u5957\u7ec3\u4e60\u5df2\u6709\u6279\u6539\u7ed3\u679c\uff0c\u91cd\u65b0\u6279\u6539\u524d\u8bf7\u786e\u8ba4\u3002", "estimate": GRADE_ESTIMATE_LABEL}, status.HTTP_409_CONFLICT)
             job_id = uuid.uuid4().hex
             with self._lock:

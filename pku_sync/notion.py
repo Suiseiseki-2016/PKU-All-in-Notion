@@ -106,14 +106,16 @@ class NotionClient:
         params: dict | None = None,
         files: dict | None = None,
         headers: dict | None = None,
+        retry: bool = True,
     ) -> dict:
-        """One request with the shared retry policy (429 honors Retry-After)."""
+        """One request; ambiguous non-idempotent writes can disable retries."""
         response: httpx.Response | None = None
-        for attempt in range(1, _ATTEMPTS + 1):
+        attempts = _ATTEMPTS if retry else 1
+        for attempt in range(1, attempts + 1):
             response = self._http.request(
                 method, url, json=json_body, params=params, files=files, headers=headers
             )
-            if response.status_code not in _RETRYABLE or attempt == _ATTEMPTS:
+            if response.status_code not in _RETRYABLE or attempt == attempts:
                 break
             time.sleep(_backoff(response, attempt))
         assert response is not None
@@ -133,7 +135,8 @@ class NotionClient:
         return self._request("GET", f"/v1/pages/{_norm_id(page_id)}")
 
     def create_page(
-        self, parent_page_id: str, title: str, *, children: list[dict] | None = None
+        self, parent_page_id: str, title: str, *, children: list[dict] | None = None,
+        retry: bool = True,
     ) -> dict:
         """Create a subpage. Extra blocks beyond the first 100 are appended."""
         payload: dict = {
@@ -142,7 +145,7 @@ class NotionClient:
         }
         if children:
             payload["children"] = children[:_BLOCK_BATCH]
-        page = self._request("POST", "/v1/pages", json_body=payload)
+        page = self._request("POST", "/v1/pages", json_body=payload, retry=retry)
         if children and len(children) > _BLOCK_BATCH:
             self.append_blocks(page["id"], children[_BLOCK_BATCH:])
         return page
@@ -194,14 +197,39 @@ class NotionClient:
                 )
         return found
 
-    def append_blocks(self, page_id: str, blocks: list[dict]) -> None:
-        """Append content blocks in API-sized batches (never touches existing)."""
+    def append_blocks(
+        self, page_id: str, blocks: list[dict], *, after: str | None = None,
+        retry: bool = True,
+    ) -> list[dict]:
+        """Append blocks and return created identities for scoped verification."""
+        created: list[dict] = []
+        cursor = after
         for chunk in _chunks(blocks, _BLOCK_BATCH):
-            self._request(
-                "PATCH",
-                f"/v1/blocks/{_norm_id(page_id)}/children",
-                json_body={"children": chunk},
+            payload: dict = {"children": chunk}
+            if cursor:
+                payload["after"] = _norm_id(cursor)
+            body = self._request(
+                "PATCH", f"/v1/blocks/{_norm_id(page_id)}/children",
+                json_body=payload, retry=retry,
             )
+            rows = body.get("results") or []
+            created.extend(rows)
+            if rows and rows[-1].get("id"):
+                cursor = rows[-1]["id"]
+        return created
+
+    def archive_block(self, block_id: str, *, retry: bool = True) -> dict:
+        """Archive one known block, never an exercise page body."""
+        return self._request(
+            "DELETE", f"/v1/blocks/{_norm_id(block_id)}", retry=retry
+        )
+
+    def archive_page(self, page_id: str, *, retry: bool = True) -> dict:
+        """Archive one known app-owned page."""
+        return self._request(
+            "PATCH", f"/v1/pages/{_norm_id(page_id)}",
+            json_body={"archived": True}, retry=retry,
+        )
 
     def replace_page_content(self, page_id: str, blocks: list[dict]) -> None:
         """Overwrite mode: archive current body blocks, then append the new ones.

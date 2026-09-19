@@ -562,9 +562,10 @@ class DirectoryService:
         return payload
 
     def record_grading(self, exercise_id: str, record: dict) -> None:
-        self.local_grading_records[str(exercise_id)] = dict(record)
+        # Publish to memory only after the durable atomic snapshot succeeds.
         if self.grading_record_store is not None:
             self.grading_record_store.put(str(exercise_id), record)
+        self.local_grading_records[str(exercise_id)] = dict(record)
 
     def mark_exercise_launched(self, exercise_id: str) -> None:
         """Record a Notion answering launch without storing exercise content."""
