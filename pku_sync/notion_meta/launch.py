@@ -65,7 +65,9 @@ class LaunchResolver:
             return LaunchResult(status=LAUNCH_OPENED, target_id=normalized, url=url)
         course = self._courses.get(course_id) if course_id else None
         fallback = (
-            PageRef(id=course.id, url=course.url, title=course.title) if course else None
+            PageRef(id=course.id, url=course.url, title=course.title)
+            if course and course.url
+            else None
         )
         return LaunchResult(
             status=LAUNCH_MISSING_MAPPING,

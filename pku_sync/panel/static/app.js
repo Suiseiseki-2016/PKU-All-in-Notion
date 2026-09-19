@@ -1438,6 +1438,7 @@
   /* -- navigation -------------------------------------------------------- */
 
   function openDashboard() {
+    state.launch = null;
     state.view = "dashboard";
     state.lectureId = null;
     state.materials = null;
@@ -1446,6 +1447,7 @@
   }
 
   function openCourse(courseId) {
+    state.launch = null;
     state.view = "course";
     state.courseId = courseId || state.courseId;
     state.overview = null;
@@ -1455,6 +1457,7 @@
   }
 
   function selectLecture(courseId, lectureId) {
+    state.launch = null;
     state.view = "lecture";
     state.courseId = courseId || state.courseId;
     state.lectureId = lectureId;

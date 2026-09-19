@@ -611,7 +611,7 @@ class DirectoryService:
             return self.provider.resolve_launch(data, entity.id, course_id=course_id)
         course = next((item for item in data.courses if item.id == course_id), None)
         fallback = None
-        if course is not None:
+        if course is not None and course.url:
             fallback = PageRef(id=course.id, url=course.url, title=course.title)
         return LaunchResult(
             status=LAUNCH_MISSING_MAPPING,
