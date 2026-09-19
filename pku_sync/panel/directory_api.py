@@ -47,6 +47,19 @@ def add_directory_routes(app, service: DirectoryService) -> None:
         except DirectoryApiError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
+    @app.get("/api/exercises")
+    def exercises_endpoint() -> dict:
+        try:
+            payload = service.load()
+        except DirectoryApiError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        return {"exercises": payload["exercises"]}
+
+    @app.post("/api/exercises/{exercise_id}/answer-started")
+    def exercise_answer_started_endpoint(exercise_id: str) -> dict:
+        service.mark_exercise_launched(exercise_id)
+        return {"status": "recorded", "exercise_id": exercise_id}
+
     @app.get("/api/sync/state")
     def sync_state_endpoint() -> dict:
         return service.sync_snapshot()

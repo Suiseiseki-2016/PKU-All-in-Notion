@@ -58,6 +58,8 @@ NET_L2 = synth(102)  # 第二讲 · 计算机网络（2026-09-15 第3-4节）—
 DEV_L1 = synth(110)  # 第三讲 · 发展心理学（2026-09-18 第5-6节）— inferred-only
 COG_L1 = synth(120)  # 第一讲 · 认知心理学 — zero materials
 NET_MISSING = synth(150)  # 待确认 note-line target (NOT one of the lecture pages)
+EXERCISE_EXISTING = synth(160)
+EXERCISE_GENERATED = synth(161)
 
 NOTES_SUB_NET = synth(201)  # 计算机网络 subpage of 课堂录像笔记
 NOTES_SUB_DEV = synth(202)  # 发展心理学 subpage (no resolvable link lines)
@@ -289,6 +291,10 @@ class PanelFakeClient:
         return [dict(row) for row in self._ws.rows.get(database_id, [])]
 
 
+def heading(text: str) -> dict:
+    return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": [text_piece(text)]}}
+
+
 def build_panel_workspace() -> FakeWorkspace:
     """The seeded M3 workspace: four courses covering every material-view state."""
     ws = FakeWorkspace()
@@ -313,9 +319,13 @@ def build_panel_workspace() -> FakeWorkspace:
     # 计算机网络: two lectures; lecture bodies never read (honeypots below).
     ws.children[COURSE_NET] = [
         child_page_block(NET_L1, "第一讲 · 计算机网络（2026-09-08 第1-2节）"),
+        child_page_block(EXERCISE_EXISTING, "\u7f51\u7edc\u968f\u5802\u7ec3\u4e60"),
+        child_page_block(EXERCISE_GENERATED, "\u8003\u524d\u7ec3\u4e60"),
         child_page_block(NET_L2, "第二讲 · 计算机网络（2026-09-15 第3-4节）"),
         paragraph(f"课程简介 honeypot：{SIGNED_S3_URL} {LOCAL_PATH}"),
     ]
+    ws.children[EXERCISE_EXISTING] = [heading("批改结果")]
+    ws.children[EXERCISE_GENERATED] = [paragraph("题目仅存在于 Notion")]
     ws.children[NET_L1] = [
         paragraph(f"{BODY_PROBE} 图片 {SIGNED_S3_URL} 本地 {FULL_TRANSCRIPT_PATH}"),
     ]
@@ -442,3 +452,6 @@ def build_panel_workspace() -> FakeWorkspace:
         ),
     ]
     return ws
+
+
+

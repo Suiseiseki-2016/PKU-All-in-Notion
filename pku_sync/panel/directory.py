@@ -30,6 +30,8 @@ import threading
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .exercises import ExerciseEventStore, exercise_row
+
 from ..notion_meta import (
     ASSOCIATION_CONFIRMED,
     ASSOCIATION_NONE,
@@ -380,7 +382,9 @@ def build_activity(data: DirectoryData) -> list[dict]:
     ]
 
 
-def build_directory_payload(data: DirectoryData, sync: dict) -> dict:
+def build_directory_payload(
+    data: DirectoryData, sync: dict, *, launched_exercise_ids=()
+) -> dict:
     indexed = sum(
         1
         for course in data.courses
@@ -393,6 +397,7 @@ def build_directory_payload(data: DirectoryData, sync: dict) -> dict:
         "materials": sum(len(_course_pool(data, course)) for course in data.courses),
         "indexed_materials": indexed,
     }
+    launched = set(launched_exercise_ids)
     return {
         "semester": data.semester,
         "sync": dict(sync),
@@ -400,6 +405,10 @@ def build_directory_payload(data: DirectoryData, sync: dict) -> dict:
         "stats": stats,
         "activity": build_activity(data),
         "courses": [build_course_payload(course, data, sync) for course in data.courses],
+        "exercises": [
+            exercise_row(item, launch_started=item.id in launched)
+            for item in data.exercises
+        ],
     }
 
 
@@ -473,8 +482,11 @@ class DirectoryService:
     directory, so launch paths make zero client calls (no search anywhere).
     """
 
-    def __init__(self, provider: DirectoryProvider, *, clock=None):
+    def __init__(
+        self, provider: DirectoryProvider, *, clock=None, exercise_events=None
+    ):
         self.provider = provider
+        self.exercise_events = exercise_events or ExerciseEventStore()
         self.sync = SyncTracker(clock=clock)
         self._data: DirectoryData | None = None
         self._lock = threading.Lock()
@@ -502,7 +514,15 @@ class DirectoryService:
         with self._lock:
             self._data = data
         self.sync.succeed(data)
-        return build_directory_payload(data, self.sync.snapshot())
+        return build_directory_payload(
+            data,
+            self.sync.snapshot(),
+            launched_exercise_ids=self.exercise_events.launched_ids(),
+        )
+
+    def mark_exercise_launched(self, exercise_id: str) -> None:
+        """Record a Notion answering launch without storing exercise content."""
+        self.exercise_events.mark_launched(exercise_id)
 
     def invalidate(self) -> None:
         """Drop the cached directory (used when the Notion token is cleared).
@@ -600,7 +620,12 @@ def make_directory_service(settings=None, *, semester: str | None = None, clock=
         from ..config import settings as default_settings
 
         settings = default_settings
-    return DirectoryService(RealDirectoryProvider(settings, semester=semester), clock=clock)
+    event_path = Path(settings.data_dir) / "panel" / "exercise_events.json"
+    return DirectoryService(
+        RealDirectoryProvider(settings, semester=semester),
+        clock=clock,
+        exercise_events=ExerciseEventStore(event_path),
+    )
 
 
 __all__ = [

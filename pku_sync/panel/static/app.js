@@ -619,6 +619,22 @@
     );
   }
 
+  function exerciseAction(row) {
+    var actions = COPY.directory.exercises.actions;
+    return actions[row.status] ? actions[row.status] : actions.organized;
+  }
+
+  function exerciseDirectorySection() {
+    var rows = state.directory.exercises ? state.directory.exercises : [];
+    var copy = COPY.directory.exercises;
+    if (!rows.length) return '<section aria-labelledby="exercise-directory-title" data-state="empty-exercises"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-empty">' + esc(copy.empty) + '</div></section>';
+    var items = rows.map(function (row) {
+      var actionName = row.status === "pending-grade" ? "grade-exercise" : "launch-exercise";
+      return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p></div><div class="exercise-actions">' + button(exerciseAction(row), actionName, { primary: row.status === "pending-grade", small: true, disabled: !state.connection.connected, attrs: { "data-exercise": row.id, "data-target": row.id } }) + '</div></article>';
+    }).join("");
+    return '<section aria-labelledby="exercise-directory-title"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-directory" role="list" aria-label="' + esc(copy.list_label) + '">' + items + '</div></section>';
+  }
+
   function courseGrid() {
     var directory = state.directory;
     var synced = relativeText(directory.sync.last_sync_at);
@@ -731,7 +747,7 @@
     var fallback = directoryBody();
     var body = fallback
       ? fallback
-      : statsSection() + courseGrid() + activitySection();
+      : statsSection() + exerciseDirectorySection() + courseGrid() + activitySection();
     return (
       '<div class="topline"><div><h1 class="page-title">' +
       esc(COPY.directory.title) +
@@ -1361,6 +1377,10 @@
     });
   }
 
+  function launchExercise(targetId) {
+    return requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/answer-started", { method: "POST" }).then(function () { return launch("exercise", targetId); });
+  }
+
   function launch(kind, targetId) {
     state.launch = { kind: kind, targetId: targetId, status: "opening" };
     render();
@@ -1458,6 +1478,10 @@
     else if (action === "open-course") openCourse(target.dataset.course);
     else if (action === "select-lecture") {
       selectLecture(target.dataset.course, target.dataset.lecture);
+    } else if (action === "launch-exercise") {
+      launchExercise(target.dataset.target);
+    } else if (action === "grade-exercise") {
+      showToast(COPY.directory.exercises.grade_notice);
     } else if (action === "launch") {
       launch(target.dataset.kind, target.dataset.target);
     } else if (action === "retry-launch") {

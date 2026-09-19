@@ -918,3 +918,11 @@ h1, h2, h3, p { margin-top: 0; }
 .missing-lecture-entry small { color: #667085; flex: 1 1 240px; }
 .launch-feedback { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 12px 16px; border-radius: 12px; background: #f0f7f1; color: #245b37; }
 .launch-feedback[role="alert"] { background: #fff3f0; color: #a33724; }
+
+.exercise-empty {
+  padding: 24px;
+  color: var(--muted);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
