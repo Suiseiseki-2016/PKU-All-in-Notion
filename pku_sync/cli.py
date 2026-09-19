@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / fault / fault-launch / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
+            help="演示状态：normal / slow / grade-slow / fault / fault-launch / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:
@@ -844,7 +844,11 @@ def panel_cmd(
         connection_service = build_fake_connection_service(
             directory_service=directory_service
         )
-        platform_service = FakePlatformBridge(activated=True, llm_points=4.0 if fake_variant == "low-balance" else 100.0)
+        platform_service = FakePlatformBridge(
+            activated=True,
+            llm_points=4.0 if fake_variant == "low-balance" else 100.0,
+            grade_delay=5.0 if fake_variant == "grade-slow" else 0.0,
+        )
         from .notion_meta import canonical_url
         from .panel.exercise_organizer import ExerciseOrganizer, MemoryOrganizeRecordStore
 
@@ -868,6 +872,8 @@ def panel_cmd(
             page_adapter=_FakePages(), notes_provider=_FakeNotes(),
             record_store=MemoryOrganizeRecordStore(),
         )
+        from .panel.exercise_grader import make_fake_grading_service
+        grading_service = make_fake_grading_service(directory_service, platform_service)
     else:
         from .panel.directory import make_directory_service
 
@@ -877,6 +883,7 @@ def panel_cmd(
         connection_service = None
         platform_service = None
         organizer_service = None
+        grading_service = None
     try:
         sock, bound_port = bind_panel(port)
     except PanelPortError as exc:
@@ -897,6 +904,7 @@ def panel_cmd(
                 connection_service=connection_service,
                 platform_service=platform_service,
                 organizer_service=organizer_service,
+                grading_service=grading_service,
             ),
             host=host,
             port=bound_port,

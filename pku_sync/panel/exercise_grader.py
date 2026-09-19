@@ -33,12 +33,37 @@ class RealGradingPageAdapter:
             blocks = client.list_children(target.page_id)
         prompt, unanswered = _grading_prompt(target, blocks)
         return GradingInput(prompt=prompt, unanswered=unanswered)
-    def write_result(self, target: GradeTarget, *, content: str, score: float, graded_at: str) -> None:
+    def write_result(
+        self, target: GradeTarget, *, content: str, score: float, graded_at: str
+    ) -> None:
         # Core write-back is deliberately append-only. The dedicated write-back
         # feature upgrades this adapter to marker-based update-in-place.
         rendered = _result_markdown(content, score=score, graded_at=graded_at)
         with get_client(self.settings) as client:
             client.append_blocks(target.page_id, markdown_to_blocks(rendered))
+
+
+class FakeGradingPageAdapter:
+    """In-memory grading adapter for browser verification; no Notion calls."""
+    def __init__(self):
+        self.read_calls: list[str] = []
+        self.write_calls: list[str] = []
+
+    def read_for_grading(self, target: GradeTarget) -> GradingInput:
+        self.read_calls.append(target.page_id)
+        prompt = json.dumps({"operation": "grade", "target": {
+            "page_id": target.page_id, "page_url": target.page_url,
+            "course_id": target.course_id, "course_title": target.course_title,
+            "scope": target.scope,
+        }}, ensure_ascii=False)
+        return GradingInput(prompt=prompt, unanswered=[])
+
+    def write_result(
+        self, target: GradeTarget, *, content: str, score: float, graded_at: str
+    ) -> None:
+        self.write_calls.append(target.page_id)
+
+
 class ExerciseGrader:
     def __init__(self, *, directory_service, relay, page_adapter, clock=None):
         self.directory_service = directory_service; self.relay = relay
@@ -97,4 +122,13 @@ def _result_markdown(content: str, *, score: float, graded_at: str) -> str:
     return f"## 批改结果\n\n批改时间：{graded_at}\n\n总分：{score}\n\n```json\n{content}\n```"
 def make_grading_service(settings, directory_service, relay):
     return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=RealGradingPageAdapter(settings))
-__all__ = ["GRADE_ESTIMATE_LABEL", "INCOMPLETE_ANSWERS_REASON", "GradeTarget", "GradingInput", "GradeBlocked", "RealGradingPageAdapter", "ExerciseGrader", "make_grading_service"]
+
+def make_fake_grading_service(directory_service, relay):
+    return ExerciseGrader(
+        directory_service=directory_service,
+        relay=relay,
+        page_adapter=FakeGradingPageAdapter(),
+    )
+
+
+__all__ = ["GRADE_ESTIMATE_LABEL", "INCOMPLETE_ANSWERS_REASON", "GradeTarget", "GradingInput", "GradeBlocked", "RealGradingPageAdapter", "FakeGradingPageAdapter", "ExerciseGrader", "make_grading_service", "make_fake_grading_service"]

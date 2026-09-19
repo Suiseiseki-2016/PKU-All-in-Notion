@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from ..platform import PlatformError
 
@@ -34,10 +35,11 @@ class FakePlatformBridge:
     """Seeded fake with deterministic local metering and no network."""
 
     def __init__(self, activated: bool = False, *, llm_points: float = FAKE_LLM_POINTS,
-                 points_charged: float = 3.0):
+                 points_charged: float = 3.0, grade_delay: float = 0.0):
         self._activated = bool(activated)
         self._llm_points = float(llm_points)
         self._points_charged = float(points_charged)
+        self._grade_delay = float(grade_delay)
         self.llm_calls: list[dict] = []
 
     def quota(self) -> dict:
@@ -68,6 +70,8 @@ class FakePlatformBridge:
         if not self._activated:
             raise PlatformError("云端登录已失效，请重新激活后重试。")
         self.llm_calls.append({"operation": "grade"})
+        if self._grade_delay:
+            time.sleep(self._grade_delay)
         self._llm_points -= self._points_charged
         return {
             "content": json.dumps({"score": 88, "details": []}, ensure_ascii=False),

@@ -49,6 +49,7 @@ SLOW_DELAY = 0.25
 _FAKE_VARIANTS = (
     "normal",
     "slow",
+    "grade-slow",
     "fault",
     "fault-launch",
     "empty",
@@ -157,6 +158,20 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "slow":
         provider = PanelDirectoryProvider(ws, semester=semester, delay=slow_delay)
+    elif variant == "grade-slow":
+        from .fake_workspace import EXERCISE_GENERATED, paragraph, text_piece
+
+        def heading_3(text):
+            return {
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {"rich_text": [text_piece(text)]},
+            }
+        ws.children[EXERCISE_GENERATED] = [
+            heading_3("\u7b2c\u4e00\u9898"), paragraph("\u7b54\u6848\uff1aA"),
+            heading_3("\u7b2c\u4e8c\u9898"), paragraph("\u7b54\u6848\uff1a\u6b63\u786e"),
+        ]
+        provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "fault":
         # a second plausible current-semester hub → discovery ambiguity (like
         # the verified 'Clash Notes …' coexistence, but within one semester)
