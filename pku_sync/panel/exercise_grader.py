@@ -47,7 +47,7 @@ class FakeGradingPageAdapter:
     """In-memory grading adapter for browser verification; no Notion calls."""
     def __init__(self):
         self.read_calls: list[str] = []
-        self.write_calls: list[str] = []
+        self.write_calls: list[dict[str, Any]] = []
 
     def read_for_grading(self, target: GradeTarget) -> GradingInput:
         self.read_calls.append(target.page_id)
@@ -61,7 +61,14 @@ class FakeGradingPageAdapter:
     def write_result(
         self, target: GradeTarget, *, content: str, score: float, graded_at: str
     ) -> None:
-        self.write_calls.append(target.page_id)
+        self.write_calls.append(
+            {
+                "page_id": target.page_id,
+                "content": content,
+                "score": score,
+                "graded_at": graded_at,
+            }
+        )
 
 
 class ExerciseGrader:

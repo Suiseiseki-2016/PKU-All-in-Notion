@@ -32,13 +32,14 @@ def test_grade_slow_variant_reaches_loading_and_metadata_only_summary():
 
     started = client.post(f"/api/exercises/{EXERCISE_GENERATED}/grade")
     assert started.status_code == 202
+    job_id = started.json()["job_id"]
     assert client.get(
-        "/api/exercises/grade/status", params={"job_id": started.json()["job_id"]}
+        "/api/exercises/grade/status", params={"job_id": job_id}
     ).json()["status"] == "running"
 
     for _ in range(100):
         summary = client.get(
-            "/api/exercises/grade/status", params={"job_id": started.json()["job_id"]}
+            "/api/exercises/grade/status", params={"job_id": job_id}
         ).json()
         if summary["status"] != "running":
             break
@@ -52,4 +53,5 @@ def test_grade_slow_variant_reaches_loading_and_metadata_only_summary():
     assert summary["points_charged"] == 3.0
     assert summary["points_remaining"] == 9.0
     assert grader.page_adapter.read_calls == [EXERCISE_GENERATED]
-    assert grader.page_adapter.write_calls == [EXERCISE_GENERATED]
+    assert grader.page_adapter.write_calls[0]["page_id"] == EXERCISE_GENERATED
+    assert grader.page_adapter.write_calls[0]["score"] == 88

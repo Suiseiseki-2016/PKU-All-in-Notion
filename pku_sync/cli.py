@@ -847,7 +847,7 @@ def panel_cmd(
         platform_service = FakePlatformBridge(
             activated=True,
             llm_points=4.0 if fake_variant == "low-balance" else 100.0,
-            grade_delay=5.0 if fake_variant == "grade-slow" else 0.0,
+            grade_delay=1.5 if fake_variant == "grade-slow" else 0.0,
         )
         from .notion_meta import canonical_url
         from .panel.exercise_organizer import ExerciseOrganizer, MemoryOrganizeRecordStore
