@@ -723,7 +723,8 @@
       var identityMissing = !row.url;
       var action = button(exerciseAction(row), actionName, { primary: row.status === "pending-grade" || row.status === "graded", small: true, disabled: !state.connection.connected || identityMissing || state.grading.status === "running", attrs: { "data-exercise": row.id, "data-target": row.id, "data-purpose": purpose } });
       var estimate = row.status === "pending-grade" ? '<span class="cost-pill">预计 1–5 AI 点</span>' : '';
-      var regrade = row.status === "graded" ? button(COPY.directory.exercises.regrade ? COPY.directory.exercises.regrade : "重新批改", "confirm-regrade", { small: true, quiet: true, disabled: Boolean(identityMissing ? true : state.grading.status === "running"), attrs: { "data-exercise": row.id } }) : '';
+      var regradeDisabled = !state.connection.connected || identityMissing || state.grading.status === "running";
+      var regrade = row.status === "graded" ? button(COPY.directory.exercises.regrade ? COPY.directory.exercises.regrade : "重新批改", "confirm-regrade", { small: true, quiet: true, disabled: regradeDisabled, attrs: { "data-exercise": row.id } }) : '';
       var mismatch = row.mismatch_notice ? '<p role="alert">本地批改记录与 Notion 标记不一致，请手动确认。</p>' : '';
       return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p>' + (identityMissing ? missingExerciseIdentity(row) : exerciseLaunchFeedback(row)) + mismatch + '</div><div class="exercise-actions">' + action + regrade + estimate + '</div></article>';
     }).join("");
@@ -1560,7 +1561,7 @@
   function confirmRegrade(targetId) {
     var rows = state.directory ? state.directory.exercises : [];
     var row = rows.find(function (item) { return item.id === targetId; });
-    if (!row) return;
+    if (!state.connection.connected || !row || row.status !== "graded" || !row.url) return;
     state.grading = { exerciseId: targetId, title: row.title, status: "confirm", jobId: null, result: null, blocked: "", unanswered: [] };
     render();
   }
@@ -1613,8 +1614,20 @@
       body: JSON.stringify({ purpose: purpose })
     }).then(function (result) {
       if (result.ok && result.body && result.body.url) {
-        showToast(COPY.launch.opening);
-        window.location.assign(result.body.url);
+        var navigate = function () {
+          showToast(COPY.launch.opening);
+          window.location.assign(result.body.url);
+        };
+        if (purpose === "answer") {
+          // The launch endpoint records the answer-start event. Re-read the
+          // metadata directory before navigating so the current row changes
+          // to pending-answer without a manual reload when the panel remains visible.
+          return loadDirectory().then(function () {
+            render();
+            navigate();
+          }, navigate);
+        }
+        navigate();
         return;
       }
       state.exerciseLaunch = {
