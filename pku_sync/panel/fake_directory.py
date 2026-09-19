@@ -20,12 +20,16 @@ the stored directory, and no variant ever performs a workspace search.
 from __future__ import annotations
 
 from ..notion_meta import DirectoryData, LaunchResolver, LaunchResult, NotionDirectory
+from ..notion_meta.errors import NotionRetryableError
 from .directory import (
     DirectoryService,
     LAUNCH_FAILED,
 )
 from .fake_workspace import (
     AMBIG_HUB,
+    LEARNING_CENTER,
+    NOTES_HUB,
+    NOISE_PAGE,
     NET_L1,
     build_panel_workspace,
     search_page,
@@ -40,7 +44,14 @@ FAULT_LAUNCH_TARGET = NET_L1
 # The slow variant's per-call delay (a full directory read is ~3s then).
 SLOW_DELAY = 0.25
 
-_FAKE_VARIANTS = ("normal", "slow", "fault", "fault-launch")
+_FAKE_VARIANTS = (
+    "normal",
+    "slow",
+    "fault",
+    "fault-launch",
+    "empty",
+    "usage-cap",
+)
 
 
 class PanelDirectoryProvider:
@@ -78,6 +89,13 @@ class FaultLaunchProvider(PanelDirectoryProvider):
         return super().resolve_launch(data, target_id, course_id=course_id)
 
 
+class UsageCapProvider(PanelDirectoryProvider):
+    """Variant matching a retryable Notion usage-cap/read failure."""
+
+    def load(self) -> DirectoryData:
+        raise NotionRetryableError(status=429)
+
+
 def build_fake_directory(
     variant: str = "normal",
     *,
@@ -106,8 +124,22 @@ def build_fake_directory(
         # the verified 'Clash Notes …' coexistence, but within one semester)
         ws.search_results.append(search_page(AMBIG_HUB, "Class Notes 2026 下半学期（备份）"))
         provider = PanelDirectoryProvider(ws, semester=semester)
-    else:  # fault-launch
+    elif variant == "fault-launch":
         provider = FaultLaunchProvider(ws, semester=semester)
+    elif variant == "empty":
+        # Keep the hub and its special children, but remove course pages. The
+        # real adapter therefore returns a successful empty directory rather
+        # than treating an empty result as a read failure.
+        hub_id = ws.search_results[0]["id"]
+        ws.children[hub_id] = [
+            child
+            for child in ws.children[hub_id]
+            if child.get("type") == "child_database"
+            or child.get("id") in {LEARNING_CENTER, NOTES_HUB, NOISE_PAGE}
+        ]
+        provider = PanelDirectoryProvider(ws, semester=semester)
+    else:  # usage-cap
+        provider = UsageCapProvider(ws, semester=semester)
     return DirectoryService(provider, clock=clock)
 
 
@@ -122,6 +154,7 @@ __all__ = [
     "SLOW_DELAY",
     "PanelDirectoryProvider",
     "FaultLaunchProvider",
+    "UsageCapProvider",
     "build_fake_directory",
     "build_fake_directory_service",
 ]
