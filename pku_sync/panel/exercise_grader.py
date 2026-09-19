@@ -1,6 +1,7 @@
 """Metered exercise grading with idempotent, answer-preserving write-back."""
 from __future__ import annotations
 
+import copy
 import datetime
 import hashlib
 import json
@@ -165,30 +166,57 @@ class RealGradingPageAdapter:
 
     def ensure_result(self, target: GradeTarget, *, operation_id: str, content: str,
                       score: float, graded_at: str, regrade: bool,
-                      result_marker: str = GRADE_MARKERS[0]) -> None:
-        """Append one operation envelope and verify ambiguous commits by reread."""
+                      result_marker: str = GRADE_MARKERS[0],
+                      append_plan: list[dict[str, Any]] | None = None) -> None:
+        """Reconcile one immutable operation envelope against actual blocks.
+
+        Older callers without a durably frozen plan retain the conservative
+        partial-write behavior. Durable grading always supplies ``append_plan``.
+        """
         rendered = markdown_to_blocks(
             _operation_result_markdown(operation_id, content, score=score, graded_at=graded_at,
                                        marker=result_marker)
         )
+        if append_plan is None:
+            with get_client(self.settings) as client:
+                existing = client.list_children(target.page_id)
+                if _find_complete_operation(existing, operation_id, content=content, score=score,
+                                            graded_at=graded_at, marker=result_marker) is not None:
+                    return
+                if _find_operation(existing, operation_id) is not None:
+                    raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u4e3a\u907f\u514d\u91cd\u590d\u5199\u5165\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u5904\u7406\u3002")
+                _append_and_verify(client, target.page_id, rendered, rendered)
+            return
+        plan = _validated_append_plan(append_plan, rendered)
         with get_client(self.settings) as client:
             existing = client.list_children(target.page_id)
-            if _find_complete_operation(existing, operation_id, content=content, score=score,
-                                        graded_at=graded_at, marker=result_marker) is not None:
+            action, owned = _result_append_action(
+                existing, plan, operation_id=operation_id, marker=result_marker, regrade=regrade
+            )
+            if action == "complete":
                 return
-            if _find_operation(existing, operation_id) is not None:
-                raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u4e3a\u907f\u514d\u91cd\u590d\u5199\u5165\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u5904\u7406\u3002")
-            try:
-                client.append_blocks(target.page_id, rendered, retry=False)
-            except Exception:
-                reread = client.list_children(target.page_id)
-                if _find_complete_operation(reread, operation_id, content=content, score=score,
-                                            graded_at=graded_at, marker=result_marker) is None:
-                    raise
-            verified = client.list_children(target.page_id)
-            if _find_complete_operation(verified, operation_id, content=content, score=score,
-                                        graded_at=graded_at, marker=result_marker) is None:
-                raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u540e\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+            if action == "blocked":
+                raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u5f52\u5c5e\u65e0\u6cd5\u5b89\u5168\u786e\u8ba4\uff0c\u672a\u4fee\u6539 Notion\u3002")
+            if action == "resume":
+                _append_and_verify(client, target.page_id, plan[len(owned):], plan)
+                return
+            if action == "replace-prefix":
+                # Retire the marker first, then metadata from the end, and
+                # the operation token last. Any interrupted transition retains
+                # the durable token as unambiguous ownership evidence.
+                retirement_order = (
+                    list(reversed(owned))
+                    if _plain(owned[0]).startswith("PKU_GRADE_OPERATION:")
+                    else [owned[0], *reversed(owned[1:])]
+                )
+                for block in retirement_order:
+                    block_id = str(block.get("id") or "")
+                    if not block_id:
+                        raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u5f52\u5c5e\u65e0\u6cd5\u5b89\u5168\u786e\u8ba4\uff0c\u672a\u4fee\u6539 Notion\u3002")
+                    _archive_block_reconciled(client, target.page_id, block_id)
+                _append_and_verify(client, target.page_id, plan, plan)
+                return
+            _append_and_verify(client, target.page_id, plan, plan)
 
     def verify_result(self, target: GradeTarget, *, operation_id: str, content: str,
                       score: float, graded_at: str, result_marker: str) -> bool:
@@ -219,12 +247,7 @@ class RealGradingPageAdapter:
         with get_client(self.settings) as client:
             if not any(str(block.get("id") or "") == block_id for block in client.list_children(target.page_id)):
                 return
-            try:
-                client.archive_block(block_id, retry=False)
-            except Exception:
-                remaining = client.list_children(target.page_id)
-                if any(str(block.get("id") or "") == block_id for block in remaining):
-                    raise
+            _archive_block_reconciled(client, target.page_id, block_id)
 
     def cleanup_result(self, target: GradeTarget, *, operation_id: str, **_kwargs) -> None:
         """Compatibility path for callers without a durable cleanup journal."""
@@ -514,6 +537,16 @@ class ExerciseGrader:
             if phase == PHASE_RELAY_SUCCEEDED:
                 score = _score(content)
                 record["score"] = score
+                if "append_plan" not in record:
+                    record["append_plan"] = markdown_to_blocks(
+                        _operation_result_markdown(
+                            record["operation_id"], record["content"], score=score,
+                            graded_at=record["graded_at"],
+                            marker=record.get("result_marker") or GRADE_MARKERS[0],
+                        )
+                    )
+                    self._persist(target.page_id, record)
+                    self._pending[target.page_id] = copy.deepcopy(record)
                 self._ensure_result(target, record)
                 record["phase"] = PHASE_RESULT_VERIFIED
                 self._persist(target.page_id, record)
@@ -539,7 +572,7 @@ class ExerciseGrader:
             if phase == PHASE_WRONG_ANSWERS_VERIFIED:
                 self._verify_current_result(target, record)
                 self._verify_all_wrong_answers(target, record)
-                transient = {"content", "wrong_answer_progress", "cleanup_block_ids", "cleanup_progress"}
+                transient = {"content", "append_plan", "wrong_answer_progress", "cleanup_block_ids", "cleanup_progress"}
                 completed = {key: value for key, value in record.items() if key not in transient}
                 completed.update(status="graded", marker_present=True, phase=PHASE_COMPLETED)
                 self._persist(target.page_id, completed)
@@ -558,9 +591,15 @@ class ExerciseGrader:
     def _ensure_result(self, target: GradeTarget, record: dict[str, Any]) -> None:
         ensure = getattr(self.page_adapter, "ensure_result", None)
         if ensure is not None:
-            ensure(target, operation_id=record["operation_id"], content=record["content"],
-                   score=record["score"], graded_at=record["graded_at"], regrade=bool(record.get("regrade")),
-                   result_marker=record.get("result_marker") or GRADE_MARKERS[0])
+            kwargs = {
+                "operation_id": record["operation_id"], "content": record["content"],
+                "score": record["score"], "graded_at": record["graded_at"],
+                "regrade": bool(record.get("regrade")),
+                "result_marker": record.get("result_marker") or GRADE_MARKERS[0],
+            }
+            if record.get("append_plan") is not None:
+                kwargs["append_plan"] = record["append_plan"]
+            ensure(target, **kwargs)
             return
         writer = self.page_adapter.update_result if record.get("regrade") else self.page_adapter.write_result
         writer(target, content=record["content"], score=record["score"], graded_at=record["graded_at"])
@@ -903,6 +942,141 @@ def _operation_result_markdown(operation_id: str, content: str, *, score: float,
                                graded_at: str, marker: str = GRADE_MARKERS[0]) -> str:
     safe_marker = marker if marker in GRADE_MARKERS else GRADE_MARKERS[0]
     return f"## {safe_marker}\n\n{_operation_token(operation_id)}\n\n\u6279\u6539\u65f6\u95f4\uff1a{graded_at}\n\n\u603b\u5206\uff1a{score}\n\n```json\n{content}\n```"
+
+
+def _block_signature(block: dict[str, Any]) -> tuple[str, str]:
+    """Normalize request and Notion response blocks to owned content."""
+    kind = str(block.get("type") or "")
+    if kind not in {"heading_2", "paragraph", "code"}:
+        return "", ""
+    return kind, _plain(block)
+
+
+def _blocks_equal(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    return _block_signature(actual) == _block_signature(expected)
+
+
+def _validated_append_plan(
+    stored: list[dict[str, Any]], expected: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not isinstance(stored, list) or not stored or len(stored) != len(expected):
+        raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u8ba1\u5212\u65e0\u6548\uff0c\u672a\u4fee\u6539 Notion\u3002")
+    if any(not isinstance(block, dict) for block in stored):
+        raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u8ba1\u5212\u65e0\u6548\uff0c\u672a\u4fee\u6539 Notion\u3002")
+    if any(not _blocks_equal(left, right) for left, right in zip(stored, expected)):
+        raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u8ba1\u5212\u4e0d\u5339\u914d\uff0c\u672a\u4fee\u6539 Notion\u3002")
+    return copy.deepcopy(stored)
+
+
+def _looks_app_owned_result_block(block: dict[str, Any]) -> bool:
+    text = _plain(block)
+    return (
+        text in GRADE_MARKERS
+        or text.startswith("PKU_GRADE_OPERATION:")
+        or text.startswith("\u6279\u6539\u65f6\u95f4\uff1a")
+        or text.startswith("\u603b\u5206\uff1a")
+        or block.get("type") == "code"
+    )
+
+
+def _operation_token_indexes(blocks: list[dict], operation_id: str) -> list[int]:
+    token = _operation_token(operation_id)
+    return [index for index, block in enumerate(blocks) if _plain(block) == token]
+
+
+def _complete_owned_envelope_at(blocks: list[dict], marker_index: int) -> bool:
+    following = blocks[marker_index + 1:marker_index + 5]
+    return len(following) == 4 and (
+        _plain(following[0]).startswith("PKU_GRADE_OPERATION:")
+        and _plain(following[1]).startswith("\u6279\u6539\u65f6\u95f4\uff1a")
+        and _plain(following[2]).startswith("\u603b\u5206\uff1a")
+        and following[3].get("type") == "code"
+    )
+
+
+def _result_append_action(
+    blocks: list[dict], plan: list[dict], *, operation_id: str, marker: str,
+    regrade: bool = False,
+) -> tuple[str, list[dict]]:
+    """Classify exact ownership without inferring from a marker alone."""
+    token_indexes = _operation_token_indexes(blocks, operation_id)
+    if len(token_indexes) > 1:
+        return "blocked", []
+    if not token_indexes:
+        markers = [index for index, block in enumerate(blocks) if _plain(block) == marker]
+        if not markers:
+            return "append", []
+        if regrade and all(_complete_owned_envelope_at(blocks, index) for index in markers):
+            return "append", []
+        return "blocked", []
+    token_index = token_indexes[0]
+    if token_index == 0:
+        # A replacement interrupted after archiving its marker retains the
+        # operation token until last. Accept only the exact remaining suffix;
+        # an app-looking mismatch is ambiguous and must not be touched.
+        owned = []
+        for offset, expected in enumerate(plan[1:]):
+            index = offset
+            if index >= len(blocks):
+                break
+            actual = blocks[index]
+            if not _blocks_equal(actual, expected):
+                if _looks_app_owned_result_block(actual):
+                    return "blocked", []
+                break
+            owned.append(actual)
+        return ("replace-prefix", owned) if owned else ("blocked", [])
+    start = token_index - 1
+    if start < 0 or not _blocks_equal(blocks[start], plan[0]):
+        return "blocked", []
+    owned: list[dict] = []
+    for offset, expected in enumerate(plan):
+        index = start + offset
+        if index >= len(blocks):
+            break
+        actual = blocks[index]
+        if not _blocks_equal(actual, expected):
+            if _looks_app_owned_result_block(actual):
+                return "blocked", []
+            return ("replace-prefix", owned) if owned and index < len(blocks) else ("blocked", [])
+        owned.append(actual)
+    if len(owned) == len(plan):
+        return "complete", owned
+    if start + len(owned) == len(blocks):
+        return "resume", owned
+    return "replace-prefix", owned
+
+
+def _archive_block_reconciled(client, page_id: str, block_id: str) -> None:
+    try:
+        client.archive_block(block_id, retry=False)
+    except Exception:
+        remaining = client.list_children(page_id)
+        if any(str(block.get("id") or "") == block_id for block in remaining):
+            raise
+
+
+def _append_and_verify(client, page_id: str, suffix: list[dict], plan: list[dict]) -> None:
+    try:
+        if suffix:
+            client.append_blocks(page_id, suffix, retry=False)
+    except Exception:
+        reread = client.list_children(page_id)
+        if not _contains_exact_plan(reread, plan):
+            raise
+        return
+    verified = client.list_children(page_id)
+    if not _contains_exact_plan(verified, plan):
+        raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u540e\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+
+
+def _contains_exact_plan(blocks: list[dict], plan: list[dict]) -> bool:
+    if not plan:
+        return False
+    for start in range(0, len(blocks) - len(plan) + 1):
+        if all(_blocks_equal(blocks[start + offset], expected) for offset, expected in enumerate(plan)):
+            return True
+    return False
 
 
 def _find_operation(blocks: list[dict], operation_id: str) -> dict | None:
