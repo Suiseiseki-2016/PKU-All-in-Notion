@@ -148,8 +148,7 @@ def _prompt(course_title: str, lecture_titles: list[str], notes: list[dict]) -> 
         f"## {item['title']}\n来源：{item['source']}\n{item['notes']}" for item in notes
     )
     prompt = (
-        "请根据以下课堂笔记整理一套 3–5 道混合题型练习。"
-        "题型从选择、判断、填空、简答、论述中选择，至少两种；每题必须带来源。"
+        "è¯·æ ¹æ®ä»¥ä¸è¯¾å ç¬è®°æ´çä¸å¥ 5 éç»ä¹ ï¼å¿é¡»åæä¸ä»æä¸ééæ©ãå¤æ­ãå¡«ç©ºãç®ç­ãè®ºè¿°é¢ï¼æ¯é¢å¿é¡»å¸¦æ¥æºã"
         "只返回 JSON：{title, questions:[{type,question,source,answer}]}。\n"
         f"课程：{course_title}\n讲次：{'、'.join(lecture_titles)}\n\n{sources}"
     )
@@ -164,7 +163,7 @@ def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
     if not isinstance(value, dict) or not isinstance(value.get("questions"), list):
         raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
     questions = value["questions"]
-    if not 3 <= len(questions) <= 5:
+    if len(questions) != 5:
         raise OrganizeBlocked(502, "AI 返回的题目数量不符合要求，请重试。")
     normalized: list[dict] = []
     for item in questions:
@@ -174,7 +173,7 @@ def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
         if question["type"] not in _ALLOWED_TYPES or not all(question.values()):
             raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
         normalized.append(question)
-    if len({item["type"] for item in normalized}) < 2:
+    if {item["type"] for item in normalized} != _ALLOWED_TYPES:
         raise OrganizeBlocked(502, "AI 返回的题型不够丰富，请重试。")
     title = str(value.get("title") or "课程练习").strip()
     if not is_exercise_title(title):
