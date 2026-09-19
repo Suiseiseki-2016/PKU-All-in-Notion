@@ -494,9 +494,18 @@
       '</button></nav><div class="sidebar-spacer"></div>' +
       connectionCard() +
       quotaCard() +
-      '</aside><header class="mobile-topbar">' +
+      '</aside><header class="mobile-topbar"><div class="mobile-topbar-left">' +
+      '<button type="button" class="mobile-overview" data-nav="dashboard" data-action="open-dashboard" aria-label="' +
+      esc(COPY.nav.dashboard) +
+      '"' +
+      (state.view === "dashboard" ? ' aria-current="page"' : "") +
+      '><span aria-hidden="true">' +
+      esc(GLYPH.home) +
+      '</span><span>' +
+      esc(COPY.nav.dashboard) +
+      '</span></button>' +
       brand(true) +
-      '<div class="mobile-connection">' +
+      '</div><div class="mobile-connection">' +
       connectionControls(true) +
       "</div></header>" +
       '<main class="main"><div class="main-inner">' +

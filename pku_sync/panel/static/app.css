@@ -42,6 +42,7 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   outline: none;
   box-shadow: var(--focus);
 }
+select:focus-visible { outline: none; box-shadow: var(--focus); }
 h1, h2, h3, p { margin-top: 0; }
 
 .brand-mark {
@@ -266,7 +267,7 @@ h1, h2, h3, p { margin-top: 0; }
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 42px;
+  min-height: 44px;
   padding: 10px 16px;
   color: var(--green-deep);
   background: transparent;
@@ -360,6 +361,22 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .account-card p { margin: 0 0 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .mobile-topbar { display: none; }
+.mobile-topbar-left { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.mobile-overview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 44px;
+  padding: 8px 10px;
+  color: var(--green-deep);
+  background: transparent;
+  border: 1px solid #c8d9ce;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.mobile-overview:hover, .mobile-overview[aria-current="page"] { background: var(--mint); }
 .main { min-width: 0; padding: 31px clamp(22px, 4vw, 58px) 52px; }
 .main-inner { width: min(100%, 1090px); margin: 0 auto; }
 .topline {
@@ -680,7 +697,7 @@ h1, h2, h3, p { margin-top: 0; }
   flex-shrink: 0;
 }
 .material-view {
-  min-height: 30px;
+  min-height: 44px;
   padding: 5px 9px;
   color: var(--muted);
   background: transparent;
@@ -956,6 +973,7 @@ h1, h2, h3, p { margin-top: 0; }
 .exercise-status.graded { color: var(--blue); background: var(--blue-pale); }
 .exercise-main { flex: 1 1 auto; min-width: 0; }
 .exercise-actions { flex: 0 0 auto; }
+.exercise-actions .btn { min-height: 44px; }
 .exercise-launch-feedback, .exercise-mapping-missing { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding: 11px 13px; border-radius: 10px; background: #f0f7f1; color: var(--green-deep); font-size: 12px; }
 .exercise-launch-feedback.error, .exercise-mapping-missing { background: var(--rose-pale); color: var(--rose); }
 .exercise-launch-feedback span, .exercise-mapping-missing span { flex: 1 1 240px; }
@@ -966,4 +984,30 @@ h1, h2, h3, p { margin-top: 0; }
   .toolbar-actions { justify-content: flex-start; }
   .scope-fields, .scope-fields label, .scope-fields select { width: 100%; max-width: none; }
   .insufficient { text-align: left; }
+}
+
+
+/* Keep metadata labels and long student-created titles inside the 320px
+   layout floor. Buttons remain at least 44px high for touch and keyboard
+   activation, while cards switch to a single readable column. */
+.course-card h3, .course-card p, .lecture-item strong, .lecture-item small,
+.material-row strong, .material-row small, .exercise-title-wrap h3,
+.exercise-meta, .exercise-launch-feedback, .exercise-mapping-missing {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .mobile-topbar { padding: 10px 12px; }
+  .mobile-topbar-left { gap: 6px; }
+  .mobile-overview { padding-inline: 9px; }
+  .mobile-brand .brand-name { max-width: 120px; }
+  .mobile-connection .btn { padding-inline: 8px; }
+  .main { padding-inline: 12px; }
+  .course-card, .course-hero, .detail-hero, .materials-panel,
+  .panel, .exercise-toolbar, .exercise-row { padding: 16px; }
+  .course-card { flex-direction: column; gap: 12px; }
+  .course-card .btn, .exercise-actions, .exercise-actions .btn { width: 100%; }
+  .material-controls { gap: 2px; }
+  .material-view { flex: 1 1 0; padding-inline: 5px; }
+  .exercise-actions { display: grid; gap: 8px; }
 }
