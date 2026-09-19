@@ -111,7 +111,8 @@ class SyncTracker:
     successful load lands in ``empty`` (zero courses) or ``done``, and every
     failure lands in ``error`` carrying a user-safe reason — never ``done``.
     The last-sync timestamp is only ever set by a SUCCESSFUL load and is
-    preserved across later failures (the established index is not lost).
+    preserved across later failures for recovery/status reporting; failed
+    loads invalidate the cached directory snapshot separately.
     """
 
     def __init__(self, clock: Callable[[], datetime.datetime] | None = None):
@@ -528,6 +529,8 @@ class DirectoryService:
                 reason = user_safe_reason(exc)
             except Exception:  # never let reason mapping itself leak anything
                 reason = SYNC_ERROR_GENERIC
+            with self._lock:
+                self._data = None
             self.sync.fail(reason)
             raise DirectoryApiError(503, reason) from exc
         with self._lock:
@@ -567,6 +570,9 @@ class DirectoryService:
     def ensure_loaded(self) -> DirectoryData:
         with self._lock:
             data = self._data
+        sync = self.sync.snapshot()
+        if sync["state"] == STATE_ERROR:
+            raise DirectoryApiError(503, sync["error_reason"] or SYNC_ERROR_GENERIC)
         if data is not None:
             return data
         self.load()  # first read uses the same sync/error semantics
