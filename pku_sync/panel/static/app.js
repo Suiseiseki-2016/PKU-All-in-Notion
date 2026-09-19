@@ -467,6 +467,14 @@
     );
   }
 
+  function quotaCard() {
+    var quota = state.quota;
+    if (quota === null) return '<div class="account-card" data-block="quota"><p>账户未激活</p></div>';
+    if (quota.active === false) return '<div class="account-card" data-block="quota"><p>账户未激活</p></div>';
+    if (quota.available === false) return '<div class="account-card" data-block="quota"><p>额度暂时无法读取</p></div>';
+    return '<div class="account-card" data-block="quota"><p>转写 ' + esc(Math.floor((quota.transcribe_seconds_remaining === undefined ? 0 : quota.transcribe_seconds_remaining) / 60)) + ' 分钟</p><p>AI 点 ' + esc(quota.llm_points_remaining) + '</p></div>';
+  }
+
   function shell(content) {
     return (
       '<div class="app-shell"><aside class="sidebar" aria-label="' +
@@ -485,6 +493,7 @@
       esc(COPY.nav.dashboard) +
       '</button></nav><div class="sidebar-spacer"></div>' +
       connectionCard() +
+      quotaCard() +
       '</aside><header class="mobile-topbar">' +
       brand(true) +
       '<div class="mobile-connection">' +
@@ -676,6 +685,9 @@
     var g = state.grading;
     if (!g || g.status === "idle") return "";
     var copy = COPY.directory.exercises.grading;
+    if (g.status === "confirm") {
+      return '<section class="exercise-toolbar grading-card" role="dialog" aria-live="polite"><strong>确认重新批改「' + esc(g.title) + '」？</strong><span>预计 1–5 AI 点 · 完成后按实际用量结算</span>' + button("确认重新批改", "start-regrade", { attrs: { "data-exercise": g.exerciseId } }) + button("取消", "grading-back", {}) + '</section>';
+    }
     if (g.status === "running") {
       return '<section class="exercise-toolbar grading-card" aria-busy="true" aria-live="polite" role="status"><span class="spinner" aria-hidden="true"></span><strong>' + esc(template(copy.working, { title: g.title })) + '</strong><span>' + esc(copy.explanation) + '</span><span class="cost-pill">' + esc(copy.estimate) + '</span></section>';
     }
@@ -701,7 +713,10 @@
       var actionName = row.status === "pending-grade" ? "grade-exercise" : "launch-exercise";
       var identityMissing = !row.url;
       var action = button(exerciseAction(row), actionName, { primary: row.status === "pending-grade" || row.status === "graded", small: true, disabled: !state.connection.connected || identityMissing || state.grading.status === "running", attrs: { "data-exercise": row.id, "data-target": row.id, "data-purpose": purpose } });
-      return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p>' + (identityMissing ? missingExerciseIdentity(row) : exerciseLaunchFeedback(row)) + '</div><div class="exercise-actions">' + action + '</div></article>';
+      var estimate = row.status === "pending-grade" ? '<span class="cost-pill">预计 1–5 AI 点</span>' : '';
+      var regrade = row.status === "graded" ? button(COPY.directory.exercises.regrade ? COPY.directory.exercises.regrade : "重新批改", "confirm-regrade", { small: true, quiet: true, disabled: Boolean(identityMissing ? true : state.grading.status === "running"), attrs: { "data-exercise": row.id } }) : '';
+      var mismatch = row.mismatch_notice ? '<p role="alert">本地批改记录与 Notion 标记不一致，请手动确认。</p>' : '';
+      return '<article class="exercise-row" role="listitem" data-exercise-row="' + esc(row.id) + '"><div class="exercise-main"><div class="exercise-title-wrap"><h3>' + esc(row.title) + '</h3><span class="exercise-status ' + esc(row.status) + '" data-status="' + esc(row.status) + '">' + esc(row.status_label) + '</span></div><p class="exercise-meta">' + esc(row.course) + ' \u00b7 ' + esc(row.scope) + '</p>' + (identityMissing ? missingExerciseIdentity(row) : exerciseLaunchFeedback(row)) + mismatch + '</div><div class="exercise-actions">' + action + regrade + estimate + '</div></article>';
     }).join("");
     return '<section aria-labelledby="exercise-directory-title"><div class="section-label"><h2 id="exercise-directory-title">' + esc(copy.title) + '</h2><p>' + esc(copy.note) + '</p></div><div class="exercise-directory" role="list" aria-label="' + esc(copy.list_label) + '">' + items + '</div></section>';
   }
@@ -1517,12 +1532,19 @@
     }).then(function (result) { return finishOrganize(result, result.body && result.body.job_id); })
       .catch(function () { blockOrganize(copy.blocked); });
   }
-  function startGrading(targetId) {
+  function confirmRegrade(targetId) {
+    var rows = state.directory ? state.directory.exercises : [];
+    var row = rows.find(function (item) { return item.id === targetId; });
+    if (!row) return;
+    state.grading = { exerciseId: targetId, title: row.title, status: "confirm", jobId: null, result: null, blocked: "", unanswered: [] };
+    render();
+  }
+  function startGrading(targetId, regrade) {
     var row = (state.directory && state.directory.exercises || []).find(function (item) { return item.id === targetId; });
     if (!row || !row.url) return;
     state.grading = { exerciseId: targetId, title: row.title, status: "running", jobId: null, result: null, blocked: "", unanswered: [] };
     render();
-    requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/grade", { method: "POST" }).then(function (result) {
+    requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/grade", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ regrade: Boolean(regrade), confirm: Boolean(regrade) }) }).then(function (result) {
       if (!result.ok || !result.body || result.body.status !== "running") {
         state.grading.status = result.body && result.body.status === "failed" ? "failed" : "blocked";
         state.grading.blocked = result.body && (result.body.reason || result.body.detail) || COPY.directory.exercises.grading.blocked;
@@ -1690,7 +1712,11 @@
     } else if (action === "launch-exercise-fallback") {
       launchExerciseFallback(target.dataset.exercise);
     } else if (action === "grade-exercise") {
-      startGrading(target.dataset.target);
+      startGrading(target.dataset.target, false);
+    } else if (action === "confirm-regrade") {
+      confirmRegrade(target.dataset.exercise);
+    } else if (action === "start-regrade") {
+      startGrading(target.dataset.exercise, true);
     } else if (action === "grading-retry") {
       startGrading(target.dataset.exercise || state.grading.exerciseId);
     } else if (action === "grading-back") {

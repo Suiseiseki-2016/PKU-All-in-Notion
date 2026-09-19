@@ -35,7 +35,7 @@ def exercise_scope(title: str) -> str:
 
 def exercise_row(entity: Any, *, launch_started: bool = False) -> dict:
     status = derive_exercise_state(marker_present=bool(entity.marker_present), answer_present=bool(entity.answer_present), launch_started=launch_started)
-    return {"id": entity.id, "url": entity.url, "title": entity.title, "course": entity.course, "scope": exercise_scope(entity.title), "status": status, "status_label": STATUS_LABELS[status], "score": None}
+    return {"id": entity.id, "url": entity.url, "title": entity.title, "course": entity.course, "scope": exercise_scope(entity.title), "status": status, "status_label": STATUS_LABELS[status], "score": None, "mismatch_notice": bool(getattr(entity, "mismatch_notice", False))}
 
 class ExerciseEventStore:
     def __init__(self, path: Path | None = None, *, launched: Iterable[str] = ()):

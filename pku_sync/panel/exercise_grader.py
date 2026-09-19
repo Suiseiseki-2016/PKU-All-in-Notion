@@ -1,4 +1,4 @@
-﻿"""Metered exercise grading with idempotent, answer-preserving write-back."""
+"""Metered exercise grading with idempotent, answer-preserving write-back."""
 from __future__ import annotations
 
 import datetime
@@ -172,12 +172,12 @@ class ExerciseGrader:
             raise GradeBlocked(INCOMPLETE_ANSWERS_REASON, unanswered=grading_input.unanswered)
         return grade_target, grading_input
 
-    def grade(self, prepared: tuple[GradeTarget, GradingInput]) -> dict[str, Any]:
+    def grade(self, prepared: tuple[GradeTarget, GradingInput], *, force: bool = False) -> dict[str, Any]:
         target, grading_input = prepared
         with self._lock:
             # Notion's marker is authoritative. This check occurs before quota
             # or relay access, so an unchanged rerun is free and has no LLM call.
-            if grading_input.marker_present:
+            if grading_input.marker_present and not force:
                 return _reuse_result(grading_input.existing_result, target, self.relay)
             quota = self.relay.quota()
             before = quota.get("llm_points_remaining") if quota.get("available") else None

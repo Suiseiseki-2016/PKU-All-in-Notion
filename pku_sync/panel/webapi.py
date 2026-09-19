@@ -18,7 +18,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from ..pipeline import collect_jobs, recording_stage
-from .jobs import JobRunner
+from .jobs import ExerciseJobGate, JobRunner
 from .pipelines import ACTIONS, make_runner
 
 if TYPE_CHECKING:
@@ -244,6 +244,7 @@ def create_app(
     platform_service=None,
     organizer_service=None,
     grading_service=None,
+    exercise_job_gate: ExerciseJobGate | None = None,
 ) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
@@ -289,6 +290,9 @@ def create_app(
         from .exercise_grader import make_grading_service
         grading_service = make_grading_service(settings, directory_service, platform_service)
     app.state.grading_service = grading_service
+    if exercise_job_gate is None:
+        exercise_job_gate = ExerciseJobGate()
+    app.state.exercise_job_gate = exercise_job_gate
 
     from .connection_api import add_connection_routes
     from .directory_api import add_directory_routes
@@ -299,8 +303,8 @@ def create_app(
     add_directory_routes(app, directory_service)
     add_connection_routes(app, connection_service)
     add_student_ui_routes(app)
-    add_organize_routes(app, organizer_service)
-    add_grading_routes(app, grading_service)
+    add_organize_routes(app, organizer_service, gate=exercise_job_gate)
+    add_grading_routes(app, grading_service, gate=exercise_job_gate)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

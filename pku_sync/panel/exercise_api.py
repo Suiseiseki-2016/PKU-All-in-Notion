@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .exercise_organizer import OrganizeBlocked
+from .jobs import EXERCISE_JOB_BUSY_CODE, EXERCISE_JOB_BUSY_MESSAGE, ExerciseJobGate
 
 
 class OrganizeRequest(BaseModel):
@@ -28,15 +29,22 @@ class _OrganizeJob:
 class OrganizeJobController:
     """Single-flight organizer runner with a metadata-only poll result."""
 
-    def __init__(self, service):
+    def __init__(self, service, gate: ExerciseJobGate | None = None):
         self.service = service
+        self.gate = gate or ExerciseJobGate()
         self._lock = threading.Lock()
         self._job = _OrganizeJob()
 
     def start(self, request: OrganizeRequest) -> tuple[dict, int]:
+        if not self.gate.acquire("organize"):
+            return ({"status": "blocked", "code": EXERCISE_JOB_BUSY_CODE,
+                     "message": EXERCISE_JOB_BUSY_MESSAGE, "reason": EXERCISE_JOB_BUSY_MESSAGE,
+                     "retryable": True}, status.HTTP_409_CONFLICT)
         with self._lock:
             if self._job.state == "running":
-                return ({"status": "blocked", "reason": "上一个练习整理还在进行，请稍候再试。",
+                self.gate.release("organize")
+                return ({"status": "blocked", "code": EXERCISE_JOB_BUSY_CODE,
+                         "message": EXERCISE_JOB_BUSY_MESSAGE, "reason": EXERCISE_JOB_BUSY_MESSAGE,
                          "retryable": True}, status.HTTP_409_CONFLICT)
             job_id = uuid.uuid4().hex
             self._job = _OrganizeJob(state="running", job_id=job_id)
@@ -54,6 +62,7 @@ class OrganizeJobController:
             if self._job.job_id == job_id:
                 self._job.state = "done"
                 self._job.result = result
+        self.gate.release("organize")
 
     def snapshot(self, job_id: str) -> tuple[dict, int]:
         with self._lock:
@@ -68,8 +77,8 @@ class OrganizeJobController:
                      "retryable": True}, status.HTTP_409_CONFLICT)
 
 
-def add_organize_routes(app, service) -> None:
-    controller = OrganizeJobController(service)
+def add_organize_routes(app, service, *, gate: ExerciseJobGate | None = None) -> None:
+    controller = OrganizeJobController(service, gate=gate)
     app.state.organize_jobs = controller
 
     @app.get("/api/exercises/organize/estimate")

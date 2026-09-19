@@ -2,7 +2,7 @@
 
 The data tree and manifest are not concurrent-safe, so the panel runs a
 single flight: a submit while a job is running is rejected (the caller
-turns that into HTTP 409). The runner owns no pipeline logic — it calls
+turns that into HTTP 409). The runner owns no pipeline logic 鈥?it calls
 the injected ``run(kind) -> exit_code``, so tests drive it with a stub
 and the panel wires it to the M0 service layer.
 """
@@ -35,6 +35,34 @@ class Job:
             "started": self.started,
             "finished": self.finished,
         }
+
+
+EXERCISE_JOB_BUSY_CODE = "exercise_job_busy"
+EXERCISE_JOB_BUSY_MESSAGE = "已有练习任务正在运行，请稍候再试。"
+
+
+class ExerciseJobGate:
+    """Thread-safe single-flight gate shared by organize and grading."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._owner = ""
+
+    def acquire(self, kind: str) -> bool:
+        with self._lock:
+            if self._owner:
+                return False
+            self._owner = kind
+            return True
+
+    def release(self, kind: str) -> None:
+        with self._lock:
+            if self._owner == kind:
+                self._owner = ""
+
+    def current(self) -> str | None:
+        with self._lock:
+            return self._owner or None
 
 
 class JobRunner:
