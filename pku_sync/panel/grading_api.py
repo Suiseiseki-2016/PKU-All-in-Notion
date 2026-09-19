@@ -9,7 +9,7 @@ from fastapi import Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .exercise_grader import GRADE_ESTIMATE_LABEL, GradeBlocked
+from .exercise_grader import GRADE_ESTIMATE_LABEL, GradeBlocked, GradeSettlementError
 from .exercises import EXERCISE_IDENTITY_MISSING_REASON, PAGE_IDENTITY_MISSING
 from .jobs import EXERCISE_JOB_BUSY_CODE, EXERCISE_JOB_BUSY_MESSAGE, ExerciseJobGate
 
@@ -50,40 +50,44 @@ class GradeJobController:
     def start(self, exercise_id: str, *, regrade: bool = False, confirm: bool = False):
         if not self.gate.acquire("grade"):
             return self._busy()
-        with self._lock:
-            if self._job.state == "running":
-                self.gate.release("grade")
-                return self._busy()
-        launch = self.service.directory_service.resolve_exercise_launch(exercise_id)
-        if launch.status == "failed":
-            self.gate.release("grade")
-            return ({"status": "failed", "reason": "打开没有成功，请稍后重试。", "fallback": None}, status.HTTP_502_BAD_GATEWAY)
-        if launch.status != "opened":
-            self.gate.release("grade")
-            fallback = launch.fallback.model_dump() if launch.fallback else None
-            return ({"status": PAGE_IDENTITY_MISSING, "reason": EXERCISE_IDENTITY_MISSING_REASON, "fallback": fallback}, status.HTTP_409_CONFLICT)
         try:
-            prepared = self.service.prepare(exercise_id)
-        except GradeBlocked as exc:
-            self.gate.release("grade")
-            if exc.reason == EXERCISE_IDENTITY_MISSING_REASON:
-                return ({"status": PAGE_IDENTITY_MISSING, "reason": exc.reason, "fallback": None}, status.HTTP_409_CONFLICT)
-            return ({"status": "blocked", "reason": exc.reason, "unanswered": exc.unanswered}, status.HTTP_409_CONFLICT)
-        target, grading_input = prepared
-        if grading_input.marker_present and not (regrade and confirm):
-            self.gate.release("grade")
-            return ({"status": "confirm_required", "reason": "这套练习已有批改结果，重新批改前请确认。", "estimate": GRADE_ESTIMATE_LABEL}, status.HTTP_409_CONFLICT)
-        job_id = uuid.uuid4().hex
-        with self._lock:
-            self._job = _GradeJob(state="running", job_id=job_id, title=target.title)
-        threading.Thread(target=self._execute, args=(job_id, prepared, regrade and confirm), daemon=True).start()
-        return ({"status": "running", "job_id": job_id, "title": target.title, "estimate": GRADE_ESTIMATE_LABEL}, status.HTTP_202_ACCEPTED)
+            with self._lock:
+                if self._job.state == "running":
+                    return self._busy()
+            launch = self.service.directory_service.resolve_exercise_launch(exercise_id)
+            if launch.status == "failed":
+                return ({"status": "failed", "reason": "打开没有成功，请稍后重试。", "fallback": None}, status.HTTP_502_BAD_GATEWAY)
+            if launch.status != "opened":
+                fallback = launch.fallback.model_dump() if launch.fallback else None
+                return ({"status": PAGE_IDENTITY_MISSING, "reason": EXERCISE_IDENTITY_MISSING_REASON, "fallback": fallback}, status.HTTP_409_CONFLICT)
+            try:
+                prepared = self.service.prepare(exercise_id)
+            except GradeBlocked as exc:
+                if exc.reason == EXERCISE_IDENTITY_MISSING_REASON:
+                    return ({"status": PAGE_IDENTITY_MISSING, "reason": exc.reason, "fallback": None}, status.HTTP_409_CONFLICT)
+                return ({"status": "blocked", "reason": exc.reason, "unanswered": exc.unanswered}, status.HTTP_409_CONFLICT)
+            target, grading_input = prepared
+            if grading_input.marker_present and not (regrade and confirm):
+                return ({"status": "confirm_required", "reason": "\u8fd9\u5957\u7ec3\u4e60\u5df2\u6709\u6279\u6539\u7ed3\u679c\uff0c\u91cd\u65b0\u6279\u6539\u524d\u8bf7\u786e\u8ba4\u3002", "estimate": GRADE_ESTIMATE_LABEL}, status.HTTP_409_CONFLICT)
+            job_id = uuid.uuid4().hex
+            with self._lock:
+                self._job = _GradeJob(state="running", job_id=job_id, title=target.title)
+            threading.Thread(target=self._execute, args=(job_id, prepared, regrade and confirm), daemon=True).start()
+            return ({"status": "running", "job_id": job_id, "title": target.title, "estimate": GRADE_ESTIMATE_LABEL}, status.HTTP_202_ACCEPTED)
+        finally:
+            with self._lock:
+                running = self._job.state == "running"
+            if not running:
+                self.gate.release("grade")
 
     def _execute(self, job_id, prepared, force=False):
         try:
             result = self.service.grade(prepared, force=force)
         except GradeBlocked as exc:
             result = {"status": "blocked", "reason": exc.reason, "unanswered": exc.unanswered}
+        except GradeSettlementError as exc:
+            result = {"status": "failed", "reason": exc.reason, "retryable": True,
+                      "points_charged": exc.points_charged, "points_remaining": exc.points_remaining}
         except Exception as exc:
             relay_status = getattr(exc, "status_code", None)
             if relay_status in (401, 402, 503):

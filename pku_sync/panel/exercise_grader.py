@@ -42,6 +42,15 @@ class GradeBlocked(RuntimeError):
         self.unanswered = list(unanswered)
 
 
+class GradeSettlementError(RuntimeError):
+    """A failure after relay metering, with authoritative settlement."""
+    def __init__(self, reason: str, *, points_charged: float, points_remaining: float | None):
+        super().__init__(reason)
+        self.reason = reason
+        self.points_charged = float(points_charged)
+        self.points_remaining = points_remaining
+
+
 class RealGradingPageAdapter:
     """Read one selected page; write only an append/update grading section."""
 
@@ -59,6 +68,14 @@ class RealGradingPageAdapter:
             marker_present=marker is not None,
             existing_result=_existing_result(blocks, marker, target),
         )
+
+    def verify_parent(self, target: GradeTarget) -> None:
+        with get_client(self.settings) as client:
+            page = client.get_page(target.page_id)
+        parent = page.get("parent") if isinstance(page, dict) else None
+        parent_id = (parent or {}).get("page_id") if isinstance(parent, dict) else None
+        if not parent_id or not _same_page_id(parent_id, target.course_id):
+            raise GradeBlocked("\u7ec3\u4e60\u9875\u5df2\u79fb\u51fa\u5f53\u524d\u8bfe\u7a0b\uff0c\u65e0\u6cd5\u6279\u6539\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u540e\u91cd\u8bd5\u3002")
 
     def write_result(self, target: GradeTarget, *, content: str, score: float, graded_at: str) -> None:
         self._write_result(target, content=content, score=score, graded_at=graded_at, update=False)
@@ -167,6 +184,9 @@ class ExerciseGrader:
         if target is None:
             raise GradeBlocked("练习页映射缺失，无法确定批改目标。")
         grade_target = GradeTarget(operation="grade", page_id=target["page_id"], page_url=target["page_url"], title=target["title"], course_id=target["course_id"], course_title=target["course_title"], scope=target["scope"])
+        verify_parent = getattr(self.page_adapter, "verify_parent", None)
+        if verify_parent is not None:
+            verify_parent(grade_target)
         grading_input = self.page_adapter.read_for_grading(grade_target)
         if grading_input.unanswered and not grading_input.marker_present:
             raise GradeBlocked(INCOMPLETE_ANSWERS_REASON, unanswered=grading_input.unanswered)
@@ -184,24 +204,44 @@ class ExerciseGrader:
             result = self.relay.grade(grading_input.prompt)
             charge = result.get("points_charged")
             if not isinstance(charge, (int, float)):
-                raise GradeBlocked("云端没有返回本次用量，请重试。")
-            score = _score(result.get("content"))
-            graded_at = self.clock()
-            writer = self.page_adapter.update_result if grading_input.marker_present else self.page_adapter.write_result
-            writer(target, content=result["content"], score=score, graded_at=graded_at)
-            for question in _parse_grade_results(result.get("content")):
-                if not question.get("register_wrong"):
-                    continue
-                exists = getattr(self.page_adapter, "wrong_answer_exists", None)
-                create = getattr(self.page_adapter, "create_wrong_answer", None)
-                if exists is not None and create is not None and not exists(target, question):
-                    create(target, question)
+                raise GradeBlocked("\u4e91\u7aef\u6ca1\u6709\u8fd4\u56de\u672c\u6b21\u7528\u91cf\uff0c\u8bf7\u91cd\u8bd5\u3002")
             remaining = float(before) - float(charge) if isinstance(before, (int, float)) else None
+            try:
+                score = _score(result.get("content"))
+                graded_at = self.clock()
+                writer = self.page_adapter.update_result if grading_input.marker_present else self.page_adapter.write_result
+                writer(target, content=result["content"], score=score, graded_at=graded_at)
+                for question in _parse_grade_results(result.get("content")):
+                    if not question.get("register_wrong"):
+                        continue
+                    exists = getattr(self.page_adapter, "wrong_answer_exists", None)
+                    create = getattr(self.page_adapter, "create_wrong_answer", None)
+                    if exists is not None and create is not None and not exists(target, question):
+                        create(target, question)
+            except GradeBlocked as exc:
+                raise GradeSettlementError(exc.reason, points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
+            except Exception as exc:
+                raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
             return {"status": "completed", "exercise_id": target.page_id, "title": target.title, "score": score, "graded_at": graded_at, "points_charged": float(charge), "points_remaining": remaining, "result_page_url": target.page_url}
 
 
 def _graded_now() -> str:
     return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).isoformat(timespec="seconds")
+
+
+def _authoritative_balance(relay, before, charge: float) -> float | None:
+    try:
+        value = relay.quota().get("llm_points_remaining")
+        if isinstance(value, (int, float)):
+            return float(value)
+    except Exception:
+        pass
+    return float(before) - charge if isinstance(before, (int, float)) else None
+
+
+def _same_page_id(left: str, right: str) -> bool:
+    normalize = lambda value: "".join(ch for ch in str(value).lower() if ch.isalnum())
+    return normalize(left) == normalize(right)
 
 
 def _score(content: Any) -> float:
