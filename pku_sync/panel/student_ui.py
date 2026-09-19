@@ -351,6 +351,9 @@ LAUNCH_COPY = {
     "failed": LAUNCH_FAILED_COPY,
     "retry": "重新打开",
     "opening": "正在打开 Notion",
+    "missing_title": "待建讲次页",
+    "missing_body": "讲次页尚未建立 · 整理完成后自动出现",
+    "fallback": "查看课程页",
 }
 
 PANEL_COPY = {

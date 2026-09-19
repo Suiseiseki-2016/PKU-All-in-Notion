@@ -657,7 +657,10 @@ class DirectoryService:
                 url=None,
                 fallback=None,
             )
-        return self.provider.resolve_launch(data, target_id, course_id=course_id)
+        try:
+            return self.provider.resolve_launch(data, target_id, course_id=course_id)
+        except Exception:
+            return LaunchResult(status=LAUNCH_FAILED, target_id=(target_id or "").strip(), url=None, fallback=None)
 
 
 # -- real provider + factory ----------------------------------------------------

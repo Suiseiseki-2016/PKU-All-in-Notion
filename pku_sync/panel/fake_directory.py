@@ -52,6 +52,7 @@ _FAKE_VARIANTS = (
     "grade-slow",
     "fault",
     "fault-launch",
+    "transport-launch",
     "missing-lecture",
     "empty",
     "usage-cap",
@@ -93,6 +94,21 @@ class FaultLaunchProvider(PanelDirectoryProvider):
                 url=None,
                 fallback=None,
             )
+        return super().resolve_launch(data, target_id, course_id=course_id)
+
+
+class TransportLaunchProvider(PanelDirectoryProvider):
+    """Reject the first launch transport, then allow an identity retry."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._remaining_failures = 1
+
+    def resolve_launch(self, data, target_id, *, course_id=None):
+        raw = (target_id or "").strip()
+        if raw in (FAULT_LAUNCH_TARGET, FAULT_LAUNCH_TARGET.replace("-", "")) and self._remaining_failures:
+            self._remaining_failures -= 1
+            raise ConnectionError("simulated launch transport rejection")
         return super().resolve_launch(data, target_id, course_id=course_id)
 
 
@@ -192,6 +208,8 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "fault-launch":
         provider = FaultLaunchProvider(ws, semester=semester)
+    elif variant == "transport-launch":
+        provider = TransportLaunchProvider(ws, semester=semester)
     elif variant == "missing-lecture":
         provider = MissingLectureProvider(ws, semester=semester)
     elif variant == "empty":
@@ -228,6 +246,7 @@ __all__ = [
     "SLOW_DELAY",
     "PanelDirectoryProvider",
     "FaultLaunchProvider",
+    "TransportLaunchProvider",
     "MissingLectureProvider",
     "ExerciseFaultLaunchProvider",
     "ExerciseMissingIdentityProvider",

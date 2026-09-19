@@ -1102,7 +1102,7 @@
     if (!current) return "";
     var copy = COPY.launch;
     if (current.status === "opening") return '<div class="launch-feedback" role="status" aria-live="polite">' + esc(copy.opening) + '</div>';
-    if (current.status === "missing") return '<div class="launch-feedback error" role="alert" aria-live="polite"><strong>待建讲次页</strong><span>讲次页尚未建立 · 整理完成后自动出现</span>' + (current.fallback && current.fallback.url ? button("查看课程页", "launch-fallback", { small: true, primary: true, attrs: { "data-url": current.fallback.url } }) : "") + '</div>';
+    if (current.status === "missing") return '<div class="launch-feedback error" role="alert" aria-live="polite"><strong>' + esc(copy.missing_title) + '</strong><span>' + esc(copy.missing_body) + '</span>' + (current.fallback && current.fallback.url ? button(copy.fallback, "launch-fallback", { small: true, primary: true, attrs: { "data-url": current.fallback.url } }) : "") + '</div>';
     return '<div class="launch-feedback" role="alert" aria-live="polite"><strong>打开没有成功</strong><span>' + esc(copy.failed) + '</span>' + button(copy.retry, "retry-launch", { small: true, primary: true, attrs: { "data-kind": current.kind, "data-target": current.targetId } }) + '</div>';
   }
 
