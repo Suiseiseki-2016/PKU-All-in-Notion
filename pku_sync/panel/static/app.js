@@ -995,21 +995,44 @@
     );
   }
 
+  /* The per-row association label. “已关联本讲” requires an explicit link to
+     the SELECTED lecture — an explicit link to another lecture is
+     course-level from this lecture's perspective (approved prototype
+     semantics) — and an inferred association stays visibly 待确认, never
+     已关联本讲. The two 待确认 semantics stay structurally distinct: this
+     badge under the title vs the 处理状态 pill in its own column. */
+  function associationLabel(item) {
+    var copy = COPY.lecture.materials;
+    if (
+      item.linked_to_lecture &&
+      item.lecture &&
+      state.lectureId &&
+      item.lecture.id === state.lectureId
+    ) {
+      return { kind: "linked", text: copy.linked };
+    }
+    if (item.association_state === "待确认") {
+      return { kind: "pending", text: copy.pending };
+    }
+    return { kind: "course", text: copy.course_level };
+  }
+
   function materialRow(item) {
     var copy = COPY.lecture.materials;
-    var label = item.linked_to_lecture
-      ? copy.linked
-      : item.association_state === "待确认"
-      ? copy.pending
-      : copy.course_level;
+    var assoc = associationLabel(item);
     var badge = item.status === "已索引" ? "indexed" : "pending";
     return (
       '<div class="material-row" data-material="' +
       esc(item.id) +
       '"><div class="material-title"><strong>' +
       esc(item.title) +
-      "</strong><small>" +
-      esc(label) +
+      "</strong>" +
+      '<small class="assoc ' +
+      assoc.kind +
+      '" data-assoc="' +
+      assoc.kind +
+      '">' +
+      esc(assoc.text) +
       '</small></div><span class="material-type">' +
       esc(item.type) +
       "</span>" +
@@ -1028,8 +1051,16 @@
     );
   }
 
-  function groupLabel(text) {
-    return '<p class="material-group-label">' + esc(text) + "</p>";
+  function groupLabel(text, key) {
+    return (
+      '<p class="material-group-label' +
+      (key === "pending" ? " pending" : "") +
+      '" data-group="' +
+      esc(key) +
+      '">' +
+      esc(text) +
+      "</p>"
+    );
   }
 
   function materialsBody() {
@@ -1051,6 +1082,21 @@
     var payload = state.materials;
     if (!payload) return "";
     if (payload.view === "lecture") {
+      var confirmed = payload.confirmed || [];
+      var inferred = payload.inferred || [];
+      // three-way classification: a lecture with zero materials at all shows
+      // the approved empty copy; an inferred-only (unmapped) lecture shows the
+      // mapping-unconfirmed panel; a mapped lecture lists its confirmed items
+      // with any inferred ones in a visually separated 待确认 subsection.
+      if (!confirmed.length && !inferred.length) {
+        return (
+          '<div class="empty-materials" data-state="empty"><strong>' +
+          esc(copy.empty.title) +
+          "</strong>" +
+          esc(copy.empty.body) +
+          "</div>"
+        );
+      }
       if (!payload.mapped) {
         var unmapped = copy.unmapped;
         return (
@@ -1066,23 +1112,17 @@
           "</div></div>"
         );
       }
-      var confirmed = payload.confirmed || [];
-      var inferred = payload.inferred || [];
-      if (!confirmed.length && !inferred.length) {
-        return (
-          '<div class="empty-materials" data-state="empty"><strong>' +
-          esc(copy.empty.title) +
-          "</strong>" +
-          esc(copy.empty.body) +
-          "</div>"
-        );
-      }
       return (
         '<div class="material-list" aria-live="polite">' +
         confirmed.map(materialRow).join("") +
         (inferred.length
-          ? groupLabel(template(copy.pending_group, { count: inferred.length })) +
-            inferred.map(materialRow).join("")
+          ? '<div class="pending-subsection" data-state="pending">' +
+            groupLabel(
+              template(copy.pending_group, { count: inferred.length }),
+              "pending"
+            ) +
+            inferred.map(materialRow).join("") +
+            "</div>"
           : "") +
         "</div>"
       );
@@ -1104,7 +1144,8 @@
           .map(function (group) {
             return (
               groupLabel(
-                template(copy.group, { type: group.type, count: group.count })
+                template(copy.group, { type: group.type, count: group.count }),
+                group.type
               ) + group.items.map(materialRow).join("")
             );
           })

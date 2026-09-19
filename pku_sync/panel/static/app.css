@@ -728,6 +728,20 @@ h1, h2, h3, p { margin-top: 0; }
   font-size: 12px;
 }
 .material-row small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+/* Per-row association badge. An inferred association renders with the pending
+   style (blue family, never the indexed green) under the row title, so the
+   two 待确认 semantics — mapping vs 处理状态 — stay distinguishable from the
+   status pill in its own column. */
+.assoc.pending {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 3px;
+  padding: 2px 7px;
+  color: var(--blue);
+  background: var(--blue-pale);
+  border-radius: 999px;
+  font-weight: 750;
+}
 .material-type, .material-source { color: #667970; font-size: 11px; }
 .material-source { line-height: 1.35; }
 .status-badge {
@@ -744,6 +758,23 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .status-badge.indexed { color: var(--green); background: #edf7ef; }
 .status-badge.pending { color: var(--blue); background: var(--blue-pale); }
+/* The visually separated 待确认 subsection of the 按讲次 view: inferred
+   materials are grouped under their own pending-styled header, never mixed
+   into the confirmed list above. */
+.pending-subsection {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #f4f8fb;
+  border: 1px dashed #ccd9e6;
+  border-radius: 11px;
+}
+.pending-subsection .material-group-label {
+  margin: 0 0 2px;
+  color: var(--blue);
+}
+.pending-subsection .material-group-label::after { background: #d8e2ec; }
 .materials-hint { margin: 12px 0 0; color: #84938c; font-size: 11px; line-height: 1.65; }
 .empty-materials {
   padding: 18px;
