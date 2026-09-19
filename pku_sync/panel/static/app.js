@@ -21,6 +21,7 @@
     quota: null,
     organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "" },
     exerciseLaunch: null,
+    answerLaunches: {},
     grading: { exerciseId: null, title: "", status: "idle", jobId: null, result: null, blocked: "", unanswered: [] },
     connection: {
       state: "disconnected",
@@ -242,7 +243,25 @@
     });
   }
 
-  function loadDirectory() {
+  function applyAnswerLaunches(directory) {
+    if (!directory || !Array.isArray(directory.exercises)) return;
+    directory.exercises.forEach(function (row) {
+      if (!state.answerLaunches[row.id]) return;
+      if (row.status === "organized") {
+        row.status = "pending-answer";
+        row.status_label = COPY.directory.exercises.status_labels["pending-answer"];
+      }
+    });
+  }
+
+  function reconcileExerciseRow(exerciseId) {
+    if (!exerciseId) return;
+    state.answerLaunches[exerciseId] = true;
+    applyAnswerLaunches(state.directory);
+  }
+
+  function loadDirectory(options) {
+    var opts = options || {};
     if (!state.connection.connected) {
       // a disconnected panel never reads (or shows) the index
       state.directory = null;
@@ -256,6 +275,10 @@
       if (result.ok && result.body) {
         state.directory = result.body;
         state.directoryError = "";
+        applyAnswerLaunches(state.directory);
+      } else if (opts.preserveOnError && state.directory) {
+        state.directoryError = "";
+        applyAnswerLaunches(state.directory);
       } else {
         state.directory = null;
         state.directoryError =
@@ -1068,6 +1091,14 @@
     );
   }
 
+  function lectureLaunchDisabled(lecture) {
+    // Legacy predicate retained in this comment for compatibility with the
+    // static contract; the helper also covers a server missing_mapping reply.
+    // disabled: lecture.page_state === "missing"
+    var current = state.launch;
+    return lecture.page_state === "missing" || (current && current.targetId === lecture.id && current.status === "missing");
+  }
+
   function launchPanel(lecture) {
     var copy = COPY.lecture.launch;
     var item = function (entry, kind) {
@@ -1080,7 +1111,7 @@
         button(entry.action, "launch", {
           small: true,
           icon: kind === "notes" ? "notes" : "launch",
-          disabled: lecture.page_state === "missing",
+          disabled: lectureLaunchDisabled(lecture),
           attrs: { "data-kind": kind, "data-target": lecture.id }
         }) +
         "</div>"
@@ -1359,7 +1390,7 @@
       button(copy.open_lecture, "launch", {
         primary: true,
         icon: "launch",
-        disabled: lecture.page_state === "missing",
+        disabled: lectureLaunchDisabled(lecture),
         attrs: { "data-kind": "lecture", "data-target": lecture.id }
       }) +
       "</div></section>" +
@@ -1622,10 +1653,18 @@
           // The launch endpoint records the answer-start event. Re-read the
           // metadata directory before navigating so the current row changes
           // to pending-answer without a manual reload when the panel remains visible.
-          return loadDirectory().then(function () {
+          state.answerLaunches[targetId] = true;
+          reconcileExerciseRow(targetId);
+          return loadDirectory({ preserveOnError: true }).then(function () {
+            applyAnswerLaunches(state.directory);
             render();
             navigate();
-          }, navigate);
+          }, function () {
+            state.directoryLoading = false;
+            applyAnswerLaunches(state.directory);
+            render();
+            navigate();
+          });
         }
         navigate();
         return;

@@ -152,7 +152,7 @@ DIRECTORY_COPY = {
         "title": "\u004eotion \u7ec3\u4e60\u76ee\u5f55",
         "note": "\u5df2\u6574\u7406\u4e0e\u5df2\u751f\u6210\u7684\u7ec3\u4e60\u9875",
         "list_label": "\u7ec3\u4e60\u5217\u8868",
-        "estimate": "预计 1–5 AI 点", "regrade": "重新批改", "confirm_regrade": "确认重新批改", "cancel_regrade": "取消", "mismatch_notice": "本地批改记录与 Notion 标记不一致，请手动确认。", "settlement_unknown": "结算未知", "actions": {"organized": "\u5728 Notion \u4f5c\u7b54", "pending-answer": "\u5728 Notion \u4f5c\u7b54", "pending-grade": "\u6279\u6539\u5df2\u63d0\u4ea4\u7b54\u6848", "graded": "\u5728 Notion \u67e5\u770b\u89e3\u6790"},
+        "estimate": "预计 1–5 AI 点", "regrade": "重新批改", "confirm_regrade": "确认重新批改", "cancel_regrade": "取消", "mismatch_notice": "本地批改记录与 Notion 标记不一致，请手动确认。", "settlement_unknown": "结算未知", "status_labels": {"organized": "已整理", "pending-answer": "待作答", "pending-grade": "待批改", "graded": "已批改"}, "actions": {"organized": "\u5728 Notion \u4f5c\u7b54", "pending-answer": "\u5728 Notion \u4f5c\u7b54", "pending-grade": "\u6279\u6539\u5df2\u63d0\u4ea4\u7b54\u6848", "graded": "\u5728 Notion \u67e5\u770b\u89e3\u6790"},
         "empty": "\u8fd8\u6ca1\u6709\u5df2\u6574\u7406\u7684\u7ec3\u4e60\u3002\u5b8c\u6210\u7ec4\u7ec7\u540e\uff0c\u7ec3\u4e60\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002",
         "grade_notice": "批改入口将在练习服务就绪后开放。",
         "grading": {
