@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import threading
@@ -33,6 +34,7 @@ class GradingInput:
     unanswered: list[str]
     marker_present: bool = False
     existing_result: dict[str, Any] | None = None
+    answer_fingerprint: str = ""
 
 
 class GradeBlocked(RuntimeError):
@@ -67,6 +69,7 @@ class RealGradingPageAdapter:
             unanswered=unanswered,
             marker_present=marker is not None,
             existing_result=_existing_result(blocks, marker, target),
+            answer_fingerprint=_answer_fingerprint(blocks),
         )
 
     def verify_parent(self, target: GradeTarget) -> None:
@@ -145,7 +148,8 @@ class FakeGradingPageAdapter:
             "course_id": target.course_id, "course_title": target.course_title,
             "scope": target.scope,
         }}, ensure_ascii=False)
-        return GradingInput(prompt=prompt, unanswered=[], marker_present=self.marker_present, existing_result=self.result)
+        fingerprint = self.result.get("answer_fingerprint", "") if isinstance(self.result, dict) else ""
+        return GradingInput(prompt=prompt, unanswered=[], marker_present=self.marker_present, existing_result=self.result, answer_fingerprint=fingerprint)
 
     def write_result(self, target: GradeTarget, *, content: str, score: float, graded_at: str) -> None:
         self.write_calls.append({"page_id": target.page_id, "content": content, "score": score, "graded_at": graded_at})
@@ -195,9 +199,14 @@ class ExerciseGrader:
     def grade(self, prepared: tuple[GradeTarget, GradingInput], *, force: bool = False) -> dict[str, Any]:
         target, grading_input = prepared
         with self._lock:
+            local_record = getattr(self.directory_service, "local_grading_records", {}).get(target.page_id)
+            previous_fingerprint = local_record.get("answer_fingerprint") if isinstance(local_record, dict) else ""
+            changed_answers = bool(grading_input.answer_fingerprint and previous_fingerprint and grading_input.answer_fingerprint != previous_fingerprint)
+            if grading_input.marker_present and changed_answers and not force:
+                raise GradeBlocked("?????????????????")
             # Notion's marker is authoritative. This check occurs before quota
             # or relay access, so an unchanged rerun is free and has no LLM call.
-            if grading_input.marker_present and not force:
+            if grading_input.marker_present and (not force or (local_record is not None and not changed_answers)):
                 return _reuse_result(grading_input.existing_result, target, self.relay)
             quota = self.relay.quota()
             before = quota.get("llm_points_remaining") if quota.get("available") else None
@@ -222,6 +231,10 @@ class ExerciseGrader:
                 raise GradeSettlementError(exc.reason, points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
             except Exception as exc:
                 raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
+            record = {"status": "graded", "marker_present": True, "answer_fingerprint": grading_input.answer_fingerprint, "score": score, "graded_at": graded_at, "result_page_url": target.page_url}
+            persist = getattr(self.directory_service, "record_grading", None)
+            if persist is not None:
+                persist(target.page_id, record)
             return {"status": "completed", "exercise_id": target.page_id, "title": target.title, "score": score, "graded_at": graded_at, "points_charged": float(charge), "points_remaining": remaining, "result_page_url": target.page_url}
 
 
@@ -375,6 +388,17 @@ def _grading_prompt(target: GradeTarget, blocks: list[dict]) -> tuple[str, list[
             unanswered = list(dict.fromkeys(unanswered))
     payload = {"operation": "grade", "target": {"page_id": target.page_id, "page_url": target.page_url, "course_id": target.course_id, "course_title": target.course_title, "scope": target.scope}, "blocks": blocks}
     return json.dumps(payload, ensure_ascii=False), unanswered
+
+
+def _answer_fingerprint(blocks: list[dict]) -> str:
+    values = []
+    for block in blocks:
+        if block.get("type") not in ("paragraph", "bulleted_list_item", "numbered_list_item"):
+            continue
+        text = _plain(block)
+        if text.startswith("???") or re.match(r"^\d+[.?)]\s*", text):
+            values.append(text)
+    return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest() if values else ""
 
 
 def _result_markdown(content: str, *, score: float, graded_at: str) -> str:

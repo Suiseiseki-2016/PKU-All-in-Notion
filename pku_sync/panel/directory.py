@@ -30,7 +30,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Protocol
 
-from .exercises import ExerciseEventStore, exercise_row, exercise_scope
+from .exercises import ExerciseEventStore, JsonGradingRecordStore, exercise_row, exercise_scope
 
 from ..notion_meta import (
     ASSOCIATION_CONFIRMED,
@@ -506,6 +506,7 @@ class DirectoryService:
         # Panel-owned state stays outside the Notion metadata entities.  The
         # mapping is consumed only while building the panel payload.
         self.local_grading_records = dict(local_grading_records or {})
+        self.grading_record_store = None
         self.sync = SyncTracker(clock=clock)
         self._data: DirectoryData | None = None
         self._organized_exercises: dict[str, object] = {}
@@ -546,6 +547,11 @@ class DirectoryService:
             launched_exercise_ids=self.exercise_events.launched_ids(),
             local_grading_records=self.local_grading_records,
         )
+
+    def record_grading(self, exercise_id: str, record: dict) -> None:
+        self.local_grading_records[str(exercise_id)] = dict(record)
+        if self.grading_record_store is not None:
+            self.grading_record_store.put(str(exercise_id), record)
 
     def mark_exercise_launched(self, exercise_id: str) -> None:
         """Record a Notion answering launch without storing exercise content."""
@@ -711,11 +717,15 @@ def make_directory_service(settings=None, *, semester: str | None = None, clock=
 
         settings = default_settings
     event_path = Path(settings.data_dir) / "panel" / "exercise_events.json"
-    return DirectoryService(
+    grading_store = JsonGradingRecordStore(Path(settings.data_dir) / "panel" / "grading_records.json")
+    service = DirectoryService(
         RealDirectoryProvider(settings, semester=semester),
         clock=clock,
         exercise_events=ExerciseEventStore(event_path),
+        local_grading_records=grading_store.snapshot(),
     )
+    service.grading_record_store = grading_store
+    return service
 
 
 __all__ = [

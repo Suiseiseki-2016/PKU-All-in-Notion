@@ -75,6 +75,31 @@ def exercise_row(entity: Any, *, launch_started: bool = False, local_record: Any
         row["mismatch_notice"] = True
     return row
 
+
+class JsonGradingRecordStore:
+    """Local metadata-only grading provenance store."""
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path is not None else None
+        self._lock = threading.Lock()
+        self._records: dict[str, dict[str, Any]] = {}
+        if self.path is not None:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    self._records = {str(k): dict(v) for k, v in payload.items() if isinstance(v, dict)}
+            except (OSError, ValueError, TypeError):
+                pass
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {key: dict(value) for key, value in self._records.items()}
+    def put(self, exercise_id: str, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._records[str(exercise_id)] = dict(record)
+            if self.path is not None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(self._records, ensure_ascii=False), encoding="utf-8")
+
+
 class ExerciseEventStore:
     def __init__(self, path: Path | None = None, *, launched: Iterable[str] = ()):
         self.path = Path(path) if path is not None else None
@@ -102,4 +127,4 @@ class ExerciseEventStore:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 self.path.write_text(json.dumps({"answer_started": sorted(self._launched)}, ensure_ascii=False), encoding="utf-8")
 
-__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "PAGE_IDENTITY_MISSING", "EXERCISE_IDENTITY_MISSING_TITLE", "EXERCISE_IDENTITY_MISSING_COPY", "EXERCISE_IDENTITY_MISSING_REASON", "derive_exercise_state", "exercise_scope", "mismatch_notice_for", "exercise_row", "ExerciseEventStore"]
+__all__ = ["EXERCISE_ORGANIZED", "EXERCISE_PENDING_ANSWER", "EXERCISE_PENDING_GRADE", "EXERCISE_GRADED", "EXERCISE_STATES", "STATUS_LABELS", "PAGE_IDENTITY_MISSING", "EXERCISE_IDENTITY_MISSING_TITLE", "EXERCISE_IDENTITY_MISSING_COPY", "EXERCISE_IDENTITY_MISSING_REASON", "derive_exercise_state", "exercise_scope", "mismatch_notice_for", "exercise_row", "ExerciseEventStore", "JsonGradingRecordStore"]
