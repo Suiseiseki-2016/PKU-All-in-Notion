@@ -727,7 +727,12 @@
       return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.blocked) + '</strong><span>' + esc(g.blocked) + '</span>' + (g.unanswered.length ? '<span>未回答：' + esc(g.unanswered.join("、")) + '</span>' : '') + button(copy.back, "grading-back", { small: true, primary: true }) + '</section>';
     }
     if (g.status === "failed") {
-      return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.failed) + '</strong><span>' + esc(g.blocked) + '</span>' + button(copy.retry, "grading-retry", { small: true, primary: true, attrs: { "data-exercise": g.exerciseId } }) + button(copy.back, "grading-back", { small: true, quiet: true }) + '</section>';
+      var settlement = "";
+      if (typeof g.pointsCharged === "number") {
+        settlement = '<span class="cost-pill">' + esc(template(copy.settlement, { points: g.pointsCharged })) + '</span>';
+        if (typeof g.pointsRemaining === "number") settlement += '<span>剩余 AI 点：' + esc(g.pointsRemaining) + '</span>';
+      }
+      return '<section class="exercise-toolbar grading-card error" role="alert" aria-live="polite"><strong>' + esc(copy.failed) + '</strong><span>' + esc(g.blocked) + '</span>' + settlement + button(copy.retry, "grading-retry", { small: true, primary: true, attrs: { "data-exercise": g.exerciseId } }) + button(copy.back, "grading-back", { small: true, quiet: true }) + '</section>';
     }
     if (g.status === "completed" && g.result) {
       var r = g.result;
@@ -1604,6 +1609,8 @@
     requestJson("/api/exercises/" + encodeURIComponent(targetId) + "/grade", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ regrade: Boolean(regrade), confirm: Boolean(regrade) }) }).then(function (result) {
       if (!result.ok || !result.body || result.body.status !== "running") {
         state.grading.status = result.body && result.body.status === "failed" ? "failed" : "blocked";
+        state.grading.pointsCharged = result.body && result.body.points_charged;
+        state.grading.pointsRemaining = result.body && result.body.points_remaining;
         state.grading.blocked = result.body && (result.body.reason || result.body.detail) || COPY.directory.exercises.grading.blocked;
         state.grading.unanswered = result.body && result.body.unanswered || []; render(); return;
       }
@@ -1614,7 +1621,7 @@
         requestJson("/api/exercises/grade/status?job_id=" + encodeURIComponent(state.grading.jobId)).then(function (next) {
           if (next.body && next.body.status === "running" && attempts < POLL_MAX_ATTEMPTS) { window.setTimeout(pollGrade, 250); return; }
           if (next.body && next.body.status === "completed") { state.grading.status = "completed"; state.grading.result = next.body; }
-          else { state.grading.status = next.body && next.body.status === "failed" ? "failed" : "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.unanswered = next.body && next.body.unanswered || []; }
+          else { state.grading.status = next.body && next.body.status === "failed" ? "failed" : "blocked"; state.grading.blocked = next.body && next.body.reason || COPY.directory.exercises.grading.blocked; state.grading.pointsCharged = next.body && next.body.points_charged; state.grading.pointsRemaining = next.body && next.body.points_remaining; state.grading.unanswered = next.body && next.body.unanswered || []; }
           if (next.body && typeof next.body.points_remaining === "number" && state.quota) {
             state.quota.llm_points_remaining = next.body.points_remaining;
           }

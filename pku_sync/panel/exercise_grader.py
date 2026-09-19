@@ -182,6 +182,8 @@ class ExerciseGrader:
         self.page_adapter = page_adapter
         self.clock = clock or _graded_now
         self._lock = threading.Lock()
+        # Keep charged operations until Notion and local provenance both settle.
+        self._pending: dict[str, dict[str, Any]] = {}
 
     def prepare(self, exercise_id: str) -> tuple[GradeTarget, GradingInput]:
         target = self.directory_service.exercise_grade_target(exercise_id)
@@ -199,13 +201,19 @@ class ExerciseGrader:
     def grade(self, prepared: tuple[GradeTarget, GradingInput], *, force: bool = False) -> dict[str, Any]:
         target, grading_input = prepared
         with self._lock:
+            pending = self._pending.get(target.page_id)
+            if pending is None:
+                records = getattr(self.directory_service, "local_grading_records", {})
+                candidate = records.get(target.page_id) if isinstance(records, dict) else None
+                if isinstance(candidate, dict) and candidate.get("status") == "pending":
+                    pending = dict(candidate)
             local_record = getattr(self.directory_service, "local_grading_records", {}).get(target.page_id)
             previous_fingerprint = local_record.get("answer_fingerprint") if isinstance(local_record, dict) else ""
             changed_answers = bool(grading_input.answer_fingerprint and previous_fingerprint and grading_input.answer_fingerprint != previous_fingerprint)
+            if pending is not None:
+                return self._retry_pending(target, grading_input, pending)
             if grading_input.marker_present and changed_answers and not force:
                 raise GradeBlocked("?????????????????")
-            # Notion's marker is authoritative. This check occurs before quota
-            # or relay access, so an unchanged rerun is free and has no LLM call.
             if grading_input.marker_present and (not force or (local_record is not None and not changed_answers)):
                 return _reuse_result(grading_input.existing_result, target, self.relay)
             quota = self.relay.quota()
@@ -213,29 +221,69 @@ class ExerciseGrader:
             result = self.relay.grade(grading_input.prompt)
             charge = result.get("points_charged")
             if not isinstance(charge, (int, float)):
-                raise GradeBlocked("\u4e91\u7aef\u6ca1\u6709\u8fd4\u56de\u672c\u6b21\u7528\u91cf\uff0c\u8bf7\u91cd\u8bd5\u3002")
+                raise GradeBlocked("???????????????")
             remaining = float(before) - float(charge) if isinstance(before, (int, float)) else None
             try:
                 score = _score(result.get("content"))
                 graded_at = self.clock()
-                writer = self.page_adapter.update_result if grading_input.marker_present else self.page_adapter.write_result
-                writer(target, content=result["content"], score=score, graded_at=graded_at)
-                for question in _parse_grade_results(result.get("content")):
-                    if not question.get("register_wrong"):
-                        continue
-                    exists = getattr(self.page_adapter, "wrong_answer_exists", None)
-                    create = getattr(self.page_adapter, "create_wrong_answer", None)
-                    if exists is not None and create is not None and not exists(target, question):
-                        create(target, question)
+                pending = {"status": "pending", "marker_present": False,
+                           "answer_fingerprint": grading_input.answer_fingerprint,
+                           "score": score, "graded_at": graded_at,
+                           "content": result["content"], "points_charged": float(charge),
+                           "points_remaining": remaining, "result_page_url": target.page_url}
+                self._pending[target.page_id] = pending
+                self._persist_record(target.page_id, pending)
+                self._write_and_register(target, grading_input, pending)
+                completed = dict(pending)
+                completed["status"] = "graded"
+                completed["marker_present"] = True
+                self._persist_record(target.page_id, completed)
+                self._pending.pop(target.page_id, None)
+                return _summary(target, completed)
             except GradeBlocked as exc:
                 raise GradeSettlementError(exc.reason, points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
             except Exception as exc:
-                raise GradeSettlementError("\u6279\u6539\u7ed3\u679c\u5199\u56de Notion \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002", points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
-            record = {"status": "graded", "marker_present": True, "answer_fingerprint": grading_input.answer_fingerprint, "score": score, "graded_at": graded_at, "result_page_url": target.page_url}
-            persist = getattr(self.directory_service, "record_grading", None)
-            if persist is not None:
-                persist(target.page_id, record)
-            return {"status": "completed", "exercise_id": target.page_id, "title": target.title, "score": score, "graded_at": graded_at, "points_charged": float(charge), "points_remaining": remaining, "result_page_url": target.page_url}
+                raise GradeSettlementError("?????? Notion ?????????", points_charged=float(charge), points_remaining=_authoritative_balance(self.relay, remaining, 0)) from exc
+
+    def _persist_record(self, exercise_id: str, record: dict[str, Any]) -> None:
+        persist = getattr(self.directory_service, "record_grading", None)
+        if persist is not None:
+            persist(exercise_id, record)
+
+    def _write_and_register(self, target: GradeTarget, grading_input: GradingInput, pending: dict[str, Any]) -> None:
+        writer = self.page_adapter.update_result if grading_input.marker_present else self.page_adapter.write_result
+        writer(target, content=pending["content"], score=pending["score"], graded_at=pending["graded_at"])
+        for question in _parse_grade_results(pending["content"]):
+            if not question.get("register_wrong"):
+                continue
+            exists = getattr(self.page_adapter, "wrong_answer_exists", None)
+            create = getattr(self.page_adapter, "create_wrong_answer", None)
+            if exists is not None and create is not None and not exists(target, question):
+                create(target, question)
+
+    def _retry_pending(self, target: GradeTarget, grading_input: GradingInput, pending: dict[str, Any]) -> dict[str, Any]:
+        """Finish a previously charged operation without another relay call."""
+        try:
+            self._pending[target.page_id] = dict(pending)
+            self._write_and_register(target, grading_input, pending)
+            completed = dict(pending)
+            completed["status"] = "graded"
+            completed["marker_present"] = True
+            self._persist_record(target.page_id, completed)
+            self._pending.pop(target.page_id, None)
+            return _summary(target, completed)
+        except GradeBlocked as exc:
+            raise GradeSettlementError(exc.reason, points_charged=float(pending.get("points_charged", 0)), points_remaining=pending.get("points_remaining")) from exc
+        except Exception as exc:
+            raise GradeSettlementError("?????? Notion ?????????", points_charged=float(pending.get("points_charged", 0)), points_remaining=pending.get("points_remaining")) from exc
+
+
+def _summary(target: GradeTarget, record: dict[str, Any]) -> dict[str, Any]:
+    return {"status": "completed", "exercise_id": target.page_id, "title": target.title,
+            "score": record.get("score"), "graded_at": record.get("graded_at", ""),
+            "points_charged": float(record.get("points_charged", 0)),
+            "points_remaining": record.get("points_remaining"),
+            "result_page_url": record.get("result_page_url") or target.page_url}
 
 
 def _graded_now() -> str:
