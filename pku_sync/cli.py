@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / grade-slow / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
+            help="演示状态：normal / slow / grade-slow / grade-recovery / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:
@@ -848,6 +848,7 @@ def panel_cmd(
             activated=True,
             llm_points=4.0 if fake_variant == "low-balance" else 100.0,
             grade_delay=1.5 if fake_variant == "grade-slow" else 0.0,
+            grade_with_wrong_answer=fake_variant == "grade-recovery",
         )
         from .notion_meta import canonical_url
         from .panel.exercise_organizer import ExerciseOrganizer, MemoryOrganizeRecordStore
@@ -873,7 +874,10 @@ def panel_cmd(
             record_store=MemoryOrganizeRecordStore(),
         )
         from .panel.exercise_grader import make_fake_grading_service
-        grading_service = make_fake_grading_service(directory_service, platform_service)
+        grading_service = make_fake_grading_service(
+            directory_service, platform_service,
+            fail_wrong_answer_preflight_once=fake_variant == "grade-recovery",
+        )
     else:
         from .panel.directory import make_directory_service
 

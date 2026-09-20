@@ -317,13 +317,19 @@ class RealGradingPageAdapter:
 class FakeGradingPageAdapter:
     """In-memory grading adapter for browser verification; no Notion calls."""
 
-    def __init__(self):
+    def __init__(self, *, fail_wrong_answer_preflight_once: bool = False):
         self.read_calls: list[str] = []
         self.write_calls: list[dict[str, Any]] = []
         self.marker_present = False
         self.result: dict[str, Any] | None = None
         self.wrong_answers: set[str] = set()
         self.wrong_answer_calls: list[tuple[str, str]] = []
+        self._fail_wrong_answer_preflight_once = fail_wrong_answer_preflight_once
+
+    def preflight_wrong_answer_database(self) -> None:
+        if self._fail_wrong_answer_preflight_once and self.marker_present:
+            self._fail_wrong_answer_preflight_once = False
+            raise GradeBlocked("错题数据库暂时不可用，请稍后重试。")
 
     def read_for_grading(self, target: GradeTarget) -> GradingInput:
         self.read_calls.append(target.page_id)
@@ -380,14 +386,23 @@ class ExerciseGrader:
         if target is None:
             raise GradeBlocked("\u7ec3\u4e60\u9875\u6620\u5c04\u7f3a\u5931\uff0c\u65e0\u6cd5\u786e\u5b9a\u6279\u6539\u76ee\u6807\u3002")
         grade_target = GradeTarget(operation="grade", page_id=target["page_id"], page_url=target["page_url"], title=target["title"], course_id=target["course_id"], course_title=target["course_title"], scope=target["scope"])
-        preflight = getattr(self.page_adapter, "preflight_wrong_answer_database", None)
-        if preflight is not None:
-            preflight()
+        pending = self._pending.get(grade_target.page_id) or self._record(grade_target.page_id)
+        phase = pending.get("phase") if isinstance(pending, dict) else None
+        recovering = isinstance(pending, dict) and (
+            phase in _NONTERMINAL_PHASES or pending.get("status") == "pending"
+        )
+        # Fresh work and a durable, not-yet-charged intent retain the strict
+        # dependency gate. Post-charge phases enter recovery first and check
+        # the dependency only immediately before wrong-answer access.
+        if not recovering or phase == PHASE_INTENT:
+            preflight = getattr(self.page_adapter, "preflight_wrong_answer_database", None)
+            if preflight is not None:
+                preflight()
         verify_parent = getattr(self.page_adapter, "verify_parent", None)
         if verify_parent is not None:
             verify_parent(grade_target)
         grading_input = self.page_adapter.read_for_grading(grade_target)
-        if grading_input.unanswered and not grading_input.marker_present:
+        if not recovering and grading_input.unanswered and not grading_input.marker_present:
             raise GradeBlocked(INCOMPLETE_ANSWERS_REASON, unanswered=grading_input.unanswered)
         return grade_target, grading_input
 
@@ -563,6 +578,7 @@ class ExerciseGrader:
 
             if phase == PHASE_RESULT_RECONCILED:
                 self._verify_current_result(target, record)
+                self._preflight_wrong_answers_if_required(record)
                 self._reconcile_wrong_answers(target, record)
                 record["phase"] = PHASE_WRONG_ANSWERS_VERIFIED
                 self._persist(target.page_id, record)
@@ -571,6 +587,7 @@ class ExerciseGrader:
 
             if phase == PHASE_WRONG_ANSWERS_VERIFIED:
                 self._verify_current_result(target, record)
+                self._preflight_wrong_answers_if_required(record)
                 self._verify_all_wrong_answers(target, record)
                 transient = {"content", "append_plan", "wrong_answer_progress", "cleanup_block_ids", "cleanup_progress"}
                 completed = {key: value for key, value in record.items() if key not in transient}
@@ -623,6 +640,14 @@ class ExerciseGrader:
             if not verify(target, row, key=key, operation_id=record["operation_id"]):
                 raise GradeBlocked("\u9519\u9898\u767b\u8bb0\u672a\u80fd\u786e\u8ba4\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
 
+    def _preflight_wrong_answers_if_required(self, record: dict[str, Any]) -> None:
+        rows = [row for row in _parse_grade_results(record.get("content")) if row.get("register_wrong")]
+        if not rows:
+            return
+        preflight = getattr(self.page_adapter, "preflight_wrong_answer_database", None)
+        if preflight is not None:
+            preflight()
+
     def _cleanup_result(self, target: GradeTarget, record: dict[str, Any]) -> None:
         planner = getattr(self.page_adapter, "result_cleanup_plan", None)
         archiver = getattr(self.page_adapter, "archive_result_block", None)
@@ -646,6 +671,23 @@ class ExerciseGrader:
                     record["cleanup_progress"] = list(progress)
                     self._persist(target.page_id, record)
                     self._pending[target.page_id] = dict(record)
+            remaining = list(
+                planner(target, operation_id=record["operation_id"], content=record["content"],
+                        score=record["score"], graded_at=record["graded_at"],
+                        result_marker=record.get("result_marker") or GRADE_MARKERS[0])
+            )
+            if remaining:
+                planned = list(record["cleanup_block_ids"])
+                changed = False
+                for block_id in remaining:
+                    if block_id not in planned:
+                        planned.append(block_id)
+                        changed = True
+                if changed:
+                    record["cleanup_block_ids"] = planned
+                    self._persist(target.page_id, record)
+                    self._pending[target.page_id] = dict(record)
+                raise GradeBlocked("旧批改结果尚未完全清理，请稍后重试。")
             return
         cleanup = getattr(self.page_adapter, "cleanup_result", None)
         if cleanup is not None:
@@ -1010,13 +1052,13 @@ def _result_append_action(
             return "append", []
         return "blocked", []
     token_index = token_indexes[0]
-    if token_index == 0:
-        # A replacement interrupted after archiving its marker retains the
-        # operation token until last. Accept only the exact remaining suffix;
-        # an app-looking mismatch is ambiguous and must not be touched.
+    start = token_index - 1
+    if start < 0 or not _blocks_equal(blocks[start], plan[0]):
+        # Interrupted marker-first retirement can leave the exact token after
+        # realistic leading answer blocks. Those blocks are never owned.
         owned = []
         for offset, expected in enumerate(plan[1:]):
-            index = offset
+            index = token_index + offset
             if index >= len(blocks):
                 break
             actual = blocks[index]
@@ -1026,9 +1068,6 @@ def _result_append_action(
                 break
             owned.append(actual)
         return ("replace-prefix", owned) if owned else ("blocked", [])
-    start = token_index - 1
-    if start < 0 or not _blocks_equal(blocks[start], plan[0]):
-        return "blocked", []
     owned: list[dict] = []
     for offset, expected in enumerate(plan):
         index = start + offset
@@ -1042,19 +1081,22 @@ def _result_append_action(
         owned.append(actual)
     if len(owned) == len(plan):
         return "complete", owned
-    if start + len(owned) == len(blocks):
+    if start + len(owned) == len(blocks) and start == 0:
         return "resume", owned
     return "replace-prefix", owned
 
 
 def _archive_block_reconciled(client, page_id: str, block_id: str) -> None:
+    error = None
     try:
         client.archive_block(block_id, retry=False)
-    except Exception:
-        remaining = client.list_children(page_id)
-        if any(str(block.get("id") or "") == block_id for block in remaining):
-            raise
-
+    except Exception as exc:
+        error = exc
+    remaining = client.list_children(page_id)
+    if any(str(block.get("id") or "") == block_id for block in remaining):
+        if error is not None:
+            raise error
+        raise GradeBlocked("批改结果归档后未能确认，请稍后重试。")
 
 def _append_and_verify(client, page_id: str, suffix: list[dict], plan: list[dict]) -> None:
     try:
@@ -1143,8 +1185,14 @@ def make_grading_service(settings, directory_service, relay):
     return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=RealGradingPageAdapter(settings, directory_service))
 
 
-def make_fake_grading_service(directory_service, relay):
-    return ExerciseGrader(directory_service=directory_service, relay=relay, page_adapter=FakeGradingPageAdapter())
+def make_fake_grading_service(directory_service, relay, *, fail_wrong_answer_preflight_once: bool = False):
+    return ExerciseGrader(
+        directory_service=directory_service,
+        relay=relay,
+        page_adapter=FakeGradingPageAdapter(
+            fail_wrong_answer_preflight_once=fail_wrong_answer_preflight_once
+        ),
+    )
 
 
 __all__ = ["PHASE_INTENT", "PHASE_RELAY_STARTED", "PHASE_RELAY_SUCCEEDED", "PHASE_RESULT_VERIFIED", "PHASE_RESULT_RECONCILED", "PHASE_WRONG_ANSWERS_VERIFIED", "PHASE_COMPLETED", "ANSWER_PROVENANCE_KNOWN", "ANSWER_PROVENANCE_MARKER_ONLY", "ANSWER_PROVENANCE_UNKNOWN", "GRADE_ESTIMATE_LABEL", "INCOMPLETE_ANSWERS_REASON", "GradeTarget", "GradingInput", "GradeBlocked", "RealGradingPageAdapter", "FakeGradingPageAdapter", "ExerciseGrader", "make_grading_service", "make_fake_grading_service", "_parse_grade_results"]

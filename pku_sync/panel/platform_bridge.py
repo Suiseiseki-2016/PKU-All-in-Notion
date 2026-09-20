@@ -35,11 +35,13 @@ class FakePlatformBridge:
     """Seeded fake with deterministic local metering and no network."""
 
     def __init__(self, activated: bool = False, *, llm_points: float = FAKE_LLM_POINTS,
-                 points_charged: float = 3.0, grade_delay: float = 0.0):
+                 points_charged: float = 3.0, grade_delay: float = 0.0,
+                 grade_with_wrong_answer: bool = False):
         self._activated = bool(activated)
         self._llm_points = float(llm_points)
         self._points_charged = float(points_charged)
         self._grade_delay = float(grade_delay)
+        self._grade_with_wrong_answer = bool(grade_with_wrong_answer)
         self.llm_calls: list[dict] = []
 
     def quota(self) -> dict:
@@ -76,7 +78,11 @@ class FakePlatformBridge:
             time.sleep(self._grade_delay)
         self._llm_points -= self._points_charged
         return {
-            "content": json.dumps({"score": 88, "details": []}, ensure_ascii=False),
+            "content": json.dumps(
+                {"score": 88, "questions": [{"number": 1, "type": "选择", "score": 0, "max_score": 2}]}
+                if self._grade_with_wrong_answer else {"score": 88, "details": []},
+                ensure_ascii=False,
+            ),
             "points_charged": self._points_charged,
         }
 

@@ -50,6 +50,7 @@ _FAKE_VARIANTS = (
     "normal",
     "slow",
     "grade-slow",
+    "grade-recovery",
     "fault",
     "fault-launch",
     "transport-launch",
@@ -187,7 +188,7 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "slow":
         provider = PanelDirectoryProvider(ws, semester=semester, delay=slow_delay)
-    elif variant == "grade-slow":
+    elif variant in {"grade-slow", "grade-recovery"}:
         from .fake_workspace import EXERCISE_GENERATED, paragraph, text_piece
 
         def heading_3(text):
