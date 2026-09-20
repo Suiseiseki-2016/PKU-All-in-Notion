@@ -17,6 +17,7 @@ from ..notion import get_client, markdown_to_blocks
 from ..notion_meta import ExerciseEntity
 from ..notion_meta.titles import is_exercise_title
 from ..pipeline import collect_jobs, recording_stage
+from .llm_json import unwrap_single_json_fence
 
 ESTIMATE_LABEL = "预计 1–5 AI 点 · 完成后按实际用量结算"
 ESTIMATE_MIN_POINTS = 1
@@ -163,7 +164,13 @@ def _prompt(course_title: str, lecture_titles: list[str], notes: list[dict]) -> 
 
 def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
     try:
-        value = json.loads(content) if isinstance(content, str) else content
+        # Exactly one fenced wrapper around an otherwise-valid quiz is
+        # tolerated; every other shape fails here exactly as before.
+        value = (
+            json.loads(unwrap_single_json_fence(content))
+            if isinstance(content, str)
+            else content
+        )
     except (TypeError, ValueError) as exc:
         raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。") from exc
     if not isinstance(value, dict) or not isinstance(value.get("questions"), list):

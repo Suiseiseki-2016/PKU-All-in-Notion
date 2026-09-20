@@ -15,6 +15,7 @@ from typing import Any
 from ..notion import get_client, markdown_to_blocks, prop_title
 from ..notion_meta import ANSWER_AREA_MARKERS, GRADING_MARKERS
 from .exercises import exercise_scope
+from .llm_json import unwrap_single_json_fence
 
 GRADE_ESTIMATE_LABEL = "预计 1–5 AI 点 · 完成后按实际用量结算"
 INCOMPLETE_ANSWERS_REASON = "答案尚未填写完整，请先在 Notion 完成作答。"
@@ -821,7 +822,13 @@ def _score(content: Any) -> float:
 
 def _result_contract_version(content: Any) -> str | None:
     try:
-        value = json.loads(content) if isinstance(content, str) else content
+        # Exactly one fenced wrapper around the contract response is
+        # tolerated so the version stays detectable; anything else is not.
+        value = (
+            json.loads(unwrap_single_json_fence(content))
+            if isinstance(content, str)
+            else content
+        )
     except (TypeError, ValueError):
         return None
     if not isinstance(value, dict):
@@ -846,7 +853,13 @@ def _clean_number(value: float) -> int | float:
 def _validate_grade_result(content: Any) -> dict[str, Any]:
     """Validate and normalize the complete adopted five-question response."""
     try:
-        value = json.loads(content) if isinstance(content, str) else content
+        # Exactly one fenced wrapper around an otherwise-contract-valid
+        # response is unwrapped here; all validation below is unchanged.
+        value = (
+            json.loads(unwrap_single_json_fence(content))
+            if isinstance(content, str)
+            else content
+        )
     except (TypeError, ValueError) as exc:
         raise GradeBlocked(GRADE_RESULT_INVALID_REASON) from exc
     if not isinstance(value, dict) or value.get("contract_version") != GRADE_RESULT_CONTRACT_VERSION:
