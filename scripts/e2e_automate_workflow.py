@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from typer import Exit
 
@@ -20,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pku_sync import cli
+from pku_sync import cli, config
 
 
 def _run_scenario(root: Path, daily_code: int) -> list[str]:
@@ -28,15 +29,16 @@ def _run_scenario(root: Path, daily_code: int) -> list[str]:
     logs = root / "logs"
     logs.mkdir(exist_ok=True)
 
-    def fake_daily(*, skip_process: bool, skip_summary: bool) -> None:
-        events.append(f"daily(skip_process={skip_process},skip_summary={skip_summary})")
-        (logs / "latest.daily.log").write_text(
-            "=== pku-sync daily started 20260916_060002 ===\n"
-            f"=== EXIT_CODE={daily_code} ===\n",
-            encoding="utf-8",
-        )
+    def fake_sync(*, course: str, skip_recordings: bool) -> None:
+        events.append("daily(skip_process=True,skip_summary=True)")
+        assert course == ""
+        assert skip_recordings is False
         if daily_code:
             raise Exit(daily_code)
+
+    def fake_download(*, course: str, limit: int) -> None:
+        assert course == ""
+        assert limit == 0
 
     def fake_review() -> None:
         events.append("review")
@@ -53,10 +55,18 @@ def _run_scenario(root: Path, daily_code: int) -> list[str]:
             "lecture batch continued after review\n", encoding="utf-8"
         )
 
-    original = cli.daily_cmd, cli.review_cmd, cli.lecture_batch_cmd
-    cli.daily_cmd = fake_daily
+    original = (
+        cli.sync_cmd,
+        cli.download_cmd,
+        cli.review_cmd,
+        cli.lecture_batch_cmd,
+        config.settings,
+    )
+    cli.sync_cmd = fake_sync
+    cli.download_cmd = fake_download
     cli.review_cmd = fake_review
     cli.lecture_batch_cmd = fake_lecture_batch
+    config.settings = SimpleNamespace(data_dir=root)
     try:
         try:
             cli.automate_cmd(
@@ -73,7 +83,13 @@ def _run_scenario(root: Path, daily_code: int) -> list[str]:
             if daily_code:
                 raise AssertionError("failed daily did not propagate its exit code")
     finally:
-        cli.daily_cmd, cli.review_cmd, cli.lecture_batch_cmd = original
+        (
+            cli.sync_cmd,
+            cli.download_cmd,
+            cli.review_cmd,
+            cli.lecture_batch_cmd,
+            config.settings,
+        ) = original
     assert events == [
         "daily(skip_process=True,skip_summary=True)",
         "review",
