@@ -23,7 +23,9 @@ ESTIMATE_MIN_POINTS = 1
 ESTIMATE_MAX_POINTS = 5
 MAX_NOTE_CHARS = 12000
 MAX_PROMPT_CHARS = 100000
-_ALLOWED_TYPES = {"选择", "判断", "填空", "简答", "论述"}
+E2E_TITLE_PREFIX = "[E2E] "
+QUESTION_TYPES = frozenset({"选择", "判断", "填空", "简答", "论述"})
+_E2E_TITLE_RE = re.compile(r"^(?:\[E2E\]\s*)+")
 _AGENT_MARKER = re.compile(r"^TUI_RESULT=(success|blocked)(?:\s+reason=(.*))?\s*$", re.MULTILINE)
 
 
@@ -138,8 +140,11 @@ class RealPageAdapter:
             return client.create_page(parent_page_id, title, children=children)
 
 
-def _scope_key(course_id: str, lecture_ids: list[str]) -> str:
-    raw = json.dumps([course_id, sorted(set(lecture_ids))], ensure_ascii=False, separators=(",", ":"))
+def _scope_key(course_id: str, lecture_ids: list[str], *, e2e_mode: bool = False) -> str:
+    scope: list[Any] = [course_id, sorted(set(lecture_ids))]
+    if e2e_mode:
+        scope.append({"mode": "e2e"})
+    raw = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -148,7 +153,8 @@ def _prompt(course_title: str, lecture_titles: list[str], notes: list[dict]) -> 
         f"## {item['title']}\n来源：{item['source']}\n{item['notes']}" for item in notes
     )
     prompt = (
-        "è¯·æ ¹æ®ä»¥ä¸è¯¾å ç¬è®°æ´çä¸å¥ 5 éç»ä¹ ï¼å¿é¡»åæä¸ä»æä¸ééæ©ãå¤æ­ãå¡«ç©ºãç®ç­ãè®ºè¿°é¢ï¼æ¯é¢å¿é¡»å¸¦æ¥æºã"
+        "请根据以下课堂笔记整理一套 5 道练习，必须各有且仅有一道选择、判断、填空、简答、论述题；"
+        "每题必须带来源。"
         "只返回 JSON：{title, questions:[{type,question,source,answer}]}。\n"
         f"课程：{course_title}\n讲次：{'、'.join(lecture_titles)}\n\n{sources}"
     )
@@ -170,15 +176,20 @@ def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
         if not isinstance(item, dict):
             raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
         question = {key: str(item.get(key) or "").strip() for key in ("type", "question", "source", "answer")}
-        if question["type"] not in _ALLOWED_TYPES or not all(question.values()):
+        if question["type"] not in QUESTION_TYPES or not all(question.values()):
             raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
         normalized.append(question)
-    if {item["type"] for item in normalized} != _ALLOWED_TYPES:
+    if {item["type"] for item in normalized} != QUESTION_TYPES:
         raise OrganizeBlocked(502, "AI 返回的题型不够丰富，请重试。")
-    title = str(value.get("title") or "课程练习").strip()
+    title = _E2E_TITLE_RE.sub("", str(value.get("title") or "课程练习").strip())
     if not is_exercise_title(title):
         title = f"练习 · {title}"
     return title, normalized
+
+
+def _title_for_create(title: str, *, e2e_mode: bool) -> str:
+    clean_title = _E2E_TITLE_RE.sub("", title)
+    return f"{E2E_TITLE_PREFIX}{clean_title}" if e2e_mode else clean_title
 
 
 def _blocks(questions: list[dict]) -> list[dict]:
@@ -193,25 +204,29 @@ def _blocks(questions: list[dict]) -> list[dict]:
 
 class ExerciseOrganizer:
     def __init__(self, *, directory_service, relay, page_adapter, notes_provider,
-                 record_store=None, agent_dispatcher: Callable[[dict], Any] | None = None):
+                 record_store=None, agent_dispatcher: Callable[[dict], Any] | None = None,
+                 e2e_enabled: bool = False):
         self.directory_service = directory_service
         self.relay = relay
         self.page_adapter = page_adapter
         self.notes_provider = notes_provider
         self.record_store = record_store or MemoryOrganizeRecordStore()
         self.agent_dispatcher = agent_dispatcher
+        self.e2e_enabled = e2e_enabled
         self._lock = threading.Lock()
 
     def estimate(self) -> dict:
         return {"label": ESTIMATE_LABEL, "min_points": ESTIMATE_MIN_POINTS,
                 "max_points": ESTIMATE_MAX_POINTS}
 
-    def organize(self, course_id: str, lecture_ids: list[str]) -> dict:
+    def organize(self, course_id: str, lecture_ids: list[str], *, e2e_mode: bool = False) -> dict:
+        if e2e_mode and not self.e2e_enabled:
+            raise OrganizeBlocked(403, "E2E 练习整理模式未启用。")
         clean_course = (course_id or "").strip()
         clean_lectures = sorted({item.strip() for item in lecture_ids if item and item.strip()})
         if not clean_lectures:
             raise OrganizeBlocked(400, "请至少选择一个已有课堂笔记的讲次。")
-        key = _scope_key(clean_course, clean_lectures)
+        key = _scope_key(clean_course, clean_lectures, e2e_mode=e2e_mode)
         previous = self.record_store.get(key)
         if previous:
             self.directory_service.register_exercise(_entity_from_record(previous))
@@ -236,7 +251,8 @@ class ExerciseOrganizer:
             raise OrganizeBlocked(400, "所选范围没有可用课堂笔记，请先完成讲次整理。")
 
         target = {"operation": "quiz", "course_id": course.id,
-                  "course_name": course.title, "lecture_ids": clean_lectures}
+                  "course_name": course.title, "lecture_ids": clean_lectures,
+                  "e2e_mode": e2e_mode}
         if self.agent_dispatcher is not None:
             dispatch = agent_dispatch_result(self.agent_dispatcher(target))
             if dispatch.status != "success":
@@ -257,6 +273,7 @@ class ExerciseOrganizer:
             charge = relay_result.get("points_charged")
             if not isinstance(charge, (int, float)):
                 raise OrganizeBlocked(502, "云端没有返回本次用量，请重试。")
+            title = _title_for_create(title, e2e_mode=e2e_mode)
             page = self.page_adapter.create_page(course.id, title, children=_blocks(questions))
             record = {"id": page["id"], "url": page["url"], "title": title,
                       "course": course.title, "parent": course.id,
@@ -295,6 +312,7 @@ def make_organizer_service(settings, directory_service, relay):
         relay=relay,
         page_adapter=RealPageAdapter(settings),
         notes_provider=LocalNotesProvider(settings.data_dir),
+        e2e_enabled=bool(getattr(settings, "exercise_e2e_enabled", False)),
         record_store=JsonOrganizeRecordStore(
             Path(settings.data_dir) / "panel" / "organized_exercises.json"
         ),
@@ -302,6 +320,7 @@ def make_organizer_service(settings, directory_service, relay):
 
 
 __all__ = ["ESTIMATE_LABEL", "ESTIMATE_MIN_POINTS", "ESTIMATE_MAX_POINTS",
+           "E2E_TITLE_PREFIX", "QUESTION_TYPES",
            "OrganizeBlocked", "AgentDispatchResult", "agent_dispatch_result",
            "MemoryOrganizeRecordStore", "JsonOrganizeRecordStore", "LocalNotesProvider",
            "RealPageAdapter", "ExerciseOrganizer", "make_organizer_service"]

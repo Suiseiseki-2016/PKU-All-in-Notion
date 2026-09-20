@@ -17,6 +17,7 @@ from .jobs import EXERCISE_JOB_BUSY_CODE, EXERCISE_JOB_BUSY_MESSAGE, ExerciseJob
 class OrganizeRequest(BaseModel):
     course_id: str
     lecture_ids: list[str] = Field(default_factory=list, max_length=20)
+    e2e_mode: bool = False
 
 
 @dataclass
@@ -53,7 +54,12 @@ class OrganizeJobController:
 
     def _execute(self, job_id: str, request: OrganizeRequest) -> None:
         try:
-            result = self.service.organize(request.course_id, request.lecture_ids)
+            if request.e2e_mode:
+                result = self.service.organize(
+                    request.course_id, request.lecture_ids, e2e_mode=True
+                )
+            else:
+                result = self.service.organize(request.course_id, request.lecture_ids)
         except OrganizeBlocked as exc:
             result = {"status": "blocked", "reason": exc.reason, "retryable": True}
         except Exception:

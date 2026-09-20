@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     cloud_transcribe_url: str = "https://pku.aeoluswu.info/v1/transcribe"
     platform_token: str = ""
 
+    # Explicit, off-by-default gate for disposable [E2E] exercise pages.
+    exercise_e2e_enabled: bool = False
+
     delete_video_after_processing: bool = True
 
     @property
