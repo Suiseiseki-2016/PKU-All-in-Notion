@@ -197,9 +197,6 @@ class RealGradingPageAdapter:
                 return
             if action == "blocked":
                 raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u4e0d\u5b8c\u6574\uff0c\u5f52\u5c5e\u65e0\u6cd5\u5b89\u5168\u786e\u8ba4\uff0c\u672a\u4fee\u6539 Notion\u3002")
-            if action == "resume":
-                _append_and_verify(client, target.page_id, plan[len(owned):], plan)
-                return
             if action == "replace-prefix":
                 # Retire the marker first, then metadata from the end, and
                 # the operation token last. Any interrupted transition retains
@@ -1081,8 +1078,6 @@ def _result_append_action(
         owned.append(actual)
     if len(owned) == len(plan):
         return "complete", owned
-    if start + len(owned) == len(blocks) and start == 0:
-        return "resume", owned
     return "replace-prefix", owned
 
 

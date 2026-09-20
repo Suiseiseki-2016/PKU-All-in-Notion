@@ -45,10 +45,12 @@ class PageClient:
 def ensure(adapter, append_plan):
     adapter.ensure_result(target(), operation_id="operation", content=CONTENT, score=72, graded_at=GRADED_AT, regrade=False, result_marker="批改结果", append_plan=append_plan)
 
-def test_exact_tail_prefix_appends_only_missing_suffix(monkeypatch):
-    frozen = plan(); client = PageClient(with_ids(frozen[:3])); monkeypatch.setattr(grader_module, "get_client", lambda _s: client)
+def test_exact_tail_prefix_retires_full_prefix_then_appends_full_plan(monkeypatch):
+    frozen = plan(); prefix = with_ids(frozen[:3]); client = PageClient(prefix); monkeypatch.setattr(grader_module, "get_client", lambda _s: client)
     ensure(RealGradingPageAdapter(object()), frozen)
-    assert client.appended == [frozen[3:]] and client.archived == []
+    assert client.archived == [prefix[0]["id"], prefix[2]["id"], prefix[1]["id"]]
+    assert client.appended == [frozen]
+    assert len([block for block in client.blocks if grader_module._plain(block) == "PKU_GRADE_OPERATION:operation"]) == 1
 
 def test_owned_prefix_before_user_content_retires_only_prefix(monkeypatch):
     frozen = plan(); prefix = with_ids(frozen[:3]); user = with_ids(markdown_to_blocks("### 我的补充\n\n不要删除"), 100)
