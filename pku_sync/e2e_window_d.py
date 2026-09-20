@@ -43,6 +43,11 @@ ANSWER_FIXTURE = {
     "Q4": "分层明确职责和接口，隔离实现变化并简化维护。",
     "Q5": "只讨论模块化，故意遗漏互操作性和故障定位。",
 }
+# Real relay settlements are millipoints/1000 floats; subtracting a charged
+# value from a before-balance is not always bit-identical to the after
+# balance's division result, so ledger arithmetic compares within this
+# tolerance instead of exact float equality.
+LEDGER_FLOAT_TOLERANCE = 1e-9
 
 
 def _now() -> str:
@@ -455,10 +460,19 @@ class WindowDReadOnlyVerifier:
         expected_scores = [item["expected_score"] for item in QUESTION_FIXTURE]
         expected_outcomes = [item["expected_outcome"] for item in QUESTION_FIXTURE]
         per_question = snapshot.get("per_question") or []
+        # Real relay charges are millipoints/1000 floats: subtracting the
+        # charged value from the before-balance is not always bit-identical
+        # to the after-balance's division result, so the arithmetic check
+        # compares within a tight tolerance instead of exact equality
+        # (clean fake values still pass trivially; contiguity stays exact
+        # because both sides divide the same integer millipoint balance).
         ledger_balances_match = all(
-            float(row.get("points_before", 0))
-            - float(row.get("points_charged", 0))
-            == float(row.get("points_after", 0))
+            abs(
+                float(row.get("points_before", 0))
+                - float(row.get("points_charged", 0))
+                - float(row.get("points_after", 0))
+            )
+            <= LEDGER_FLOAT_TOLERANCE
             for row in ledger_rows
         )
         ledger_is_contiguous = all(
