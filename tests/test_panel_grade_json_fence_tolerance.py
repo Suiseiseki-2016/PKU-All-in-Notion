@@ -211,9 +211,14 @@ def _mutations():
         "duplicate": lambda value: value["questions"][4].update(question_id="Q2"),
         "out-of-range": lambda value: value["questions"][2].update(score=3),
         "wrong-type": lambda value: value["questions"][3].update(type="论述"),
-        "unstable-identity": lambda value: value["questions"][1].update(wrong_answer_key="row-two"),
+        # wrong_answer_key/earned/score echoes are now normalized from the
+        # pinned per-question result (feature m4-fix-grade-contract-mechanical-
+        # clauses); their residual type/range boundaries are asserted here and
+        # the verbatim-response replay stays additive in
+        # tests/test_panel_grade_contract_mechanical_clauses.py.
+        "non-string-key": lambda value: value["questions"][1].update(wrong_answer_key=[]),
         "wrong-id-type": lambda value: value["questions"][1].update(question_id=[]),
-        "inconsistent-total": lambda value: value.update(score=88),
+        "bogus-max": lambda value: value.update(max_points=12),
     }
 
 

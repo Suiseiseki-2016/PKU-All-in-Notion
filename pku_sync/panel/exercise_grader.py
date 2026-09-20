@@ -851,7 +851,16 @@ def _clean_number(value: float) -> int | float:
 
 
 def _validate_grade_result(content: Any) -> dict[str, Any]:
-    """Validate and normalize the complete adopted five-question response."""
+    """Validate and normalize the complete adopted five-question response.
+
+    The per-question rows are the pinned grading judgment: rubric, type,
+    identity, range, outcome, registration semantics, and feedback must all
+    hold exactly. The mechanical echo fields -- per-question
+    ``wrong_answer_key`` and top-level ``earned_points``/``score`` -- are
+    normalized from that pinned result instead of trusting the model echo
+    after the charge (the Window D real leg returned wrong-answer text for
+    wrong_answer_key and an earned_points that did not match its own rows).
+    """
     try:
         # Exactly one fenced wrapper around an otherwise-contract-valid
         # response is unwrapped here; all validation below is unchanged.
@@ -879,7 +888,12 @@ def _validate_grade_result(content: Any) -> dict[str, Any]:
         seen.add(question_id)
         if row.get("number") != expected.number or row.get("type") != expected.type:
             raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
-        if row.get("wrong_answer_key") != question_id:
+        # wrong_answer_key is a mechanical echo: the prompt pins it to the
+        # per-question question_id, but a charged response may carry the
+        # wrong-answer text (or null for correct questions). Accept a string
+        # or null and normalize it from the pinned per-question question_id.
+        wrong_answer_key = row.get("wrong_answer_key")
+        if wrong_answer_key is not None and not isinstance(wrong_answer_key, str):
             raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
         score = _finite_number(row.get("score"))
         maximum = _finite_number(row.get("max_score"))
@@ -909,19 +923,22 @@ def _validate_grade_result(content: Any) -> dict[str, Any]:
             "feedback": feedback.strip(),
         })
 
-    earned = _finite_number(value.get("earned_points"))
     maximum = _finite_number(value.get("max_points"))
-    expected_earned = sum(float(row["score"]) for row in normalized)
     expected_maximum = sum(float(row["max_score"]) for row in normalized)
-    if earned != expected_earned or maximum != expected_maximum or maximum <= 0:
+    if maximum != expected_maximum or maximum <= 0:
         raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    # earned_points and score are mechanical top-level echoes: keep their
+    # contract shape (finite numbers, score within 0-100) but derive both
+    # from the pinned per-question scores via the pinned score formula.
+    _finite_number(value.get("earned_points"))
+    earned = sum(float(row["score"]) for row in normalized)
     normalized_score = round(earned / maximum * 100, 6)
     score = _finite_number(value.get("score"))
-    if score != normalized_score or not 0 <= score <= 100:
+    if not 0 <= score <= 100:
         raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
     return {
         "contract_version": GRADE_RESULT_CONTRACT_VERSION,
-        "score": _clean_number(score),
+        "score": _clean_number(normalized_score),
         "earned_points": _clean_number(earned),
         "max_points": _clean_number(maximum),
         "questions": normalized,
@@ -1088,6 +1105,8 @@ def _grading_prompt(target: GradeTarget, blocks: list[dict]) -> tuple[str, list[
             ],
             "questions": [item.provider_schema() for item in E2E_GRADE_QUESTION_RUBRIC],
             "score_formula": "earned_points / max_points * 100",
+            "earned_points_rule": "earned_points must equal the sum of every question's score; score must equal earned_points / max_points * 100.",
+            "wrong_answer_key_rule": "wrong_answer_key must be exactly the per-question question_id (for example \"Q2\"); it is the stable wrong-answer registration key.",
             "wrong_answer_question_ids": ["Q2", "Q5"],
         }
     return json.dumps(payload, ensure_ascii=False), unanswered
