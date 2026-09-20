@@ -5,6 +5,7 @@ import copy
 import datetime
 import hashlib
 import json
+import math
 import re
 import threading
 import uuid
@@ -18,6 +19,37 @@ from .exercises import exercise_scope
 GRADE_ESTIMATE_LABEL = "预计 1–5 AI 点 · 完成后按实际用量结算"
 INCOMPLETE_ANSWERS_REASON = "答案尚未填写完整，请先在 Notion 完成作答。"
 GRADE_MARKERS = ("批改结果", "E2E_GRADE_RESULT")
+GRADE_RESULT_CONTRACT_VERSION = "pku-e2e-grade-v1"
+GRADE_RESULT_INVALID_REASON = "AI 返回的批改结果不完整，请重试。"
+
+
+@dataclass(frozen=True)
+class GradeQuestionRubric:
+    question_id: str
+    number: int
+    type: str
+    max_score: int
+    expected_score: int
+    expected_outcome: str
+    register_wrong: bool
+
+    def provider_schema(self) -> dict[str, Any]:
+        return {
+            "question_id": self.question_id, "number": self.number,
+            "type": self.type, "max_score": self.max_score,
+            "expected_score": self.expected_score,
+            "expected_outcome": self.expected_outcome,
+            "register_wrong": self.register_wrong,
+        }
+
+
+E2E_GRADE_QUESTION_RUBRIC = (
+    GradeQuestionRubric("Q1", 1, "选择", 2, 2, "correct", False),
+    GradeQuestionRubric("Q2", 2, "判断", 2, 0, "wrong", True),
+    GradeQuestionRubric("Q3", 3, "填空", 2, 1, "partial", False),
+    GradeQuestionRubric("Q4", 4, "简答", 2, 2, "correct", False),
+    GradeQuestionRubric("Q5", 5, "论述", 2, 0, "wrong", True),
+)
 ANSWER_PROVENANCE_KNOWN = "known"
 ANSWER_PROVENANCE_MARKER_ONLY = "marker-only"
 ANSWER_PROVENANCE_UNKNOWN = "unknown"
@@ -55,6 +87,7 @@ class GradingInput:
     answer_fingerprint: str = ""
     answer_provenance: str | None = None
     result_marker: str = GRADE_MARKERS[0]
+    result_contract: str | None = None
 
 
 class GradeBlocked(RuntimeError):
@@ -117,6 +150,7 @@ class RealGradingPageAdapter:
             blocks = client.list_children(target.page_id)
         prompt, unanswered = _grading_prompt(target, blocks)
         marker = _find_marker(blocks)
+        strict_contract = _uses_e2e_grade_contract(target)
         provenance, fingerprint = _answer_provenance(blocks)
         return GradingInput(
             prompt=prompt,
@@ -125,7 +159,11 @@ class RealGradingPageAdapter:
             existing_result=_existing_result(blocks, marker, target),
             answer_fingerprint=fingerprint,
             answer_provenance=provenance,
-            result_marker=_plain(marker) if marker is not None else GRADE_MARKERS[0],
+            result_marker=(
+                _plain(marker) if marker is not None
+                else GRADE_MARKERS[1] if strict_contract else GRADE_MARKERS[0]
+            ),
+            result_contract=GRADE_RESULT_CONTRACT_VERSION if strict_contract else None,
         )
 
     def verify_parent(self, target: GradeTarget) -> None:
@@ -444,6 +482,7 @@ class ExerciseGrader:
                 "answer_fingerprint": grading_input.answer_fingerprint,
                 "answer_provenance": provenance, "regrade": bool(grading_input.marker_present),
                 "result_marker": grading_input.result_marker if grading_input.result_marker in GRADE_MARKERS else GRADE_MARKERS[0],
+                "result_contract": grading_input.result_contract,
             }
             # A configured record store is the durable boundary. Legacy
             # injected test/services without one keep their in-memory behavior.
@@ -547,7 +586,14 @@ class ExerciseGrader:
             content = record.get("content")
             score = record.get("score")
             if phase == PHASE_RELAY_SUCCEEDED:
-                score = _score(content)
+                response_contract = _result_contract_version(content)
+                if record.get("result_contract") == GRADE_RESULT_CONTRACT_VERSION or response_contract is not None:
+                    validated = _validate_grade_result(content)
+                    content = json.dumps(validated, ensure_ascii=False, separators=(",", ":"))
+                    record["content"] = content
+                    score = validated["score"]
+                else:
+                    score = _score(content)
                 record["score"] = score
                 if "append_plan" not in record:
                     record["append_plan"] = markdown_to_blocks(
@@ -773,12 +819,110 @@ def _score(content: Any) -> float:
     return float(score) if not float(score).is_integer() else int(score)
 
 
+def _result_contract_version(content: Any) -> str | None:
+    try:
+        value = json.loads(content) if isinstance(content, str) else content
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    version = value.get("contract_version")
+    return version if isinstance(version, str) else None
+
+
+def _finite_number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    number = float(value)
+    if not math.isfinite(number):
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    return number
+
+
+def _clean_number(value: float) -> int | float:
+    return int(value) if value.is_integer() else value
+
+
+def _validate_grade_result(content: Any) -> dict[str, Any]:
+    """Validate and normalize the complete adopted five-question response."""
+    try:
+        value = json.loads(content) if isinstance(content, str) else content
+    except (TypeError, ValueError) as exc:
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON) from exc
+    if not isinstance(value, dict) or value.get("contract_version") != GRADE_RESULT_CONTRACT_VERSION:
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    rows = value.get("questions")
+    if not isinstance(rows, list) or len(rows) != len(E2E_GRADE_QUESTION_RUBRIC):
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for expected, row in zip(E2E_GRADE_QUESTION_RUBRIC, rows):
+        if not isinstance(row, dict):
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        question_id = row.get("question_id")
+        if not isinstance(question_id, str) or question_id in seen or question_id != expected.question_id:
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        seen.add(question_id)
+        if row.get("number") != expected.number or row.get("type") != expected.type:
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        if row.get("wrong_answer_key") != question_id:
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        score = _finite_number(row.get("score"))
+        maximum = _finite_number(row.get("max_score"))
+        if maximum != float(expected.max_score) or not 0 <= score <= maximum:
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        if score != float(expected.expected_score):
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        outcome = row.get("outcome")
+        register_wrong = row.get("register_wrong")
+        if outcome != expected.expected_outcome or not isinstance(register_wrong, bool):
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        if register_wrong is not expected.register_wrong:
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        feedback = row.get("feedback")
+        if not isinstance(feedback, str) or not feedback.strip():
+            raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+        normalized.append({
+            "question_id": question_id,
+            "number": expected.number,
+            "type": expected.type,
+            "score": _clean_number(score),
+            "max_score": _clean_number(maximum),
+            "outcome": outcome,
+            "partial": 0 < score < maximum,
+            "register_wrong": register_wrong,
+            "wrong_answer_key": question_id,
+            "feedback": feedback.strip(),
+        })
+
+    earned = _finite_number(value.get("earned_points"))
+    maximum = _finite_number(value.get("max_points"))
+    expected_earned = sum(float(row["score"]) for row in normalized)
+    expected_maximum = sum(float(row["max_score"]) for row in normalized)
+    if earned != expected_earned or maximum != expected_maximum or maximum <= 0:
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    normalized_score = round(earned / maximum * 100, 6)
+    score = _finite_number(value.get("score"))
+    if score != normalized_score or not 0 <= score <= 100:
+        raise GradeBlocked(GRADE_RESULT_INVALID_REASON)
+    return {
+        "contract_version": GRADE_RESULT_CONTRACT_VERSION,
+        "score": _clean_number(score),
+        "earned_points": _clean_number(earned),
+        "max_points": _clean_number(maximum),
+        "questions": normalized,
+    }
+
+
 def _parse_grade_results(content: Any) -> list[dict[str, Any]]:
     """Normalize per-question results while keeping them out of panel payloads."""
     try:
         value = json.loads(content) if isinstance(content, str) else content
     except (TypeError, ValueError) as exc:
         raise GradeBlocked("AI 返回的批改结果不完整，请重试。") from exc
+    if isinstance(value, dict) and value.get("contract_version") == GRADE_RESULT_CONTRACT_VERSION:
+        return _validate_grade_result(value)["questions"]
     rows = value.get("questions") if isinstance(value, dict) else None
     if not isinstance(rows, list):
         return []
@@ -882,6 +1026,10 @@ def _section_answers(texts: list[str]) -> list[str]:
     return answers
 
 
+def _uses_e2e_grade_contract(target: GradeTarget) -> bool:
+    return target.title.lstrip().startswith("[E2E]")
+
+
 def _grading_prompt(target: GradeTarget, blocks: list[dict]) -> tuple[str, list[str]]:
     texts = [_plain(block) for block in blocks]
     fixture_at = next((i for i, text in enumerate(texts) if text in ANSWER_AREA_MARKERS), None)
@@ -905,7 +1053,30 @@ def _grading_prompt(target: GradeTarget, blocks: list[dict]) -> tuple[str, list[
             if len(answers) < question_count:
                 unanswered.extend(f"第 {number} 题" for number in range(len(answers) + 1, question_count + 1))
             unanswered = list(dict.fromkeys(unanswered))
-    payload = {"operation": "grade", "target": {"page_id": target.page_id, "page_url": target.page_url, "course_id": target.course_id, "course_title": target.course_title, "scope": target.scope}, "blocks": blocks}
+    payload = {
+        "operation": "grade",
+        "target": {
+            "page_id": target.page_id, "page_url": target.page_url,
+            "course_id": target.course_id, "course_title": target.course_title,
+            "scope": target.scope,
+        },
+        "blocks": blocks,
+    }
+    if _uses_e2e_grade_contract(target):
+        payload["response_contract"] = {
+            "version": GRADE_RESULT_CONTRACT_VERSION,
+            "format": "Return one JSON object only. Do not omit, add, or duplicate questions.",
+            "required_top_level_fields": [
+                "contract_version", "score", "earned_points", "max_points", "questions"
+            ],
+            "required_question_fields": [
+                "question_id", "number", "type", "score", "max_score",
+                "outcome", "register_wrong", "wrong_answer_key", "feedback",
+            ],
+            "questions": [item.provider_schema() for item in E2E_GRADE_QUESTION_RUBRIC],
+            "score_formula": "earned_points / max_points * 100",
+            "wrong_answer_question_ids": ["Q2", "Q5"],
+        }
     return json.dumps(payload, ensure_ascii=False), unanswered
 
 
