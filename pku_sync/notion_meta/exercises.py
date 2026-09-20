@@ -23,6 +23,7 @@ GRADING_MARKERS = ("批改结果", "E2E_GRADE_RESULT")
 ANSWER_AREA_MARKERS = ("E2E_ANSWER_FIXTURE",)
 
 _ANSWER_PREFIX = "答案："
+_TEACHER_ANSWER_HEADING = "教师区（答案）"
 _HEADING_TYPES = ("heading_1", "heading_2", "heading_3")
 _TEXT_TYPES = ("paragraph", "bulleted_list_item", "numbered_list_item")
 
@@ -35,16 +36,26 @@ def scan_exercise_signals(blocks: list[dict]) -> tuple[bool, bool]:
     """
     marker_present = False
     answer_present = False
+    student_answer_area = True
     for block in blocks:
         kind = block.get("type")
         inner = block.get(kind) or {}
         stripped = _plain_text(inner.get("rich_text")).strip()
         if kind in _HEADING_TYPES:
+            if stripped == _TEACHER_ANSWER_HEADING:
+                # Organizer pages put numbered standard answers here.  It is
+                # a boundary for student-answer blocks, not for later marker
+                # headings, which still need to be scanned below.
+                student_answer_area = False
             if stripped in GRADING_MARKERS:
                 marker_present = True
             if stripped in ANSWER_AREA_MARKERS:
                 answer_present = True
-        elif kind in _TEXT_TYPES and stripped.startswith(_ANSWER_PREFIX):
+        elif (
+            student_answer_area
+            and kind in _TEXT_TYPES
+            and stripped.startswith(_ANSWER_PREFIX)
+        ):
             if len(stripped) > len(_ANSWER_PREFIX):
                 answer_present = True
     return marker_present, answer_present
