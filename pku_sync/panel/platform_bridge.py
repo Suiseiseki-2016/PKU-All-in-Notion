@@ -32,17 +32,36 @@ class RealPlatformBridge:
 
 
 class FakePlatformBridge:
-    """Seeded fake with deterministic local metering and no network."""
+    """Seeded fake with deterministic local metering and no network.
+
+    The ``quiz_fail_status`` / ``grade_fail_status`` / ``grade_fail_once``
+    knobs are FAKE-ONLY failure injection for the browser-verification
+    variants (organize-blocked / low-balance / grade-502): they default to
+    None and are inert unless a ``--fake`` variant opt into them. The real
+    relay bridge (``RealPlatformBridge``) never sees them.
+    """
 
     def __init__(self, activated: bool = False, *, llm_points: float = FAKE_LLM_POINTS,
                  points_charged: float = 3.0, grade_delay: float = 0.0,
-                 grade_with_wrong_answer: bool = False):
+                 grade_with_wrong_answer: bool = False,
+                 quiz_fail_status: int | None = None,
+                 grade_fail_status: int | None = None,
+                 grade_fail_once: int | None = None):
         self._activated = bool(activated)
         self._llm_points = float(llm_points)
         self._points_charged = float(points_charged)
         self._grade_delay = float(grade_delay)
         self._grade_with_wrong_answer = bool(grade_with_wrong_answer)
+        self._quiz_fail_status = quiz_fail_status
+        self._grade_fail_status = grade_fail_status
+        self._grade_fail_once = grade_fail_once
         self.llm_calls: list[dict] = []
+
+    @staticmethod
+    def _relay_error(message: str, status: int) -> PlatformError:
+        error = PlatformError(message)
+        error.status_code = status
+        return error
 
     def quota(self) -> dict:
         if not self._activated:
@@ -61,6 +80,15 @@ class FakePlatformBridge:
         if not self._activated:
             raise PlatformError("云端登录已失效，请重新激活后重试。")
         self.llm_calls.append({"operation": "quiz"})
+        if self._quiz_fail_status is not None:
+            # fake-only organize failure injection (organize-blocked variant)
+            raise self._relay_error(
+                "AI 服务暂时没有完成整理，请稍后重试。", self._quiz_fail_status
+            )
+        # Relay pre-check: remaining < charge → 402, no upstream call,
+        # no partial decrement.
+        if self._llm_points < self._points_charged:
+            raise self._relay_error("AI 点不足，请兑换新额度后重试。", 402)
         self._llm_points -= self._points_charged
         return {"content": json.dumps({"title": "第一讲 · 计算机网络练习", "questions": [
             {"type": "选择", "question": "下列哪项属于计算机网络的核心功能？A. 分层通信 B. 单机计算 C. 文件压缩 D. 图像渲染", "source": "第一讲", "answer": "A"},
@@ -74,6 +102,19 @@ class FakePlatformBridge:
         if not self._activated:
             raise PlatformError("云端登录已失效，请重新激活后重试。")
         self.llm_calls.append({"operation": "grade"})
+        # Relay pre-check: remaining < charge → 402, no upstream call,
+        # no partial decrement.
+        if self._llm_points < self._points_charged:
+            raise self._relay_error("AI 点不足，请兑换新额度后重试。", 402)
+        if self._grade_fail_once is not None:
+            # fake-only one-shot upstream failure (grade-502 variant)
+            status = self._grade_fail_once
+            self._grade_fail_once = None
+            raise self._relay_error("AI 服务暂时没有完成请求，请稍后重试。", status)
+        if self._grade_fail_status is not None:
+            raise self._relay_error(
+                "AI 服务暂时没有完成请求，请稍后重试。", self._grade_fail_status
+            )
         if self._grade_delay:
             time.sleep(self._grade_delay)
         self._llm_points -= self._points_charged

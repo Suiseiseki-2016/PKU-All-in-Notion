@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / grade-slow / grade-recovery / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / low-balance / exercise-fault-launch / exercise-missing（需配合 --fake）",
+            help="演示状态：normal / slow / grade-slow / grade-recovery / low-balance / grade-502 / organize-blocked / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / exercise-fault-launch / exercise-missing（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:
@@ -830,54 +830,18 @@ def panel_cmd(
     # Built before binding so an invalid fake variant fails cleanly.
     # In --fake mode the connection and platform bridges are faked too, so a
     # verification run can drive activation and connect/disconnect without any
-    # network call and without touching the student's real credentials.
+    # network call and without touching the student's real credentials. The
+    # fake service assembly (variant wiring, relay failure injection) is shared
+    # with the variant tests via ``fake_panel.build_fake_panel_services``.
     if fake:
-        from .panel.connection import build_fake_connection_service
-        from .panel.fake_directory import build_fake_directory_service
-        from .panel.platform_bridge import FakePlatformBridge
+        from .panel.fake_panel import build_fake_panel_services
 
         try:
-            directory_service = build_fake_directory_service(variant=fake_variant)
+            (directory_service, connection_service, platform_service,
+             organizer_service, grading_service) = build_fake_panel_services(fake_variant)
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
-        connection_service = build_fake_connection_service(
-            directory_service=directory_service
-        )
-        platform_service = FakePlatformBridge(
-            activated=True,
-            llm_points=4.0 if fake_variant == "low-balance" else 100.0,
-            grade_delay=1.5 if fake_variant == "grade-slow" else 0.0,
-            grade_with_wrong_answer=fake_variant == "grade-recovery",
-        )
-        from .notion_meta import canonical_url
-        from .panel.exercise_organizer import ExerciseOrganizer, MemoryOrganizeRecordStore
-
-        class _FakeNotes:
-            def for_scope(self, *, course_title, lecture_titles):
-                return [{"title": lecture_titles[0], "source": "课堂录像笔记", "notes": "演示笔记"}]
-
-        class _FakePages:
-            def __init__(self):
-                self.created = None
-
-            def create_page(self, parent_page_id, title, *, children):
-                if self.created is None:
-                    page_id = "2c000001-0000-4000-8000-000000000901"
-                    self.created = {"id": page_id, "url": canonical_url(page_id),
-                                    "last_edited_time": "2026-09-19T08:00:00.000Z"}
-                return dict(self.created)
-
-        organizer_service = ExerciseOrganizer(
-            directory_service=directory_service, relay=platform_service,
-            page_adapter=_FakePages(), notes_provider=_FakeNotes(),
-            record_store=MemoryOrganizeRecordStore(),
-        )
-        from .panel.exercise_grader import make_fake_grading_service
-        grading_service = make_fake_grading_service(
-            directory_service, platform_service,
-            fail_wrong_answer_preflight_once=fake_variant == "grade-recovery",
-        )
     else:
         from .panel.directory import make_directory_service
 

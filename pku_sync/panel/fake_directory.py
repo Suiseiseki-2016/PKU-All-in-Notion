@@ -6,6 +6,22 @@ these variants INSTEAD of re-deriving fake data:
 - ``normal``       — the seeded workspace, honest instant responses.
 - ``slow``         — same seeds with a per-call delay so the syncing/loading
                      states are reachable in the browser.
+- ``grade-slow``   — the generated exercise carries answered blocks (待批改)
+                     and the grade job is deliberately slow.
+- ``grade-recovery`` — the generated exercise is 待批改 and the wrong-answer
+                     preflight fails once before recovery.
+- ``low-balance``  — the generated exercise is 待批改 (answer blocks seeded)
+                     and the fake platform carries only a 4-point balance, so
+                     every grade trigger returns relay 402 (quota blocked).
+- ``grade-502``    — the generated exercise is 待批改; the FIRST grade call
+                     raises a one-shot relay 502 so the retryable error state
+                     is reachable, and a manual retry then completes exactly
+                     one result set.
+- ``organize-blocked`` — directory/course/scope load normally; every organize
+                     trigger fails after starting with a representative relay
+                     502 blocked result (fake-only quiz injection), so the
+                     blocked+retry state is reachable without adding a row or
+                     any settlement.
 - ``fault``        — a second same-semester hub makes discovery ambiguous:
                      every directory read lands in the sync error state
                      (VAL-META-018 honest failure).
@@ -51,15 +67,23 @@ _FAKE_VARIANTS = (
     "slow",
     "grade-slow",
     "grade-recovery",
+    "low-balance",
+    "grade-502",
+    "organize-blocked",
     "fault",
     "fault-launch",
     "transport-launch",
     "missing-lecture",
     "empty",
     "usage-cap",
-    "low-balance",
     "exercise-fault-launch",
     "exercise-missing",
+)
+
+# The fake variants that render the generated exercise as 待批改 (answered
+# blocks seeded on EXERCISE_GENERATED with the same shared seed function).
+_PENDING_GRADE_VARIANTS = frozenset(
+    {"grade-slow", "grade-recovery", "low-balance", "grade-502"}
 )
 
 
@@ -165,6 +189,29 @@ class UsageCapProvider(PanelDirectoryProvider):
         raise NotionRetryableError(status=429)
 
 
+def _seed_pending_grade_answers(ws) -> None:
+    """Give the generated exercise answered question blocks -> 待批改.
+
+    Shared by every fake variant whose exercise directory must reach the
+    grade trigger (grade-slow / grade-recovery / low-balance / grade-502).
+    The blocks mirror the real exercise-page shape the adapter fingerprints
+    (heading + ``答案：`` paragraphs).
+    """
+    from .fake_workspace import EXERCISE_GENERATED, paragraph, text_piece
+
+    def heading_3(text):
+        return {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [text_piece(text)]},
+        }
+
+    ws.children[EXERCISE_GENERATED] = [
+        heading_3("\u7b2c\u4e00\u9898"), paragraph("\u7b54\u6848\uff1aA"),
+        heading_3("\u7b2c\u4e8c\u9898"), paragraph("\u7b54\u6848\uff1a\u6b63\u786e"),
+    ]
+
+
 def build_fake_directory(
     variant: str = "normal",
     *,
@@ -188,19 +235,11 @@ def build_fake_directory(
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "slow":
         provider = PanelDirectoryProvider(ws, semester=semester, delay=slow_delay)
-    elif variant in {"grade-slow", "grade-recovery"}:
-        from .fake_workspace import EXERCISE_GENERATED, paragraph, text_piece
-
-        def heading_3(text):
-            return {
-                "object": "block",
-                "type": "heading_3",
-                "heading_3": {"rich_text": [text_piece(text)]},
-            }
-        ws.children[EXERCISE_GENERATED] = [
-            heading_3("\u7b2c\u4e00\u9898"), paragraph("\u7b54\u6848\uff1aA"),
-            heading_3("\u7b2c\u4e8c\u9898"), paragraph("\u7b54\u6848\uff1a\u6b63\u786e"),
-        ]
+    elif variant in _PENDING_GRADE_VARIANTS:
+        # The folder loads normally; only the generated exercise carries
+        # answered blocks (待批改). The fake platform bridge supplies the
+        # variant-specific relay 402 / 502 behavior in the CLI wiring.
+        _seed_pending_grade_answers(ws)
         provider = PanelDirectoryProvider(ws, semester=semester)
     elif variant == "fault":
         # a second plausible current-semester hub → discovery ambiguity (like
@@ -231,7 +270,8 @@ def build_fake_directory(
         provider = ExerciseFaultLaunchProvider(ws, semester=semester)
     elif variant == "exercise-missing":
         provider = ExerciseMissingIdentityProvider(ws, semester=semester)
-    else:  # low-balance changes only the platform fixture in cli.py
+    else:  # organize-blocked keeps a fully normal directory; the fake relay
+        # injection (quiz 502) supplies the blocked result in the CLI wiring.
         provider = PanelDirectoryProvider(ws, semester=semester)
     return DirectoryService(provider, clock=clock)
 
