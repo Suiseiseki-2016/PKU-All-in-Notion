@@ -64,6 +64,10 @@ class OrganizeJobController:
             result = {"status": "blocked", "reason": exc.reason, "retryable": True}
             if exc.output:
                 result["output"] = exc.output
+            # Bounded raw relay content is attached only on an e2e-mode
+            # parse failure, so normal-mode payloads stay unchanged.
+            if exc.raw_content:
+                result["raw_content"] = exc.raw_content
         except Exception:
             result = {"status": "blocked", "reason": "练习整理没有完成，请稍后重试。", "retryable": True}
         with self._lock:

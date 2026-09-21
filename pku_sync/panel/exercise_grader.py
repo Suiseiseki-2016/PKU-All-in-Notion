@@ -15,7 +15,7 @@ from typing import Any
 from ..notion import get_client, markdown_to_blocks, normalize_code_language, prop_title
 from ..notion_meta import ANSWER_AREA_MARKERS, GRADING_MARKERS
 from .exercises import exercise_scope
-from .llm_json import unwrap_single_json_fence
+from .llm_json import extract_single_json_payload
 
 GRADE_ESTIMATE_LABEL = "预计 1–5 AI 点 · 完成后按实际用量结算"
 INCOMPLETE_ANSWERS_REASON = "答案尚未填写完整，请先在 Notion 完成作答。"
@@ -811,7 +811,9 @@ def _same_page_id(left: str, right: str) -> bool:
 
 def _score(content: Any) -> float:
     try:
-        value = json.loads(content) if isinstance(content, str) else content
+        # The legacy score path shares the same bounded recovery so a
+        # fenced or prose-wrapped score object is not lost after charge.
+        value = extract_single_json_payload(content)
     except (TypeError, ValueError) as exc:
         raise GradeBlocked("AI 返回的批改结果不完整，请重试。") from exc
     score = value.get("score") if isinstance(value, dict) else None
@@ -822,13 +824,9 @@ def _score(content: Any) -> float:
 
 def _result_contract_version(content: Any) -> str | None:
     try:
-        # Exactly one fenced wrapper around the contract response is
-        # tolerated so the version stays detectable; anything else is not.
-        value = (
-            json.loads(unwrap_single_json_fence(content))
-            if isinstance(content, str)
-            else content
-        )
+        # Bounded prose around exactly one JSON object keeps the contract
+        # version detectable; anything else is not a contract response.
+        value = extract_single_json_payload(content)
     except (TypeError, ValueError):
         return None
     if not isinstance(value, dict):
@@ -862,13 +860,9 @@ def _validate_grade_result(content: Any) -> dict[str, Any]:
     wrong_answer_key and an earned_points that did not match its own rows).
     """
     try:
-        # Exactly one fenced wrapper around an otherwise-contract-valid
-        # response is unwrapped here; all validation below is unchanged.
-        value = (
-            json.loads(unwrap_single_json_fence(content))
-            if isinstance(content, str)
-            else content
-        )
+        # The shared bounded recovery tolerates one fence and bounded prose
+        # around exactly one JSON object; all validation below is unchanged.
+        value = extract_single_json_payload(content)
     except (TypeError, ValueError) as exc:
         raise GradeBlocked(GRADE_RESULT_INVALID_REASON) from exc
     if not isinstance(value, dict) or value.get("contract_version") != GRADE_RESULT_CONTRACT_VERSION:

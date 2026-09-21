@@ -1,12 +1,18 @@
-"""Additive fence-tolerance coverage for the grader's pku-e2e-grade-v1 gate.
+"""Additive fence/prose-tolerance coverage for the grader's pku-e2e-grade-v1 gate.
 
 One stray Markdown code fence around an otherwise contract-valid grade
 response is unwrapped and accepted; a second fence, a nested fence, malformed
 JSON inside the wrapper, or any contract-invalid content is rejected exactly
 as today, after the charge but before any Notion write or wrong-answer
-registration. A durable resume from persisted raw fenced content completes
-without a second relay call. All relays are deterministic fakes — no real
-LLM, Notion, or other spend.
+registration. The shared bounded recovery layer (``extract_single_json_payload``)
+additionally tolerates bounded non-object text around EXACTLY ONE JSON object
+— leading prose and trailing commentary, raw or fenced, CRLF variants — for
+every grade gate: ``_result_contract_version``, ``_validate_grade_result``, and
+the legacy ``_score`` path. Multiple objects, an unterminated or non-json
+fence, prose with no object, and non-object JSON top levels stay rejected
+with today's reasons. A durable resume from persisted raw fenced or
+prose-wrapped content completes without a second relay call. All relays are
+deterministic fakes — no real LLM, Notion, or other spend.
 """
 from __future__ import annotations
 
@@ -20,8 +26,10 @@ from pku_sync.panel.exercise_grader import (
     GRADE_RESULT_CONTRACT_VERSION,
     ExerciseGrader,
     FakeGradingPageAdapter,
+    GradeBlocked,
     GradeSettlementError,
     GradingInput,
+    _score,
 )
 from pku_sync.panel.exercises import JsonGradingRecordStore
 from pku_sync.panel.fake_directory import build_fake_directory
@@ -145,6 +153,90 @@ def test_single_fence_around_contract_valid_grade_is_unwrapped_and_accepted(wrap
     summary = grader.grade(grader.prepare(EXERCISE_GENERATED))
 
     _assert_accepted(summary, relay, adapter)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "批改完成，结果如下：\n{p}",
+        "{p}\n以上是全部批改结果。",
+        "批改完成：\r\n{p}\r\n以上。",
+        "结果如下：\n```json\n{p}\n```\n以上是全部批改结果。",
+        "这是批改结果：\n```JSON\n{p}\n```",
+    ],
+)
+def test_prose_around_contract_valid_grade_is_recovered_and_accepted(content):
+    grader, relay, adapter = make_grader(content.replace("{p}", result_json()))
+
+    summary = grader.grade(grader.prepare(EXERCISE_GENERATED))
+
+    _assert_accepted(summary, relay, adapter)
+
+
+def test_prose_wrapped_contract_version_is_detected_without_adapter_contract_flag():
+    grader, relay, adapter = make_grader(f"批改结果如下：\n{result_json()}\n以上。")
+    target, grading_input = grader.prepare(EXERCISE_GENERATED)
+    prepared = (
+        target,
+        GradingInput(
+            prompt=grading_input.prompt,
+            unanswered=[],
+            answer_fingerprint="fixture-answers-v1",
+            answer_provenance="known",
+        ),
+    )
+
+    summary = grader.grade(prepared)
+
+    _assert_accepted(summary, relay, adapter)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "示例：{\"example\": true}\n\n正式结果：{p}",
+        "结果：{p}，另一份：{p}",
+        "批改说明：这里没有任何 JSON 对象。",
+        "```json\n{p}",
+        "以下是分数列表：\n[50, 60]\n以上。",
+        "```python\n{p}\n```",
+    ],
+)
+def test_loose_shapes_stay_rejected_after_charge_without_write(content):
+    grader, relay, adapter = make_grader(content.replace("{p}", result_json()))
+
+    with pytest.raises(
+        GradeSettlementError, match="AI 返回的批改结果不完整，请重试。"
+    ) as raised:
+        grader.grade(grader.prepare(EXERCISE_GENERATED))
+
+    assert raised.value.points_charged == 2.0 and relay.calls == 1
+    assert adapter.write_calls == [] and adapter.wrong_answer_calls == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{\"score\": 75}",
+        "```json\n{\"score\": 75}\n```",
+        "分数如下：{\"score\": 75}，请查收。",
+        "分数：\r\n{\"score\": 75}\r\n以上。",
+    ],
+)
+def test_legacy_score_path_shares_the_bounded_recovery(content):
+    assert _score(content) == 75
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "两个分数：{\"score\": 1} 和 {\"score\": 2}",
+        "这里没有分数。",
+    ],
+)
+def test_legacy_score_path_still_rejects_ambiguous_content(content):
+    with pytest.raises(GradeBlocked, match="AI 返回的批改结果不完整，请重试。"):
+        _score(content)
 
 
 def test_fenced_contract_version_is_detected_without_adapter_contract_flag():
@@ -276,6 +368,52 @@ def test_durable_resume_from_persisted_fenced_content_needs_no_second_relay_call
     ]
     # The completed durable record keeps settlement and metadata only
     # ("content" is transient by design), proving durable convergence.
+    record = store.snapshot()["exercise-page"]
+    assert record["status"] == "graded" and record["phase"] == "completed"
+    assert record["points_charged"] == 2.0 and "content" not in record
+
+
+def test_durable_resume_from_persisted_prose_wrapped_content_needs_no_second_relay_call(tmp_path):
+    store = JsonGradingRecordStore(tmp_path / "grading_records.json")
+    charged = {
+        "version": 2, "status": "pending", "phase": "relay_succeeded",
+        "operation_id": "prose-op-1", "operation": "grade",
+        "page_id": "exercise-page", "page_url": "https://www.notion.so/exercise-page",
+        "course_id": "course-page", "course_title": "计算机网络",
+        "title": "[E2E] 五题批改契约", "scope": "考前练习",
+        "answer_fingerprint": "fixture-answers-v1", "answer_provenance": "known",
+        "regrade": False, "result_marker": "E2E_GRADE_RESULT",
+        "result_contract": GRADE_RESULT_CONTRACT_VERSION,
+        "content": f"批改完成，结果如下：\n{result_json()}\n以上是全部批改结果。",
+        "points_charged": 2.0,
+        "points_remaining": 18.0,
+        "result_page_url": "https://www.notion.so/exercise-page",
+        "graded_at": GRADED_AT,
+    }
+    store.put("exercise-page", charged)
+    directory = DirectoryStub(store)
+    relay = Relay(fenced(result_json()))
+    adapter = FakeGradingPageAdapter()
+    grader = ExerciseGrader(
+        directory_service=directory,
+        relay=relay,
+        page_adapter=adapter,
+        clock=lambda: GRADED_AT,
+    )
+
+    summary = grader.grade(grader.prepare("exercise-page"))
+
+    # The charged prose-wrapped operation completes from durable state
+    # with zero relay calls and the contract content normalized.
+    assert relay.calls == 0
+    assert summary["status"] == "completed" and summary["score"] == 50
+    assert summary["points_charged"] == 2.0 and summary["points_remaining"] == 18.0
+    written = json.loads(adapter.write_calls[0]["content"])
+    assert written["contract_version"] == GRADE_RESULT_CONTRACT_VERSION
+    assert adapter.wrong_answer_calls == [
+        ("dedup", "Q2"), ("create", "Q2"),
+        ("dedup", "Q5"), ("create", "Q5"),
+    ]
     record = store.snapshot()["exercise-page"]
     assert record["status"] == "graded" and record["phase"] == "completed"
     assert record["points_charged"] == 2.0 and "content" not in record

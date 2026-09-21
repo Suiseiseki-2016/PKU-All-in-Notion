@@ -5,10 +5,13 @@ Panel responses and the directory retain metadata and settlement only.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
+import os
 import re
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,7 +20,7 @@ from ..notion import get_client, markdown_to_blocks
 from ..notion_meta import ExerciseEntity
 from ..notion_meta.titles import is_exercise_title
 from ..pipeline import collect_jobs, recording_stage
-from .llm_json import unwrap_single_json_fence
+from .llm_json import extract_single_json_payload
 
 ESTIMATE_LABEL = "预计 1–5 AI 点 · 完成后按实际用量结算"
 ESTIMATE_MIN_POINTS = 1
@@ -25,6 +28,7 @@ ESTIMATE_MAX_POINTS = 5
 MAX_NOTE_CHARS = 12000
 MAX_PROMPT_CHARS = 100000
 MAX_AGENT_OUTPUT_CHARS = 2000
+MAX_PARSE_FAILURE_CAPTURE_BYTES = 8192
 E2E_TITLE_PREFIX = "[E2E] "
 QUESTION_TYPES = frozenset({"选择", "判断", "填空", "简答", "论述"})
 _E2E_TITLE_RE = re.compile(r"^(?:\[E2E\]\s*)+")
@@ -32,11 +36,15 @@ _AGENT_MARKER = re.compile(r"^TUI_RESULT=(success|blocked)(?:\s+reason=(.*))?\s*
 
 
 class OrganizeBlocked(RuntimeError):
-    def __init__(self, status_code: int, reason: str, *, output: str = ""):
+    def __init__(self, status_code: int, reason: str, *, output: str = "",
+                 raw_content: str = ""):
         super().__init__(reason)
         self.status_code = status_code
         self.reason = reason
         self.output = output[:MAX_AGENT_OUTPUT_CHARS]
+        # Bounded raw relay content attached only on an e2e-mode parse
+        # failure so a charged op leaves evidence in the blocked payload.
+        self.raw_content = bound_relay_content(raw_content)
 
     @classmethod
     def from_relay_status(cls, status: int) -> "OrganizeBlocked":
@@ -88,6 +96,44 @@ def agent_dispatch_result(run, *, preserve_output: bool = False) -> AgentDispatc
         reason = (marker.group(2) or "\u4ee3\u7406\u672a\u6267\u884c\u6574\u7406\u3002").strip()
         return AgentDispatchResult("blocked", reason[:300], output)
     return AgentDispatchResult("success")
+
+
+def bound_relay_content(content: Any, *,
+                        limit_bytes: int = MAX_PARSE_FAILURE_CAPTURE_BYTES) -> str:
+    """First UTF-8 bounded slice of the raw relay content, evidence only.
+
+    The slice never ends inside a codepoint, and the only input is the
+    metered relay response text — no credentials can appear by construction.
+    """
+    if not isinstance(content, str):
+        return ""
+    raw = content.encode("utf-8")[:limit_bytes]
+    while raw:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = raw[:-1]
+    return ""
+
+
+def persist_parse_failure(directory: Path, content: Any) -> None:
+    """Write one read-only evidence file holding the bounded raw quiz content.
+
+    A diagnostics write must never mask the original blocked reason, so any
+    filesystem failure is swallowed. Each failure gets its own unique file,
+    made read-only after writing.
+    """
+    bounded = bound_relay_content(content)
+    if not bounded:
+        return
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        path = directory / f"quiz-parse-{stamp}-{uuid.uuid4().hex[:8]}.txt"
+        path.write_text(bounded, encoding="utf-8")
+        os.chmod(path, 0o444)
+    except OSError:
+        pass
 
 
 class MemoryOrganizeRecordStore:
@@ -184,13 +230,10 @@ def _prompt(course_title: str, lecture_titles: list[str], notes: list[dict]) -> 
 
 def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
     try:
-        # Exactly one fenced wrapper around an otherwise-valid quiz is
-        # tolerated; every other shape fails here exactly as before.
-        value = (
-            json.loads(unwrap_single_json_fence(content))
-            if isinstance(content, str)
-            else content
-        )
+        # The shared bounded recovery tolerates one fence and bounded prose
+        # around exactly one JSON object (raw or fenced, CRLF included);
+        # every other shape fails here exactly as before.
+        value = extract_single_json_payload(content)
     except (TypeError, ValueError) as exc:
         raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。") from exc
     if not isinstance(value, dict) or not isinstance(value.get("questions"), list):
@@ -232,7 +275,8 @@ def _blocks(questions: list[dict]) -> list[dict]:
 class ExerciseOrganizer:
     def __init__(self, *, directory_service, relay, page_adapter, notes_provider,
                  record_store=None, agent_dispatcher: Callable[[dict], Any] | None = None,
-                 preserve_agent_output: bool = False, e2e_enabled: bool = False):
+                 preserve_agent_output: bool = False, e2e_enabled: bool = False,
+                 parse_failure_dir: Path | None = None):
         self.directory_service = directory_service
         self.relay = relay
         self.page_adapter = page_adapter
@@ -241,6 +285,9 @@ class ExerciseOrganizer:
         self.agent_dispatcher = agent_dispatcher
         self.preserve_agent_output = bool(preserve_agent_output and agent_dispatcher is not None)
         self.e2e_enabled = e2e_enabled
+        self.parse_failure_dir = (
+            Path(parse_failure_dir) if parse_failure_dir is not None else None
+        )
         self._lock = threading.Lock()
 
     def estimate(self) -> dict:
@@ -299,7 +346,16 @@ class ExerciseOrganizer:
             except Exception as exc:
                 status = getattr(exc, "status_code", 503)
                 raise OrganizeBlocked(status, str(exc) or "云端服务暂时不可用，请稍后重试。") from exc
-            title, questions = _parse_quiz(relay_result.get("content"))
+            try:
+                title, questions = _parse_quiz(relay_result.get("content"))
+            except OrganizeBlocked as exc:
+                # A charged operation lost at parse leaves bounded raw
+                # evidence on disk, and echoes it only in e2e_mode.
+                if self.parse_failure_dir is not None:
+                    persist_parse_failure(self.parse_failure_dir, relay_result.get("content"))
+                if e2e_mode:
+                    exc.raw_content = bound_relay_content(relay_result.get("content"))
+                raise
             charge = relay_result.get("points_charged")
             if not isinstance(charge, (int, float)):
                 raise OrganizeBlocked(502, "云端没有返回本次用量，请重试。")
@@ -346,11 +402,14 @@ def make_organizer_service(settings, directory_service, relay):
         record_store=JsonOrganizeRecordStore(
             Path(settings.data_dir) / "panel" / "organized_exercises.json"
         ),
+        parse_failure_dir=Path(settings.data_dir) / "panel" / "organize_failures",
     )
 
 
 __all__ = ["ESTIMATE_LABEL", "ESTIMATE_MIN_POINTS", "ESTIMATE_MAX_POINTS",
-           "MAX_AGENT_OUTPUT_CHARS", "E2E_TITLE_PREFIX", "QUESTION_TYPES",
+           "MAX_AGENT_OUTPUT_CHARS", "MAX_PARSE_FAILURE_CAPTURE_BYTES",
+           "E2E_TITLE_PREFIX", "QUESTION_TYPES",
            "OrganizeBlocked", "AgentDispatchResult", "agent_dispatch_result",
+           "bound_relay_content", "persist_parse_failure",
            "MemoryOrganizeRecordStore", "JsonOrganizeRecordStore", "LocalNotesProvider",
            "RealPageAdapter", "ExerciseOrganizer", "make_organizer_service"]
