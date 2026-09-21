@@ -811,7 +811,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / grade-slow / grade-recovery / low-balance / grade-502 / organize-blocked / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / exercise-fault-launch / exercise-missing（需配合 --fake）",
+            help="演示状态：normal / slow / grade-slow / grade-recovery / low-balance / grade-502 / organize-blocked / organize-agent-missing / organize-agent-blocked / organize-agent-mcp-down / organize-agent-timeout / organize-agent-multiple / organize-agent-recovery / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / exercise-fault-launch / exercise-missing（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:

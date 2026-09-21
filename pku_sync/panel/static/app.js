@@ -19,7 +19,7 @@
   var state = {
     activated: false,
     quota: null,
-    organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "" },
+    organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "", output: "" },
     exerciseLaunch: null,
     answerLaunches: {},
     grading: { exerciseId: null, title: "", status: "idle", jobId: null, result: null, blocked: "", unanswered: [] },
@@ -676,7 +676,7 @@
     if (state.organize.working) {
       status = '<div class="organize-status" aria-live="polite" aria-busy="true"><span class="spinner" aria-hidden="true"></span><strong>' + esc(copy.working) + '</strong></div>';
     } else if (state.organize.blocked) {
-      status = '<div class="organize-status error" role="alert"><strong>' + esc(copy.blocked) + '</strong><p>' + esc(state.organize.blocked) + '</p>' + button(copy.retry, "organize-retry", { small: true, primary: true }) + '</div>';
+      status = '<div class="organize-status error" role="alert" aria-live="polite"><strong>' + esc(copy.blocked) + '</strong><p>' + esc(state.organize.blocked) + '</p>' + (state.organize.output ? '<pre class="organize-output">' + esc(state.organize.output) + '</pre>' : '') + button(copy.retry, "organize-retry", { small: true, primary: true }) + '</div>';
     } else if (state.organize.result) {
       status = '<div class="organize-status success" aria-live="polite"><strong>' + esc(copy.completed) + '</strong><span class="cost-pill">' + esc(template(copy.settlement, { points: state.organize.result.points_charged })) + '</span></div>';
     }
@@ -1538,9 +1538,10 @@
     render();
   }
 
-  function blockOrganize(reason) {
+  function blockOrganize(reason, output) {
     state.organize.working = false;
     state.organize.blocked = reason || COPY.directory.exercises.organize.blocked;
+    state.organize.output = output || "";
     render();
   }
 
@@ -1548,7 +1549,7 @@
     var copy = COPY.directory.exercises.organize;
     var pollAttempts = attempts || 0;
     if (!result.ok || !result.body || result.body.status === "blocked") {
-      blockOrganize(result.body && (result.body.reason || result.body.detail) || copy.blocked);
+      blockOrganize(result.body && (result.body.reason || result.body.detail) || copy.blocked, result.body && result.body.output);
       return Promise.resolve();
     }
     if (result.body.status === "running") {
@@ -1570,6 +1571,7 @@
       return Promise.resolve();
     }
     state.organize.working = false;
+    state.organize.output = "";
     state.organize.result = result.body;
     if (state.quota && typeof result.body.points_remaining === "number") {
       state.quota.llm_points_remaining = result.body.points_remaining;
@@ -1588,6 +1590,7 @@
     }
     state.organize.working = true;
     state.organize.blocked = "";
+    state.organize.output = "";
     state.organize.result = null;
     render();
     return requestJson("/api/exercises/organize", {
@@ -1802,8 +1805,8 @@
     else if (action === "open-dashboard") openDashboard();
     else if (action === "organize-open") organizeOpen();
     else if (action === "organize-confirm") organizeConfirm();
-    else if (action === "organize-cancel") { state.organize.open = false; state.organize.blocked = ""; render(); }
-    else if (action === "organize-retry") { state.organize.blocked = ""; state.organize.open = true; render(); }
+    else if (action === "organize-cancel") { state.organize.open = false; state.organize.blocked = ""; state.organize.output = ""; render(); }
+    else if (action === "organize-retry") { state.organize.blocked = ""; state.organize.output = ""; state.organize.open = true; render(); }
     else if (action === "open-course") openCourse(target.dataset.course);
     else if (action === "select-lecture") {
       selectLecture(target.dataset.course, target.dataset.lecture);

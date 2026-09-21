@@ -62,6 +62,8 @@ class OrganizeJobController:
                 result = self.service.organize(request.course_id, request.lecture_ids)
         except OrganizeBlocked as exc:
             result = {"status": "blocked", "reason": exc.reason, "retryable": True}
+            if exc.output:
+                result["output"] = exc.output
         except Exception:
             result = {"status": "blocked", "reason": "练习整理没有完成，请稍后重试。", "retryable": True}
         with self._lock:

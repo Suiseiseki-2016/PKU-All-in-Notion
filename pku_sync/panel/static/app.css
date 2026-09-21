@@ -964,6 +964,7 @@ h1, h2, h3, p { margin-top: 0; }
 .organize-status { flex-basis: 100%; display: flex; align-items: center; gap: 12px; padding: 12px 15px; border-radius: 12px; background: #edf7ef; color: var(--green-deep); }
 .organize-status.error { align-items: flex-start; flex-wrap: wrap; background: var(--rose-pale); color: var(--rose); }
 .organize-status.error p { flex-basis: 100%; color: inherit; }
+.organize-output { flex-basis: 100%; max-height: 140px; overflow: auto; margin: 0; padding: 11px 13px; border: 1px solid #e6bdc2; border-radius: 9px; color: var(--ink); background: var(--paper); font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .organize-status.success { justify-content: space-between; }
 .exercise-directory { display: grid; gap: 12px; }
 .exercise-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-sm); }

@@ -24,6 +24,7 @@ ESTIMATE_MIN_POINTS = 1
 ESTIMATE_MAX_POINTS = 5
 MAX_NOTE_CHARS = 12000
 MAX_PROMPT_CHARS = 100000
+MAX_AGENT_OUTPUT_CHARS = 2000
 E2E_TITLE_PREFIX = "[E2E] "
 QUESTION_TYPES = frozenset({"选择", "判断", "填空", "简答", "论述"})
 _E2E_TITLE_RE = re.compile(r"^(?:\[E2E\]\s*)+")
@@ -31,10 +32,11 @@ _AGENT_MARKER = re.compile(r"^TUI_RESULT=(success|blocked)(?:\s+reason=(.*))?\s*
 
 
 class OrganizeBlocked(RuntimeError):
-    def __init__(self, status_code: int, reason: str):
+    def __init__(self, status_code: int, reason: str, *, output: str = ""):
         super().__init__(reason)
         self.status_code = status_code
         self.reason = reason
+        self.output = output[:MAX_AGENT_OUTPUT_CHARS]
 
     @classmethod
     def from_relay_status(cls, status: int) -> "OrganizeBlocked":
@@ -51,22 +53,40 @@ class OrganizeBlocked(RuntimeError):
 class AgentDispatchResult:
     status: str
     reason: str = ""
+    output: str = ""
 
 
-def agent_dispatch_result(run) -> AgentDispatchResult:
-    """Translate the established TUI_RESULT protocol without inventing success."""
-    output = run.output or ""
-    markers = list(_AGENT_MARKER.finditer(output))
+def _bounded_agent_output(run, *, preserve_output: bool) -> str:
+    """Return output only for an explicitly controlled fake/test dispatcher."""
+    if not preserve_output:
+        return ""
+    output = run.output if isinstance(run.output, str) else ""
+    return output[:MAX_AGENT_OUTPUT_CHARS]
+
+
+def agent_dispatch_result(run, *, preserve_output: bool = False) -> AgentDispatchResult:
+    """Translate TUI_RESULT without exposing production stdout or inventing success."""
+    raw_output = run.output if isinstance(run.output, str) else ""
+    output = _bounded_agent_output(run, preserve_output=preserve_output)
+    markers = list(_AGENT_MARKER.finditer(raw_output))
     if run.returncode != 0:
-        reason = (run.stderr or output or f"agent exit {run.returncode}").strip()
-        return AgentDispatchResult("blocked", reason)
+        if not preserve_output:
+            legacy_reason = (run.stderr or raw_output or f"agent exit {run.returncode}").strip()
+            return AgentDispatchResult("blocked", legacy_reason)
+        reasons = {
+            69: "\u7ec3\u4e60\u6574\u7406\u4ee3\u7406\u65e0\u6cd5\u8fde\u63a5 MCP\uff0c\u672a\u6267\u884c\u6574\u7406\u3002",
+            124: "\u7ec3\u4e60\u6574\u7406\u4ee3\u7406\u7b49\u5f85\u8d85\u65f6\uff0c\u672a\u6267\u884c\u6574\u7406\u3002",
+        }
+        reason = reasons.get(run.returncode, "\u7ec3\u4e60\u6574\u7406\u4ee3\u7406\u672a\u5b8c\u6210\uff0c\u672a\u6267\u884c\u6574\u7406\u3002")
+        return AgentDispatchResult("blocked", reason, output)
     if not markers:
-        return AgentDispatchResult("blocked", "代理返回缺少 TUI_RESULT 标记。")
+        return AgentDispatchResult("blocked", "\u4ee3\u7406\u8fd4\u56de\u7f3a\u5c11 TUI_RESULT \u6807\u8bb0\u3002", output)
     if len(markers) != 1:
-        return AgentDispatchResult("blocked", "代理返回了多个 TUI_RESULT 标记。")
+        return AgentDispatchResult("blocked", "\u4ee3\u7406\u8fd4\u56de\u4e86\u591a\u4e2a TUI_RESULT \u6807\u8bb0\u3002", output)
     marker = markers[0]
     if marker.group(1) == "blocked":
-        return AgentDispatchResult("blocked", (marker.group(2) or "代理未执行整理。").strip())
+        reason = (marker.group(2) or "\u4ee3\u7406\u672a\u6267\u884c\u6574\u7406\u3002").strip()
+        return AgentDispatchResult("blocked", reason[:300], output)
     return AgentDispatchResult("success")
 
 
@@ -212,13 +232,14 @@ def _blocks(questions: list[dict]) -> list[dict]:
 class ExerciseOrganizer:
     def __init__(self, *, directory_service, relay, page_adapter, notes_provider,
                  record_store=None, agent_dispatcher: Callable[[dict], Any] | None = None,
-                 e2e_enabled: bool = False):
+                 preserve_agent_output: bool = False, e2e_enabled: bool = False):
         self.directory_service = directory_service
         self.relay = relay
         self.page_adapter = page_adapter
         self.notes_provider = notes_provider
         self.record_store = record_store or MemoryOrganizeRecordStore()
         self.agent_dispatcher = agent_dispatcher
+        self.preserve_agent_output = bool(preserve_agent_output and agent_dispatcher is not None)
         self.e2e_enabled = e2e_enabled
         self._lock = threading.Lock()
 
@@ -261,9 +282,11 @@ class ExerciseOrganizer:
                   "course_name": course.title, "lecture_ids": clean_lectures,
                   "e2e_mode": e2e_mode}
         if self.agent_dispatcher is not None:
-            dispatch = agent_dispatch_result(self.agent_dispatcher(target))
+            dispatch = agent_dispatch_result(
+                self.agent_dispatcher(target), preserve_output=self.preserve_agent_output
+            )
             if dispatch.status != "success":
-                raise OrganizeBlocked(400, dispatch.reason)
+                raise OrganizeBlocked(400, dispatch.reason, output=dispatch.output)
 
         with self._lock:
             previous = self.record_store.get(key)
@@ -327,7 +350,7 @@ def make_organizer_service(settings, directory_service, relay):
 
 
 __all__ = ["ESTIMATE_LABEL", "ESTIMATE_MIN_POINTS", "ESTIMATE_MAX_POINTS",
-           "E2E_TITLE_PREFIX", "QUESTION_TYPES",
+           "MAX_AGENT_OUTPUT_CHARS", "E2E_TITLE_PREFIX", "QUESTION_TYPES",
            "OrganizeBlocked", "AgentDispatchResult", "agent_dispatch_result",
            "MemoryOrganizeRecordStore", "JsonOrganizeRecordStore", "LocalNotesProvider",
            "RealPageAdapter", "ExerciseOrganizer", "make_organizer_service"]
