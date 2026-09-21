@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from ..notion import get_client, markdown_to_blocks, prop_title
+from ..notion import get_client, markdown_to_blocks, normalize_code_language, prop_title
 from ..notion_meta import ANSWER_AREA_MARKERS, GRADING_MARKERS
 from .exercises import exercise_scope
 from .llm_json import unwrap_single_json_fence
@@ -1207,7 +1207,22 @@ def _validated_append_plan(
         raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u8ba1\u5212\u65e0\u6548\uff0c\u672a\u4fee\u6539 Notion\u3002")
     if any(not _blocks_equal(left, right) for left, right in zip(stored, expected)):
         raise GradeBlocked("\u6279\u6539\u7ed3\u679c\u5199\u5165\u8ba1\u5212\u4e0d\u5339\u914d\uff0c\u672a\u4fee\u6539 Notion\u3002")
-    return copy.deepcopy(stored)
+    # Stored append plans written before the writer emitted code.language are
+    # normalized here — a bounded backfill scoped to the exact plan about to be
+    # appended, so a durable retry never re-sends a language-less code block.
+    # Rich text and the reconciliation signature are preserved: the signature
+    # compares kind + plain text only, never language. The reference language
+    # comes from the identical freshly rendered envelope, so a fenced json
+    # envelope stays json.
+    plan = copy.deepcopy(stored)
+    for block, reference in zip(plan, expected):
+        if block.get("type") == "code":
+            ref_code = reference.get("code") if isinstance(reference, dict) else None
+            if isinstance(ref_code, dict):
+                block.setdefault("code", {})["language"] = normalize_code_language(
+                    ref_code.get("language")
+                )
+    return plan
 
 
 def _looks_app_owned_result_block(block: dict[str, Any]) -> bool:

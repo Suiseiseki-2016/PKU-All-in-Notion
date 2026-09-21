@@ -366,6 +366,81 @@ def get_client(settings=None) -> NotionClient:
 
 # -- markdown → blocks ------------------------------------------------------
 
+CODE_LANGUAGE_PLAIN_TEXT = "plain text"
+
+# Notion blocks API ``code.language`` enum values (documented, stable). The
+# API rejects any other value and also rejects a code block without the key
+# (400 validation_error `code.language should be defined`), so every emitted
+# code block must resolve into this set.
+_CODE_LANGUAGES = frozenset({
+    "abap", "arduino", "bash", "basic", "c", "clojure", "coffeescript",
+    "c++", "c#", "css", "dart", "diff", "docker", "elixir", "elm",
+    "erlang", "flow", "fortran", "f#", "gherkin", "glsl", "go", "graphql",
+    "groovy", "haskell", "html", "java", "javascript", "json", "julia",
+    "kotlin", "latex", "less", "lisp", "livescript", "lua", "makefile",
+    "markdown", "markup", "matlab", "mermaid", "nix", "objective-c",
+    "ocaml", "pascal", "perl", "php", CODE_LANGUAGE_PLAIN_TEXT, "powershell",
+    "prolog", "protobuf", "python", "r", "reason", "ruby", "rust", "sass",
+    "scala", "scheme", "scss", "shell", "sql", "swift", "typescript",
+    "vb.net", "verilog", "vhdl", "visual basic", "webassembly", "xml",
+    "yaml", "java/c/c++/c#",
+})
+
+# Common markdown fence languages → canonical Notion enum values. Anything in
+# ``_CODE_LANGUAGES`` passes through on its own; these aliases cover the
+# widespread spellings that are not enum values (``py``, ``js``, ``sh`` …).
+_CODE_LANGUAGE_ALIASES = {
+    "py": "python",
+    "py3": "python",
+    "python3": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "rb": "ruby",
+    "sh": "shell",
+    "zsh": "shell",
+    "yml": "yaml",
+    "md": "markdown",
+    "text": CODE_LANGUAGE_PLAIN_TEXT,
+    "txt": CODE_LANGUAGE_PLAIN_TEXT,
+    "plaintext": CODE_LANGUAGE_PLAIN_TEXT,
+    "cpp": "c++",
+    "csharp": "c#",
+    "cs": "c#",
+    "objc": "objective-c",
+    "objectivec": "objective-c",
+    "ps1": "powershell",
+    "dockerfile": "docker",
+    "make": "makefile",
+    "wasm": "webassembly",
+    "vb": "vb.net",
+}
+
+
+def normalize_code_language(language: str | None) -> str:
+    """Return a valid Notion ``code.language`` for a raw fence language value.
+
+    Supported fence languages pass through unchanged (``json`` stays
+    ``json``), common aliases map to their Notion enum value (``py`` →
+    ``python``), and unknown or empty values fall back to ``plain text``.
+    Matching is case-insensitive and ignores any trailing attribute text on
+    the fence info string. The result is always a documented enum value, so a
+    generated code block can never hit Notion's ``code.language should be
+    defined`` / invalid-value validation errors.
+    """
+    if not isinstance(language, str):
+        return CODE_LANGUAGE_PLAIN_TEXT
+    token = language.strip().split()
+    key = token[0].strip("`").lower() if token else ""
+    if not key:
+        return CODE_LANGUAGE_PLAIN_TEXT
+    if key in _CODE_LANGUAGE_ALIASES:
+        return _CODE_LANGUAGE_ALIASES[key]
+    if key in _CODE_LANGUAGES:
+        return key
+    return CODE_LANGUAGE_PLAIN_TEXT
+
 
 def markdown_to_blocks(markdown: str) -> list[dict]:
     """The Notion-flavored markdown subset used by the writer spec → blocks.
@@ -386,13 +461,18 @@ def markdown_to_blocks(markdown: str) -> list[dict]:
             continue
         if stripped.startswith("```"):
             code: list[str] = []
+            language = normalize_code_language(stripped[3:])
             i += 1
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 code.append(lines[i])
                 i += 1
             i += 1  # closing fence
             blocks.append(
-                {"object": "block", "type": "code", "code": {"rich_text": _rt("\n".join(code))}}
+                {
+                    "object": "block",
+                    "type": "code",
+                    "code": {"rich_text": _rt("\n".join(code)), "language": language},
+                }
             )
             continue
         m = _HEADING_RE.match(stripped)
