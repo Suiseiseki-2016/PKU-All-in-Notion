@@ -33,6 +33,11 @@ E2E_TITLE_PREFIX = "[E2E] "
 QUESTION_TYPES = frozenset({"选择", "判断", "填空", "简答", "论述"})
 _E2E_TITLE_RE = re.compile(r"^(?:\[E2E\]\s*)+")
 _AGENT_MARKER = re.compile(r"^TUI_RESULT=(success|blocked)(?:\s+reason=(.*))?\s*$", re.MULTILINE)
+# Real synced course.json names carry a trailing semester suffix
+# ("计算机网络(26-27学年第1学期)") while Notion course pages use the plain
+# title ("计算机网络"), so title resolution strips exactly one trailing
+# parenthesized term — half- or full-width — and nothing else.
+_TRAILING_TERM_RE = re.compile(r"(?:\([^()]*\)|（[^（）]*）)\Z")
 
 
 class OrganizeBlocked(RuntimeError):
@@ -175,16 +180,60 @@ class JsonOrganizeRecordStore(MemoryOrganizeRecordStore):
             temporary.replace(self.path)
 
 
+def normalize_course_title(name: str) -> str:
+    """Strip one trailing parenthesized semester suffix; nothing else."""
+    return _TRAILING_TERM_RE.sub("", name)
+
+
 class LocalNotesProvider:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
 
+    def _local_course_names(self, jobs) -> set[str]:
+        """Every local course name that could own a scope's notes.
+
+        course.json names cover synced courses even when they carry no
+        recordings (such a course still makes a title ambiguous); the
+        recording-job names cover courses without a course.json, whose
+        name falls back to the folder name.
+        """
+        names: set[str] = set()
+        for meta in sorted(self.data_dir.glob("*/course.json")):
+            try:
+                item = json.loads(meta.read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+            name = str(item.get("name") or "")
+            if name:
+                names.add(name)
+        names.update(job.course_name for job in jobs)
+        return names
+
+    def matching_course_names(self, course_title: str, jobs) -> set[str]:
+        """Guarded Notion-title → local-course-name resolution.
+
+        Precedent: ``submit.resolve_course_id`` — guarded name resolution
+        that refuses ambiguity. Exact local names win; otherwise a
+        semester-suffix-stripped match is accepted only when exactly one
+        local course normalizes to the Notion title, so zero or multiple
+        candidates never yield wrong-course notes.
+        """
+        local_names = self._local_course_names(jobs)
+        exact = {name for name in local_names if name == course_title}
+        if exact:
+            return exact
+        normalized = {name for name in local_names
+                      if normalize_course_title(name) == course_title}
+        return normalized if len(normalized) == 1 else set()
+
     def for_scope(self, *, course_title: str, lecture_titles: list[str]) -> list[dict]:
         wanted = {title.strip() for title in lecture_titles}
+        jobs = collect_jobs(self.data_dir)
+        matched = self.matching_course_names(course_title, jobs)
         notes: list[dict] = []
-        for job in collect_jobs(self.data_dir):
+        for job in jobs:
             stage, _ = recording_stage(job)
-            if job.course_name != course_title or stage != "notes_ready":
+            if job.course_name not in matched or stage != "notes_ready":
                 continue
             if wanted and job.recording.title.strip() not in wanted:
                 continue
@@ -410,6 +459,6 @@ __all__ = ["ESTIMATE_LABEL", "ESTIMATE_MIN_POINTS", "ESTIMATE_MAX_POINTS",
            "MAX_AGENT_OUTPUT_CHARS", "MAX_PARSE_FAILURE_CAPTURE_BYTES",
            "E2E_TITLE_PREFIX", "QUESTION_TYPES",
            "OrganizeBlocked", "AgentDispatchResult", "agent_dispatch_result",
-           "bound_relay_content", "persist_parse_failure",
+           "bound_relay_content", "persist_parse_failure", "normalize_course_title",
            "MemoryOrganizeRecordStore", "JsonOrganizeRecordStore", "LocalNotesProvider",
            "RealPageAdapter", "ExerciseOrganizer", "make_organizer_service"]
