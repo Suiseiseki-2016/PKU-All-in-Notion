@@ -1259,9 +1259,13 @@ def cmd_grade(args) -> int:
             "graded_at_preserved": seeded["graded_at"],
         }
     _write_json(args.out, evidence)
-    print(
-        f"graded: score={summary.get('score')} charged={summary['points_charged']} "
+    quota_note = (
         f"quota {quota_before['llm_points_remaining']} -> {quota_after['llm_points_remaining']}"
+        if quota_before
+        else f"quota after {quota_after['llm_points_remaining']} (UI-triggered job)"
+    )
+    print(
+        f"graded: score={summary.get('score')} charged={summary['points_charged']} {quota_note}"
     )
     for check in checks:
         marker = "PASS" if check["result"] == "pass" else "FAIL"
