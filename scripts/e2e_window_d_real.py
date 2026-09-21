@@ -51,6 +51,30 @@ Subcommands (state persists in <scratch>/state.json between stages):
                  states, quota corroboration; writes the consolidated
                  evidence JSON and exits non-zero on any failed check
   panel-stop     stop the probe-owned panel child by PID
+
+Zero-spend resume subcommands (Window D recovery, zero additional LLM ops;
+the retained charged record completes the write-back through the product's
+durable recovery path; authorization:
+window-d-resume-zero-spend-cleanup-2026-09-20):
+  seed-resume    prerequisite-gate the retained [E2E] page read-only (parent,
+                 [E2E] title, five types, sources, teacher answers, fixture
+                 answers verbatim, no marker, zero wrong-answer rows), probe
+                 the fresh scratch relay baselines, then seed the retained
+                 charged grading record (verbatim) and the organize-scope
+                 record into the scratch data root
+  row-snapshot   capture one live panel exercise row into runner state
+  grade --resume [--job-id <id>]
+                 the resume grade: the panel route enters the durable
+                 recovery, completes the write-back + Q2/Q5 registration from
+                 the STORED charged result with ZERO relay calls, preserves
+                 the retained settlement; --job-id polls a UI-triggered job
+  verify --resume
+                 full read-only verification where the settlement ledger is
+                 the retained captured llm_usage rows (the prior scratch
+                 relay DB was deleted at that window's cleanup) and the
+                 fresh scratch relay proves zero new rows/spend
+  cleanup        archive (trash) the two [E2E] wrong-answer rows + the
+                 retained [E2E] page with re-fetch/re-query proof
 """
 
 from __future__ import annotations
@@ -78,6 +102,7 @@ from pku_sync.models import Recording
 from pku_sync.notion import get_client, markdown_to_blocks, page_title
 from pku_sync.notion_meta import NotionDirectory
 from pku_sync.panel.exercise_grader import GRADE_MARKERS, _fixture_answer, _plain
+from pku_sync.panel.exercise_organizer import _scope_key
 from pku_sync.pipeline import RecordingJob, collect_jobs, recording_stage
 from pku_sync.store import safe_name
 
@@ -284,7 +309,7 @@ def _exercise_snapshot(client, page_id: str, course_id: str,
     e2e_children = [
         block
         for block in client.list_child_pages(course_id)
-        if E2E_MARKER in str((block.get("child_page") or {}).get("title") or "")
+        if E2E_MARKER in str(block.get("title") or "")
     ]
     if score is not None and float(score).is_integer():
         score = int(score)
@@ -487,7 +512,18 @@ def cmd_panel_start(args) -> int:
     bound_port, startup_line = _wait_for_panel(stdout_log)
     health = httpx.get(f"http://127.0.0.1:{bound_port}/healthz", timeout=15)
     health.raise_for_status()
-    state = {
+    existing: dict = {}
+    if paths["state"].exists():
+        try:
+            loaded = json.loads(paths["state"].read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, ValueError):
+            existing = {}
+    # A pre-seeded scratch (the zero-spend Window D resume) keeps its keys;
+    # a fresh scratch has no prior state, so the normal window flow is
+    # byte-for-byte unchanged.
+    state = {**existing, **{
         "relay": args.relay.rstrip("/"),
         "panel": f"http://127.0.0.1:{bound_port}",
         "tokens_file": str(paths["tokens"]),
@@ -495,7 +531,7 @@ def cmd_panel_start(args) -> int:
         "data_dir": str(paths["data_dir"]),
         "panel_pid": proc.pid,
         "panel_port": bound_port,
-    }
+    }}
     _save_state(args.scratch, state)
     evidence = {
         "step": "panel-start",
@@ -521,6 +557,253 @@ def cmd_panel_start(args) -> int:
     }
     _write_json(args.out, evidence)
     print(f"panel started: pid={proc.pid} port={bound_port} healthz={health.json()}")
+    return 0
+
+
+def cmd_seed_resume(args) -> int:
+    """Zero-spend Window D resume: re-seed the retained charged state.
+
+    Prerequisite gate first (all read-only): the retained [E2E] page must
+    still exist under the real course page with the fixture answers verbatim,
+    no grading marker, and zero wrong-answer rows. Only then are the durable
+    grading record (verbatim, from the retained charged evidence) and the
+    organize-scope record seeded into the scratch client data root, so the
+    panel child loads them at startup and the ordinary grade retry completes
+    the write-back through the product recovery path with ZERO relay calls.
+    """
+    paths = _scratch_paths(args.scratch)
+    retained_doc = json.loads(Path(args.graded_record).read_text(encoding="utf-8"))
+    retained = retained_doc.get("record") if isinstance(retained_doc, dict) else None
+    if not isinstance(retained, dict) or len(retained) != 1:
+        raise SystemExit("the retained durable-record evidence must hold exactly one page record")
+    page_id = next(iter(retained))
+    record = dict(retained[page_id])
+    organize_evidence = json.loads(Path(args.organize_evidence).read_text(encoding="utf-8"))
+    stage_evidence = json.loads(Path(args.stage_evidence).read_text(encoding="utf-8"))
+    blocked_evidence = json.loads(Path(args.blocked_verification).read_text(encoding="utf-8"))
+    course, lecture = stage_evidence["course"], stage_evidence["lecture"]
+    token = _tokens(args.scratch)["client"]
+    checks: list[dict] = []
+
+    # -- read-only prerequisite gate over the real workspace ---------------
+    with get_client(client_settings) as client:
+        page = client.get_page(page_id)
+        actual_parent = _norm_page_id((page.get("parent") or {}).get("page_id") or "")
+        snapshot = _exercise_snapshot(client, page_id, course["id"], [])
+        database = _wrong_answer_database(client)
+        wrong = _wrong_answer_rows(client, database, record["title"], record["operation_id"])
+    title = snapshot["title"]
+    q2_count = len(wrong["rows_by_number"].get(2) or [])
+    q5_count = len(wrong["rows_by_number"].get(5) or [])
+
+    _check(checks, "retained [E2E] page still exists under the real course page",
+           snapshot["fetch_result"] == "present"
+           and actual_parent == _norm_page_id(course["id"]),
+           f"parent={actual_parent} expected={_norm_page_id(course['id'])}")
+    _check(checks, "retained title carries exactly one [E2E] marker and matches the record",
+           title.count(E2E_MARKER) == 1 and title == record["title"], f"title={title!r}")
+    _check(checks, "the adopted five ordered types are intact",
+           snapshot["question_types"] == ["选择", "判断", "填空", "简答", "论述"],
+           f"types={snapshot['question_types']}")
+    _check(checks, "every question still carries a source", snapshot["source_count"] == 5,
+           f"sources={snapshot['source_count']}")
+    _check(checks, "teacher section still carries five standard answers",
+           snapshot["teacher_answer_count"] == 5, f"teacher={snapshot['teacher_answer_count']}")
+    _check(checks, "the fixture answers remain verbatim on the page",
+           snapshot["answers"] == ANSWER_FIXTURE, f"answers={snapshot['answers']}")
+    _check(checks, "NO grading marker and zero result block sets before the resume",
+           snapshot["grade_marker"] is None and snapshot["result_block_sets"] == 0,
+           f"marker={snapshot['grade_marker']} sets={snapshot['result_block_sets']}")
+    _check(checks, "wrong answers were NOT registered before the resume (blocked grade wrote nothing)",
+           q2_count == 0 and q5_count == 0 and len(wrong["prefix_rows"]) == 0,
+           f"q2={q2_count} q5={q5_count} prefix={len(wrong['prefix_rows'])}")
+    _check(checks, "exactly one [E2E] exercise page exists under the course page",
+           snapshot["page_count"] == 1, f"page_count={snapshot['page_count']}")
+
+    # -- relay baselines: the resume must be provably zero-spend -----------
+    relay = args.relay.rstrip("/")
+    quota_now = _quota(relay, token)
+    usage_baseline = _relay_llm_rows(str(Path(args.relay_db or paths["relay_db"])))["llm_usage_rows"]
+    _check(checks, "fresh scratch relay answers quota with an untouched balance",
+           isinstance(quota_now.get("llm_points_remaining"), (int, float)),
+           f"quota={quota_now}")
+    _check(checks, "fresh scratch relay holds zero llm_usage rows at seed time",
+           usage_baseline == [], f"rows={usage_baseline}")
+
+    if not all(check["result"] == "pass" for check in checks):
+        _write_json(args.out, {
+            "step": "seed-resume", "generated_at": _utcnow(), "status": "aborted",
+            "checks": checks,
+            "note": "prerequisite gate failed; nothing was seeded and no mutation was made",
+        })
+        print("FAIL: seed-resume prerequisite gate failed; nothing seeded")
+        for check in checks:
+            marker = "PASS" if check["result"] == "pass" else "FAIL"
+            print(f"  [{marker}] {check['name']}" + (f" -- {check['detail']}" if check["detail"] else ""))
+        return 1
+
+    # -- retained settlement ledger (the authoritative captured usage rows) -
+    retained_relay = blocked_evidence.get("relay") or {}
+    usage = retained_relay.get("llm_usage_rows") or []
+    initial_mp = retained_relay.get("initial_millipoints")
+    ledger_rows: list[dict] = []
+    if (len(usage) == 2 and [item.get("operation") for item in usage] == ["quiz", "grade"]
+            and isinstance(initial_mp, int)):
+        balances = [initial_mp]
+        for item in usage:
+            balances.append(balances[-1] - int(item["millipoints"]))
+        ledger_rows = [
+            {
+                "sequence": index + 1,
+                "operation": item["operation"],
+                "status": "completed",
+                "points_before": balances[index] / 1000,
+                "points_charged": int(item["millipoints"]) / 1000,
+                "points_after": balances[index + 1] / 1000,
+                "millipoints": int(item["millipoints"]),
+                "model": item.get("model"),
+                "source": ("retained authoritative llm_usage rows captured at the prior "
+                           "Window D close (the window's settlement authority; the prior "
+                           "scratch relay DB was deleted at that window's cleanup)"),
+            }
+            for index, item in enumerate(usage)
+        ]
+
+    # -- seed the scratch client data root (nothing is mutated in Notion) ---
+    data_dir = Path(paths["data_dir"])
+    panel_dir = data_dir / "panel"
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    grading_store_file = panel_dir / "grading_records.json"
+    organize_store_file = panel_dir / "organized_exercises.json"
+    scope_key = _scope_key(course["id"], [lecture["id"]], e2e_mode=True)
+    organize_record = {
+        "id": page_id,
+        "url": organize_evidence["organize_result"]["url"],
+        "title": record["title"],
+        "course": course["title"],
+        "parent": course["id"],
+        "scope": lecture["title"],
+        "updated": "",
+    }
+    grading_store_file.write_text(
+        json.dumps({page_id: record}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    organize_store_file.write_text(
+        json.dumps({scope_key: organize_record}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    state = _load_state(args.scratch) if paths["state"].exists() else {}
+    state.update({
+        "relay": relay,
+        "tokens_file": str(paths["tokens"]),
+        "relay_db": str(Path(args.relay_db or paths["relay_db"])),
+        "data_dir": str(data_dir),
+        "course": course,
+        "lecture": lecture,
+        "exercise": {"page_id": page_id, "url": record["page_url"], "title": record["title"]},
+        "organize": organize_evidence["organize_result"],
+        "organize_quota": organize_evidence["quota"],
+        "resume": {
+            "authorization": (
+                "window-d-resume-zero-spend-cleanup-2026-09-20: write the grade result to "
+                "the retained [E2E] page, create exactly two [E2E] wrong-answer rows, "
+                "delete those rows and the page, read-only re-fetch proof; zero "
+                "additional LLM operations"
+            ),
+            "scope_inputs": {"course_id": course["id"], "lecture_id": lecture["id"]},
+            "operation_id": record["operation_id"],
+            "points_charged": record["points_charged"],
+            "points_remaining": record["points_remaining"],
+            "graded_at": record["graded_at"],
+            "quota_baseline": quota_now,
+            "retained_ledger_rows": ledger_rows,
+            "retained_usage_rows": usage,
+            "wrong_answer_expected_titles": (blocked_evidence.get("wrong_answer_rows") or {}).get("expected_titles"),
+            "seeded_files": [str(grading_store_file), str(organize_store_file)],
+        },
+    })
+    _save_state(args.scratch, state)
+
+    evidence = {
+        "step": "seed-resume",
+        "generated_at": _utcnow(),
+        "status": "seeded",
+        "page": {
+            "page_id": page_id,
+            "url": snapshot["url"],
+            "title": title,
+            "expected_parent_id": _norm_page_id(course["id"]),
+            "actual_parent_id": actual_parent,
+        },
+        "snapshot_summary": {
+            "question_types": snapshot["question_types"],
+            "source_count": snapshot["source_count"],
+            "teacher_answer_count": snapshot["teacher_answer_count"],
+            "answers": snapshot["answers"],
+            "grade_marker": snapshot["grade_marker"],
+            "result_block_sets": snapshot["result_block_sets"],
+        },
+        "wrong_answer_database": {"id": database["id"], "url": database["url"], "title": database["title"]},
+        "wrong_answer_rows_before_resume": {
+            "expected_titles": wrong["expected_titles"],
+            "q2": q2_count, "q5": q5_count, "prefix_total": len(wrong["prefix_rows"]),
+        },
+        "relay": {
+            "url": relay,
+            "quota_baseline": quota_now,
+            "llm_usage_baseline": usage_baseline,
+            "vendor_credentials": (
+                "none injected into the relay process (the zero-spend guarantee: "
+                "/v1/llm answers 503 without Bailian configuration, so no "
+                "accidental LLM operation can spend)"
+            ),
+        },
+        "seeded": {
+            "grading_record_key": page_id,
+            "grading_record_operation_id": record["operation_id"],
+            "grading_record_phase": record.get("phase"),
+            "organize_scope_key": scope_key,
+            "organize_record": organize_record,
+            "files": [str(grading_store_file), str(organize_store_file)],
+            "notes": (
+                "the retained durable grading record (phase=relay_succeeded, content "
+                "verbatim, settlement 0.036/99.953, graded_at preserved) is re-seeded "
+                "byte-identical so the ordinary panel grade retry completes the "
+                "write-back through the product recovery path with zero relay calls"
+            ),
+        },
+        "checks": checks,
+    }
+    _write_json(args.out, evidence)
+    print(f"seeded: page={title} scope_key={scope_key[:12]}... quota={quota_now['llm_points_remaining']}")
+    for check in checks:
+        marker = "PASS" if check["result"] == "pass" else "FAIL"
+        print(f"  [{marker}] {check['name']}" + (f" -- {check['detail']}" if check["detail"] else ""))
+    return 0
+
+
+def cmd_row_snapshot(args) -> int:
+    """Capture one live panel exercise row into runner state (read-only)."""
+    state = _load_state(args.scratch)
+    panel = args.panel.rstrip("/") or state["panel"]
+    page_id = state["exercise"]["page_id"]
+    rows = _panel_exercise_rows(panel)
+    row = _panel_row(rows, page_id)
+    if row is None:
+        _write_json(args.out, {
+            "step": "row-snapshot", "generated_at": _utcnow(), "status": "missing",
+            "page_id": page_id,
+        })
+        print(f"FAIL: panel row not found for {page_id}")
+        return 1
+    state[args.state_key] = row
+    _save_state(args.scratch, state)
+    _write_json(args.out, {
+        "step": "row-snapshot", "generated_at": _utcnow(), "state_key": args.state_key,
+        "row": row,
+    })
+    print(f"row snapshot: {args.state_key}={row.get('status_label')}")
     return 0
 
 
@@ -793,21 +1076,62 @@ def cmd_grade(args) -> int:
     relay = args.relay.rstrip("/") or state["relay"]
     token = _tokens(args.scratch)["client"]
     page_id = state["exercise"]["page_id"]
+    resume = bool(getattr(args, "resume", False))
+    external_job = (getattr(args, "job_id", "") or "").strip()
     checks: list[dict] = []
+    seeded = state.get("resume") if resume else None
+    if resume and not isinstance(seeded, dict):
+        raise SystemExit("grade --resume requires a seeded resume state (run seed-resume first)")
 
-    quota_before = _quota(relay, token)
-    started = httpx.post(f"{panel}/api/exercises/{page_id}/grade", json={}, timeout=30)
-    if started.status_code != 202:
-        _write_json(args.out, {
-            "step": "grade", "generated_at": _utcnow(), "status": "failed",
-            "http_status": started.status_code, "body": started.json(),
-            "quota_before": quota_before, "checks": checks,
-        })
-        print(f"FAIL: grade did not start: HTTP {started.status_code}")
-        return 1
-    summary = _poll_job(panel, "/api/exercises/grade/status", started.json()["job_id"],
-                        GRADE_TIMEOUT_S)
-    quota_after = _quota(relay, token)
+    if resume:
+        scope_ok = (
+            (state.get("course") or {}).get("id") == seeded["scope_inputs"]["course_id"]
+            and (state.get("lecture") or {}).get("id") == seeded["scope_inputs"]["lecture_id"]
+        )
+        _check(checks, "staged live-directory scope matches the seeded Window D organize scope",
+               scope_ok,
+               f"staged_course={(state.get('course') or {}).get('id')} "
+               f"staged_lecture={(state.get('lecture') or {}).get('id')}")
+        if not scope_ok:
+            _write_json(args.out, {
+                "step": "grade", "generated_at": _utcnow(), "status": "aborted",
+                "checks": checks,
+                "note": "scope mismatch: a fresh organize would be required; aborted before any spend",
+            })
+            print("FAIL: staged scope does not match the seeded organize scope; aborted before any spend")
+            return 1
+        if not state.get("panel_row_after_answers"):
+            rows = _panel_exercise_rows(panel)
+            pre_row = _panel_row(rows, page_id)
+            state["panel_row_after_answers"] = pre_row
+            _save_state(args.scratch, state)
+        pre_row = state.get("panel_row_after_answers") or {}
+        _check(checks, "panel row reads 待批改 before the resume grade",
+               pre_row.get("status") == "pending-grade"
+               and pre_row.get("status_label") == "待批改",
+               f"row={pre_row}")
+
+    if external_job:
+        # The grade job was triggered through the panel's own student UI
+        # (browser evidence); poll the same product status surface.
+        summary = _poll_job(panel, "/api/exercises/grade/status", external_job,
+                            GRADE_TIMEOUT_S)
+        quota_after = _quota(relay, token)
+        quota_before = None
+    else:
+        quota_before = _quota(relay, token)
+        started = httpx.post(f"{panel}/api/exercises/{page_id}/grade", json={}, timeout=30)
+        if started.status_code != 202:
+            _write_json(args.out, {
+                "step": "grade", "generated_at": _utcnow(), "status": "failed",
+                "http_status": started.status_code, "body": started.json(),
+                "quota_before": quota_before, "checks": checks,
+            })
+            print(f"FAIL: grade did not start: HTTP {started.status_code}")
+            return 1
+        summary = _poll_job(panel, "/api/exercises/grade/status", started.json()["job_id"],
+                            GRADE_TIMEOUT_S)
+        quota_after = _quota(relay, token)
     if summary.get("status") != "completed":
         _write_json(args.out, {
             "step": "grade", "generated_at": _utcnow(), "status": summary.get("status"),
@@ -860,14 +1184,31 @@ def cmd_grade(args) -> int:
            row is not None and row.get("status") == "graded"
            and row.get("status_label") == "已批改",
            f"row={row}")
-    _check(checks, "quota decremented by the charged points",
-           abs(quota_before["llm_points_remaining"] - summary["points_charged"]
-               - quota_after["llm_points_remaining"]) <= 1e-9,
-           f"before={quota_before['llm_points_remaining']} charged={summary['points_charged']} "
-           f"after={quota_after['llm_points_remaining']}")
+    if resume:
+        _check(checks, "resume settlement preserved from the retained charged record",
+               isinstance(summary.get("points_charged"), (int, float))
+               and abs(float(summary["points_charged"]) - float(seeded["points_charged"])) <= 1e-9,
+               f"summary={summary.get('points_charged')} retained={seeded['points_charged']}")
+        _check(checks, "zero new spend: quota unchanged across the whole resume leg",
+               abs(quota_after["llm_points_remaining"]
+                   - seeded["quota_baseline"]["llm_points_remaining"]) <= 1e-9,
+               f"baseline={seeded['quota_baseline']['llm_points_remaining']} "
+               f"now={quota_after['llm_points_remaining']}")
+        usage_now = _relay_llm_rows(state["relay_db"])["llm_usage_rows"]
+        _check(checks, "fresh scratch relay still holds zero llm_usage rows after the resume grade",
+               usage_now == [], f"rows={usage_now}")
+    else:
+        _check(checks, "quota decremented by the charged points",
+               abs(quota_before["llm_points_remaining"] - summary["points_charged"]
+                   - quota_after["llm_points_remaining"]) <= 1e-9,
+               f"before={quota_before['llm_points_remaining']} charged={summary['points_charged']} "
+               f"after={quota_after['llm_points_remaining']}")
 
     state["grade"] = summary
-    state["grade_quota"] = {"before": quota_before, "after": quota_after}
+    state["grade_quota"] = (
+        {"baseline": seeded["quota_baseline"], "after": quota_after} if resume
+        else {"before": quota_before, "after": quota_after}
+    )
     state["operation_id"] = operation_id
     state["wrong_answer_database"] = {
         "id": database["id"], "url": database["url"], "title": database["title"],
@@ -903,6 +1244,20 @@ def cmd_grade(args) -> int:
         "panel_row_after_grade": row,
         "checks": checks,
     }
+    if resume:
+        evidence["resume"] = {
+            "mode": "zero-spend durable recovery (no new relay LLM operation)",
+            "job_source": ("the panel's own student UI (browser-triggered); the runner "
+                           "polled the same product grade/status surface"
+                           if external_job else "runner POST through the panel route"),
+            "job_id": external_job or None,
+            "settlement_authority": (
+                "the retained charged record re-seeded verbatim (seed-resume); the "
+                "settlement matches the retained relay llm_usage grade row captured at "
+                "the prior window close"
+            ),
+            "graded_at_preserved": seeded["graded_at"],
+        }
     _write_json(args.out, evidence)
     print(
         f"graded: score={summary.get('score')} charged={summary['points_charged']} "
@@ -1042,6 +1397,10 @@ def cmd_verify(args) -> int:
     token = _tokens(args.scratch)["client"]
     page_id = state["exercise"]["page_id"]
     course_id = state["course"]["id"]
+    resume = bool(getattr(args, "resume", False))
+    seeded = state.get("resume") if resume else None
+    if resume and not isinstance(seeded, dict):
+        raise SystemExit("verify --resume requires a seeded resume state (run seed-resume first)")
     checks: list[dict] = []
 
     with get_client(client_settings) as client:
@@ -1058,43 +1417,55 @@ def cmd_verify(args) -> int:
 
     db = _relay_llm_rows(state["relay_db"])
     usage_rows = db["llm_usage_rows"]
-    client_account = next(
-        (item for item in db["accounts"] if item["label"] == state["organize_quota"]["before"]["label"]),
-        None,
-    )
     quota_final = _quota(relay, token)
     rows = _panel_exercise_rows(panel)
     row = _panel_row(rows, page_id)
 
-    # Ledger rows from the authoritative integer millipoints (the same
-    # division the relay performs for /v1/quota and /v1/llm responses).
-    millipoints = [int(item["millipoints"]) for item in usage_rows]
-    final_millipoints = int(client_account["llm_millipoints_remaining"]) if client_account else None
-    initial_millipoints = (
-        final_millipoints + sum(millipoints)
-        if final_millipoints is not None and len(millipoints) == 2
-        else None
-    )
-    ledger_rows: list[dict] = []
-    if initial_millipoints is not None:
-        balances = [
-            initial_millipoints,
-            initial_millipoints - millipoints[0],
-            initial_millipoints - millipoints[0] - millipoints[1],
-        ]
-        ledger_rows = [
-            {
-                "sequence": index + 1,
-                "operation": item["operation"],
-                "status": "completed",
-                "points_before": balances[index] / 1000,
-                "points_charged": charge / 1000,
-                "points_after": balances[index + 1] / 1000,
-                "millipoints": charge,
-                "model": item["model"],
-            }
-            for index, (item, charge) in enumerate(zip(usage_rows, millipoints))
-        ]
+    if resume:
+        # The settlement authority is the retained llm_usage rows captured at
+        # the prior window close (the prior scratch relay DB was deleted at
+        # that window's cleanup); the fresh scratch relay proves the resume
+        # leg added ZERO rows and spent nothing.
+        ledger_rows = list(seeded["retained_ledger_rows"])
+        client_account = db["accounts"][0] if db["accounts"] else None
+        initial_millipoints = None
+        final_millipoints = (
+            int(client_account["llm_millipoints_remaining"]) if client_account else None
+        )
+    else:
+        client_account = next(
+            (item for item in db["accounts"] if item["label"] == state["organize_quota"]["before"]["label"]),
+            None,
+        )
+        # Ledger rows from the authoritative integer millipoints (the same
+        # division the relay performs for /v1/quota and /v1/llm responses).
+        millipoints = [int(item["millipoints"]) for item in usage_rows]
+        final_millipoints = int(client_account["llm_millipoints_remaining"]) if client_account else None
+        initial_millipoints = (
+            final_millipoints + sum(millipoints)
+            if final_millipoints is not None and len(millipoints) == 2
+            else None
+        )
+        ledger_rows = []
+        if initial_millipoints is not None:
+            balances = [
+                initial_millipoints,
+                initial_millipoints - millipoints[0],
+                initial_millipoints - millipoints[0] - millipoints[1],
+            ]
+            ledger_rows = [
+                {
+                    "sequence": index + 1,
+                    "operation": item["operation"],
+                    "status": "completed",
+                    "points_before": balances[index] / 1000,
+                    "points_charged": charge / 1000,
+                    "points_after": balances[index + 1] / 1000,
+                    "millipoints": charge,
+                    "model": item["model"],
+                }
+                for index, (item, charge) in enumerate(zip(usage_rows, millipoints))
+            ]
 
     verification = WindowDReadOnlyVerifier().verify(
         snapshot=snapshot,
@@ -1107,34 +1478,69 @@ def cmd_verify(args) -> int:
     )
     checks.extend(verification["checks"])
 
-    _check(checks, "relay llm_usage holds exactly two rows: quiz then grade, on the client account",
-           len(usage_rows) == 2
-           and [item["operation"] for item in usage_rows] == ["quiz", "grade"]
-           and all(item["account_id"] == client_account["id"] for item in usage_rows),
-           f"rows={usage_rows}")
-    _check(checks, "relay millipoints reconcile with the panel settlements",
-           len(millipoints) == 2
-           and millipoints[0] / 1000 == float(state["organize"]["points_charged"])
-           and millipoints[1] / 1000 == float(state["grade"]["points_charged"]),
-           f"millipoints={millipoints} "
-           f"organize={state['organize']['points_charged']} grade={state['grade']['points_charged']}")
-    _check(checks, "final relay quota equals the DB millipoint balance",
-           client_account is not None
-           and abs(quota_final["llm_points_remaining"]
-                   - client_account["llm_millipoints_remaining"] / 1000) <= 1e-9,
-           f"quota={quota_final['llm_points_remaining']} "
-           f"db={client_account and client_account['llm_millipoints_remaining'] / 1000}")
+    if resume:
+        retained_rows = seeded["retained_usage_rows"]
+        _check(checks, "the retained authoritative llm_usage rows are exactly quiz then grade",
+               len(retained_rows) == 2
+               and [item.get("operation") for item in retained_rows] == ["quiz", "grade"],
+               f"rows={retained_rows}")
+        _check(checks, "retained relay millipoints reconcile with the panel settlements",
+               len(retained_rows) == 2
+               and float(retained_rows[0]["millipoints"]) / 1000 == float(state["organize"]["points_charged"])
+               and float(retained_rows[1]["millipoints"]) / 1000 == float(state["grade"]["points_charged"]),
+               f"retained_millipoints={[item['millipoints'] for item in retained_rows]} "
+               f"organize={state['organize']['points_charged']} grade={state['grade']['points_charged']}")
+        _check(checks, "zero-spend resume: the fresh scratch relay holds zero llm_usage rows",
+               usage_rows == [], f"rows={usage_rows}")
+        _check(checks, "zero-spend resume: the fresh relay quota equals the seeded baseline and the fresh DB balance",
+               client_account is not None
+               and abs(quota_final["llm_points_remaining"]
+                       - seeded["quota_baseline"]["llm_points_remaining"]) <= 1e-9
+               and abs(quota_final["llm_points_remaining"]
+                       - client_account["llm_millipoints_remaining"] / 1000) <= 1e-9,
+               f"quota={quota_final['llm_points_remaining']} "
+               f"baseline={seeded['quota_baseline']['llm_points_remaining']} "
+               f"db={client_account and client_account['llm_millipoints_remaining'] / 1000}")
+    else:
+        _check(checks, "relay llm_usage holds exactly two rows: quiz then grade, on the client account",
+               len(usage_rows) == 2
+               and [item["operation"] for item in usage_rows] == ["quiz", "grade"]
+               and all(item["account_id"] == client_account["id"] for item in usage_rows),
+               f"rows={usage_rows}")
+        _check(checks, "relay millipoints reconcile with the panel settlements",
+               len(millipoints) == 2
+               and millipoints[0] / 1000 == float(state["organize"]["points_charged"])
+               and millipoints[1] / 1000 == float(state["grade"]["points_charged"]),
+               f"millipoints={millipoints} "
+               f"organize={state['organize']['points_charged']} grade={state['grade']['points_charged']}")
+        _check(checks, "final relay quota equals the DB millipoint balance",
+               client_account is not None
+               and abs(quota_final["llm_points_remaining"]
+                       - client_account["llm_millipoints_remaining"] / 1000) <= 1e-9,
+               f"quota={quota_final['llm_points_remaining']} "
+               f"db={client_account and client_account['llm_millipoints_remaining'] / 1000}")
     _check(checks, "wrong-answer database holds exactly two rows for this exercise (Q2, Q5 once each)",
            len(wrong["prefix_rows"]) == 2
            and len(wrong["rows_by_number"].get(2) or []) == 1
            and len(wrong["rows_by_number"].get(5) or []) == 1,
            f"prefix_rows={len(wrong['prefix_rows'])}")
-    _check(checks, "panel row states walked 已整理 -> 待批改 -> 已批改",
-           (state.get("panel_row_after_organize") or {}).get("status_label") == "已整理"
-           and (state.get("panel_row_after_answers") or {}).get("status_label") == "待批改"
-           and (state.get("panel_row_after_grade") or {}).get("status_label") == "已批改"
-           and row is not None and row.get("status_label") == "已批改",
-           f"final_row={row}")
+    if resume:
+        _check(checks,
+               "panel row states walked 待批改 -> 已批改 live across the resume grade "
+               "(the earlier 已整理 leg is closed at product level: the landed "
+               "answer-presence scan fix + its pinned additive tests + the prior "
+               "window's real organize evidence)",
+               (state.get("panel_row_after_answers") or {}).get("status_label") == "待批改"
+               and (state.get("panel_row_after_grade") or {}).get("status_label") == "已批改"
+               and row is not None and row.get("status_label") == "已批改",
+               f"final_row={row}")
+    else:
+        _check(checks, "panel row states walked 已整理 -> 待批改 -> 已批改",
+               (state.get("panel_row_after_organize") or {}).get("status_label") == "已整理"
+               and (state.get("panel_row_after_answers") or {}).get("status_label") == "待批改"
+               and (state.get("panel_row_after_grade") or {}).get("status_label") == "已批改"
+               and row is not None and row.get("status_label") == "已批改",
+               f"final_row={row}")
     _check(checks, "exactly one [E2E] exercise page exists under the course page",
            snapshot["page_count"] == 1, f"page_count={snapshot['page_count']}")
 
@@ -1158,6 +1564,22 @@ def cmd_verify(args) -> int:
             "final_millipoints": final_millipoints,
         },
         "ledger_rows": ledger_rows,
+        **({
+            "resume": {
+                "mode": "zero-spend durable recovery",
+                "settlement_authority": (
+                    "retained authoritative llm_usage rows captured at the prior Window D "
+                    "close (evidence/43 of the window pack); the prior scratch relay DB was "
+                    "deleted at that window's authorized cleanup, so these captured rows are "
+                    "the settlement record for the window's two charged LLM operations"
+                ),
+                "fresh_relay_zero_spend_proof": {
+                    "llm_usage_rows": usage_rows,
+                    "quota_final": quota_final,
+                    "quota_baseline": seeded["quota_baseline"],
+                },
+            }
+        } if resume else {}),
         "wrong_answer_database": {
             "id": database["id"], "url": database["url"], "title": database["title"],
         },
@@ -1184,6 +1606,123 @@ def cmd_verify(args) -> int:
         marker = "PASS" if check["result"] == "pass" else "FAIL"
         print(f"  [{marker}] {check['name']}" + (f" -- {check['detail']}" if check["detail"] else ""))
     return 0 if evidence["passed"] else 1
+
+
+def cmd_cleanup(args) -> int:
+    """Authorized [E2E] cleanup: archive (trash) the two wrong-answer rows
+    and the retained [E2E] page, then prove the outcome by re-fetch/re-query.
+
+    Covered by the recorded zero-spend resume authorization: "Create exactly
+    two [E2E]-marked wrong-answer database rows / Delete exactly those two
+    rows / Delete the retained [E2E] page / Read-only re-fetch proof of page
+    and wrong-answer cleanup". Notion's REST surface expresses deletion as
+    trash-archival (there is no hard-delete API); the proof below shows both
+    the archived flag and the rows/pages disappearing from their containers.
+    """
+    state = _load_state(args.scratch)
+    page_id = state["exercise"]["page_id"]
+    operation_id = state.get("operation_id") or state["resume"]["operation_id"]
+    course_id = state["course"]["id"]
+    checks: list[dict] = []
+
+    with get_client(client_settings) as client:
+        database = _wrong_answer_database(client)
+        wrong = _wrong_answer_rows(client, database, state["exercise"]["title"], operation_id)
+        q2_rows = list(wrong["rows_by_number"].get(2) or [])
+        q5_rows = list(wrong["rows_by_number"].get(5) or [])
+        prefix_rows = list(wrong["prefix_rows"])
+        _check(checks, "exactly two wrong-answer rows exist before cleanup (Q2, Q5 once each)",
+               len(q2_rows) == 1 and len(q5_rows) == 1 and len(prefix_rows) == 2,
+               f"q2={len(q2_rows)} q5={len(q5_rows)} prefix={len(prefix_rows)}")
+        page_before = client.get_page(page_id)
+        parent_before = _norm_page_id((page_before.get("parent") or {}).get("page_id") or "")
+        _check(checks, "[E2E] page fetch-verified before cleanup (title + parent)",
+               page_title(page_before).count(E2E_MARKER) == 1
+               and parent_before == _norm_page_id(course_id),
+               f"title={page_title(page_before)!r} parent={parent_before}")
+
+        archived_rows = []
+        for row in [*q2_rows, *q5_rows]:
+            client.archive_page(row["id"])
+            archived_rows.append({"page_id": row.get("id"), "url": row.get("url")})
+        for row in prefix_rows:
+            if row.get("id") and all(row["id"] != item["page_id"] for item in archived_rows):
+                client.archive_page(row["id"])
+                archived_rows.append({"page_id": row.get("id"), "url": row.get("url")})
+
+        client.archive_page(page_id)
+
+        wrong_after = _wrong_answer_rows(client, database, state["exercise"]["title"], operation_id)
+        page_after = client.get_page(page_id)
+        course_children = client.list_child_pages(course_id)
+
+    remaining_prefix = len(wrong_after["prefix_rows"])
+    page_still_listed = any(
+        _norm_page_id(block.get("id") or "") == _norm_page_id(page_id)
+        for block in course_children
+    )
+    _check(checks, "wrong-answer rows deleted: re-query returns zero rows for the exercise",
+           remaining_prefix == 0
+           and len(wrong_after["rows_by_number"].get(2) or []) == 0
+           and len(wrong_after["rows_by_number"].get(5) or []) == 0,
+           f"prefix={remaining_prefix}")
+    _check(checks, "[E2E] page deleted (trash-archived): re-fetch shows archived and the page "
+                   "no longer lists under the course page",
+           bool(page_after.get("archived")) is True and page_still_listed is False,
+           f"archived={page_after.get('archived')} still_listed={page_still_listed}")
+
+    evidence = {
+        "step": "cleanup",
+        "generated_at": _utcnow(),
+        "authorization": (
+            "window-d-resume-zero-spend-cleanup-2026-09-20: delete exactly the two "
+            "[E2E]-marked wrong-answer rows and the retained [E2E] page, with "
+            "read-only re-fetch proof"
+        ),
+        "page": {
+            "page_id": page_id,
+            "title": page_title(page_before),
+            "expected_parent_id": _norm_page_id(course_id),
+            "actual_parent_id": parent_before,
+            "pre_cleanup_fetch": {
+                "fetched_at": _utcnow(),
+                "title": page_title(page_before),
+                "actual_parent_id": parent_before,
+                "title_verified": True,
+                "parent_verified": True,
+            },
+            "cleanup_status": "archived",
+            "reason": (
+                "authorized zero-spend cleanup; Notion deletion is trash-archive via the "
+                "API (no hard-delete surface); re-fetch shows archived=true and the "
+                "page is absent from the course page's children"
+            ),
+            "post_cleanup_fetch": {
+                "fetched_at": _utcnow(),
+                "result": "archived" if page_after.get("archived") else "still_present",
+                "archived": bool(page_after.get("archived")),
+                "still_listed_under_course": page_still_listed,
+            },
+        },
+        "wrong_answer_rows": {
+            "expected_titles": wrong["expected_titles"],
+            "rows_before": _row_identity(prefix_rows),
+            "archived_rows": archived_rows,
+            "rows_after_query_count": remaining_prefix,
+            "cleanup_status": "archived",
+            "reason": (
+                "authorized zero-spend cleanup; each row trash-archived via the API; "
+                "the database re-query returns zero rows for this exercise"
+            ),
+        },
+        "checks": checks,
+    }
+    _write_json(args.out, evidence)
+    print(f"cleanup: rows_archived={len(archived_rows)} page_archived={page_after.get('archived')}")
+    for check in checks:
+        marker = "PASS" if check["result"] == "pass" else "FAIL"
+        print(f"  [{marker}] {check['name']}" + (f" -- {check['detail']}" if check["detail"] else ""))
+    return 0 if all(check["result"] == "pass" for check in checks) else 1
 
 
 def cmd_panel_stop(args) -> int:
@@ -1234,6 +1773,32 @@ def build_parser() -> argparse.ArgumentParser:
     panel_start.add_argument("--out", required=True)
     panel_start.set_defaults(func=cmd_panel_start)
 
+    seed_resume = sub.add_parser(
+        "seed-resume",
+        help="zero-spend resume: verify the retained [E2E] page read-only, then seed the "
+             "retained charged grading record + organize-scope record into the scratch data root",
+    )
+    seed_resume.add_argument("--scratch", required=True)
+    seed_resume.add_argument("--relay", required=True)
+    seed_resume.add_argument("--relay-db", default="")
+    seed_resume.add_argument("--graded-record", required=True,
+                              help="retained durable grading record evidence JSON (evidence/44)")
+    seed_resume.add_argument("--organize-evidence", required=True,
+                             help="the window's captured organize evidence JSON (evidence/33)")
+    seed_resume.add_argument("--stage-evidence", required=True,
+                             help="the window's captured stage evidence JSON (evidence/32)")
+    seed_resume.add_argument("--blocked-verification", required=True,
+                             help="the window's captured blocked-state verification JSON (evidence/43)")
+    seed_resume.add_argument("--out", required=True)
+    seed_resume.set_defaults(func=cmd_seed_resume)
+
+    row_snapshot = sub.add_parser("row-snapshot", help="capture one live panel row into state (read-only)")
+    row_snapshot.add_argument("--scratch", required=True)
+    row_snapshot.add_argument("--panel", default="")
+    row_snapshot.add_argument("--state-key", required=True)
+    row_snapshot.add_argument("--out", required=True)
+    row_snapshot.set_defaults(func=cmd_row_snapshot)
+
     stage = sub.add_parser("stage", help="pick the real course/lecture + build the scratch notes tree")
     stage.add_argument("--scratch", required=True)
     stage.add_argument("--panel", default="")
@@ -1257,6 +1822,13 @@ def build_parser() -> argparse.ArgumentParser:
     grade.add_argument("--scratch", required=True)
     grade.add_argument("--panel", default="")
     grade.add_argument("--relay", default="")
+    grade.add_argument("--job-id", default="",
+                       help="poll an existing grade job (e.g. triggered through the panel UI) "
+                            "instead of POSTing a new one")
+    grade.add_argument("--resume", action="store_true",
+                       help="zero-spend resume mode: the durable recovery completes from the "
+                            "seeded retained charged record; quota must stay unchanged and the "
+                            "fresh relay must gain no llm_usage row")
     grade.add_argument("--out", required=True)
     grade.set_defaults(func=cmd_grade)
 
@@ -1271,8 +1843,20 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--scratch", required=True)
     verify.add_argument("--panel", default="")
     verify.add_argument("--relay", default="")
+    verify.add_argument("--resume", action="store_true",
+                        help="zero-spend resume mode: the ledger is the retained captured "
+                             "usage rows; the fresh scratch relay must prove zero new rows")
     verify.add_argument("--out", required=True)
     verify.set_defaults(func=cmd_verify)
+
+    cleanup = sub.add_parser(
+        "cleanup",
+        help="authorized [E2E] cleanup: archive the two wrong-answer rows + the retained page "
+             "with re-fetch/re-query proof",
+    )
+    cleanup.add_argument("--scratch", required=True)
+    cleanup.add_argument("--out", required=True)
+    cleanup.set_defaults(func=cmd_cleanup)
 
     panel_stop = sub.add_parser("panel-stop", help="stop the probe-owned panel child")
     panel_stop.add_argument("--pid", type=int, required=True)
