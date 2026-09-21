@@ -28,6 +28,7 @@ Subcommands:
   llm-probe      --root --relay --token-file --out
   db-snap        --root --out
   create-code    --root --out [--seconds]
+  env-token      --env-dir --out --snap-out   (copy PLATFORM_TOKEN between scratch files; never printed)
   set-llm-balance --root --token-file --millipoints
   env-snap       --env-dir --tag --out
   stub-snap      --log --out
@@ -202,6 +203,8 @@ def cmd_stage(args) -> int:
                     "title": "第一讲 云端转写演示", "recorded_at": "2026-09-21 10:00:00"},
         "course4": {"course_id": "course-window-f2-four", "course_name": "窗口F2复现课程四",
                     "title": "第一讲 云端转写演示", "recorded_at": "2026-09-21 11:00:00"},
+        "course5": {"course_id": "course-window-f2-five", "course_name": "窗口F2复现课程五",
+                    "title": "第一讲 云端转写演示", "recorded_at": "2026-09-21 12:00:00"},
     }
     staged: dict[str, dict] = {}
     for key, spec in recs.items():
@@ -247,8 +250,36 @@ def cmd_stage(args) -> int:
     })
     print(json.dumps({"staged": len(staged), "jobs": len(jobs),
                       "db": str(scratch.db)}, ensure_ascii=False))
-    if len(jobs) != 4:
+    if len(jobs) != 5:
         return 1
+    return 0
+
+
+def cmd_env_token(args) -> int:
+    """Copy PLATFORM_TOKEN from a scratch client-env .env into a token file.
+
+    The token value is never printed and never written to any evidence
+    file; it only moves between scratch files so the curl/process legs can
+    authenticate as the account the panel activated.
+    """
+    env_file = Path(args.env_dir) / ".env"
+    token = ""
+    if env_file.exists():
+        for line in env_file.read_text("utf-8", errors="replace").splitlines():
+            match = DOTENV_RE.match(line)
+            if match and match.group(1) == "PLATFORM_TOKEN":
+                token = match.group(2).strip().strip('"').strip("'")
+                break
+    if not token:
+        print("no PLATFORM_TOKEN in the scratch env", file=sys.stderr)
+        return 1
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(token, "utf-8")
+    write_json(Path(args.snap_out), {
+        "ts": now_iso(), "env_dir": str(Path(args.env_dir)),
+        "token_file": str(out), "token_length": len(token),
+    })
     return 0
 
 
@@ -380,6 +411,15 @@ def cmd_process_run(args) -> int:
         "PLATFORM_TOKEN": token,
         "TRANSCRIPTION_BACKEND": args.backend,
         "DELETE_VIDEO_AFTER_PROCESSING": "false",
+        # The notes stage must stay inert in this window: an explicit EMPTY
+        # OPENAI_API_KEY (present-but-empty beats the repo-root .env) makes
+        # write_notes skip with zero network, and an unroutable base URL is
+        # belt-and-braces for any path that ignores the empty key. Without
+        # this, the child reads the real repo .env (cwd = repo root) and the
+        # notes stage makes a real call on the user's configured LLM endpoint
+        # (observed once, 402-refused, zero tokens, before this pin).
+        "OPENAI_API_KEY": "",
+        "OPENAI_BASE_URL": "http://127.0.0.1:1/v1",
     })
     exe = Path(sys.executable).with_name("pku-sync.exe")
     if not exe.exists():
@@ -389,7 +429,18 @@ def cmd_process_run(args) -> int:
         )
     run = [str(exe), "process", "--limit", "1"]
     if args.course:
-        run += ["--course", args.course]
+        # The CLI's --course filter is the stable Blackboard course id, not
+        # the display name. The window runbook uses readable course names,
+        # so resolve that name against the scratch index before invoking the
+        # real process command. Passing the display name made an empty
+        # selection look like a transport failure and could mask retries.
+        course_id = args.course
+        from pku_sync.pipeline import collect_jobs
+        for job in collect_jobs(scratch.data):
+            if job.course_name == args.course:
+                course_id = job.recording.course_id
+                break
+        run += ["--course", course_id]
     out_log = scratch.logs / f"process-{args.backend}-{args.course}.out.log"
     with open(out_log, "w", encoding="utf-8") as o:
         proc = subprocess.run(run, cwd=str(CLIENT_ROOT), env=env,
@@ -751,6 +802,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", default="code-latest.txt")
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_create_code)
+
+    p = sub.add_parser("env-token", parents=[common])
+    p.add_argument("--env-dir", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--snap-out", required=True)
+    p.set_defaults(fn=cmd_env_token)
 
     p = sub.add_parser("set-llm-balance", parents=[common])
     p.add_argument("--token-file", required=True)
