@@ -245,6 +245,7 @@ def create_app(
     organizer_service=None,
     grading_service=None,
     exercise_job_gate: ExerciseJobGate | None = None,
+    update_service=None,
 ) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
@@ -293,6 +294,11 @@ def create_app(
     if exercise_job_gate is None:
         exercise_job_gate = ExerciseJobGate()
     app.state.exercise_job_gate = exercise_job_gate
+    if update_service is None:
+        from ..autoupdate import UpdateService
+
+        update_service = UpdateService.from_settings(settings)
+    app.state.update_service = update_service
 
     from .connection_api import add_connection_routes
     from .directory_api import add_directory_routes
@@ -330,6 +336,18 @@ def create_app(
             return platform_service.activate(code)
         except PlatformError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/update")
+    def update_status() -> dict:
+        return update_service.panel_state()
+
+    @app.post("/api/update/request")
+    def request_update(version: str = Body(..., embed=True)) -> dict:
+        try:
+            update_service.request_apply(version)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid update request") from exc
+        return update_service.panel_state()
 
     @app.post("/actions/{kind}")
     def trigger(kind: str) -> dict:

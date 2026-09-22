@@ -823,6 +823,8 @@ def panel_cmd(
 
     from .panel.ports import PanelPortError, bind_panel
     from .panel.webapi import create_app
+    from .autoupdate import UpdateService, fetch_release_version
+    from .config import settings
 
     host = "127.0.0.1"  # docs/SERVICE_PLAN.md §5.3：本地面板只绑回环地址
     # The student directory service (real adapter by default; the seeded-fake
@@ -852,6 +854,24 @@ def panel_cmd(
         platform_service = None
         organizer_service = None
         grading_service = None
+    # The fake panel is deterministic for local/browser validation. Production
+    # always checks the public GitHub Releases manifest through UpdateService.
+    update_service = UpdateService.from_settings(
+        settings,
+        fetcher=(lambda: "0.2.0") if fake else fetch_release_version,
+    )
+    # A queued update is run before this process creates any panel job runner,
+    # so no active student operation can be terminated or swapped mid-job.
+    # Fake/browser validation is hermetic and never executes a real tool upgrade.
+    if not fake:
+        outcome = update_service.apply_pending()
+        if outcome.status == "deferred":
+            console.print(
+                f"[yellow]Update {outcome.version} deferred; "
+                "the current version is starting unchanged.[/yellow]"
+            )
+        elif outcome.status == "applied":
+            console.print(f"[green]Update {outcome.version} applied.[/green]")
     try:
         sock, bound_port = bind_panel(port)
     except PanelPortError as exc:
@@ -873,6 +893,7 @@ def panel_cmd(
                 platform_service=platform_service,
                 organizer_service=organizer_service,
                 grading_service=grading_service,
+                update_service=update_service,
             ),
             host=host,
             port=bound_port,

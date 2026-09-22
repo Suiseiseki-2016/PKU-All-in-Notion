@@ -19,6 +19,7 @@
   var state = {
     activated: false,
     quota: null,
+    update: null,
     organize: { open: false, working: false, courseId: "", lectureId: "", result: null, blocked: "", output: "" },
     exerciseLaunch: null,
     answerLaunches: {},
@@ -234,6 +235,12 @@
     return requestJson("/api/platform/quota").then(function (result) {
       state.activated = Boolean(result.ok && result.body && result.body.active);
       state.quota = result.ok && result.body ? result.body : null;
+    });
+  }
+
+  function loadUpdate() {
+    return requestJson("/api/update").then(function (result) {
+      state.update = result.ok && result.body ? result.body : null;
     });
   }
 
@@ -498,6 +505,48 @@
     return '<div class="account-card" data-block="quota"><p>转写 ' + esc(Math.floor((quota.transcribe_seconds_remaining === undefined ? 0 : quota.transcribe_seconds_remaining) / 60)) + ' 分钟</p><p>AI 点 ' + esc(quota.llm_points_remaining) + '</p></div>';
   }
 
+  function updateCard() {
+    var update = state.update;
+    if (!update) return "";
+    var copy = COPY.update;
+    var body = "<p>" + esc(template(copy.version, { version: update.version })) + "</p>";
+    if (update.status === "available") {
+      body += "<p>" + esc(template(copy.available, { version: update.available_version })) + "</p>";
+      body += button(copy.action, "request-update", {
+        small: true,
+        attrs: { "data-version": update.available_version }
+      });
+    } else if (update.status === "up_to_date") {
+      body += "<p>" + esc(copy.up_to_date) + "</p>";
+    } else if (update.status === "requested") {
+      body += "<p>" + esc(copy.requested) + "</p>";
+    } else if (update.status === "deferred") {
+      body += "<p>" + esc(copy.deferred) + "</p>";
+      body += button(copy.retry, "request-update", {
+        small: true,
+        attrs: { "data-version": update.available_version }
+      });
+    }
+    return '<div class="account-card" data-block="update">' + body + "</div>";
+  }
+
+  function requestUpdate(version) {
+    return requestJson("/api/update/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: version })
+    }).then(function (result) {
+      if (result.ok && result.body) {
+        state.update = result.body;
+      } else {
+        showToast(COPY.update.request_failed);
+      }
+      render();
+    }).catch(function () {
+      showToast(COPY.update.request_failed);
+    });
+  }
+
   function shell(content) {
     return (
       '<div class="app-shell"><aside class="sidebar" aria-label="' +
@@ -517,6 +566,7 @@
       '</button></nav><div class="sidebar-spacer"></div>' +
       connectionCard() +
       quotaCard() +
+      updateCard() +
       '</aside><header class="mobile-topbar"><div class="mobile-topbar-left">' +
       '<button type="button" class="mobile-overview" data-nav="dashboard" data-action="open-dashboard" aria-label="' +
       esc(COPY.nav.dashboard) +
@@ -1795,6 +1845,7 @@
     if (!target || target.disabled) return;
     var action = target.dataset.action;
     if (action === "activate") activate();
+    else if (action === "request-update") requestUpdate(target.dataset.version);
     else if (action === "revoke-notion") disconnectNotion();
     else if (action === "connect-notion") connectNotion();
     else if (action === "reload-directory") syncNow();
@@ -1859,6 +1910,9 @@
     if (event.target.id === "activation-form") activate();
   });
 
+  loadUpdate().then(render).catch(function () {
+    // A release-check failure never blocks or replaces the local panel.
+  });
   loadQuota()
     .then(loadConnection)
     .then(function () {
