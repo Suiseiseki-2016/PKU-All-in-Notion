@@ -22,7 +22,7 @@ the log recorder is an injected object (the CLI passes its rich console;
 tests and the panel pass their own). Steps signal a controlled failure by
 raising an exception carrying an ``exit_code`` attribute — exactly what
 ``typer.Exit`` (a RuntimeError subclass) does — and any other exception is
-an unexpected failure. See docs/SERVICE_PLAN.md §4 (M0).
+an unexpected failure.
 """
 
 from __future__ import annotations

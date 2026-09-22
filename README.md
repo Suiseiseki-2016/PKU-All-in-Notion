@@ -4,6 +4,24 @@
 
 纯 Python 单机项目：同一套代码在 Windows / macOS / Linux 上行为一致，不调用任何操作系统的专属接口。
 
+## 安装（学生 / Pilot）
+
+试点学生请直接看 **[`docs/PILOT_GUIDE.md`](docs/PILOT_GUIDE.md)**（非开发者
+指南：按 OS 安装、激活、配额、恢复与支持边界）。Windows 用户装完
+`PKU-All-in-Notion-Setup-<版本>.exe` 后从「开始菜单 / 桌面」快捷方式启动即可；
+macOS / Linux 用户等效于下面三条命令（uv → uv 管理的 Python 3.11 → 按名字
+从公开软件源安装应用）：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # 然后重新打开终端
+uv python install 3.11
+uv tool install --managed-python --python 3.11 --index https://pku.aeoluswu.info/packages/simple/ pku-course-sync
+mkdir -p ~/PKU-All-in-Notion && cd ~/PKU-All-in-Notion && pku-sync panel
+```
+
+macOS / Linux 的真机验收步骤见 [`docs/MACOS_LINUX_VALIDATION.md`](docs/MACOS_LINUX_VALIDATION.md)。
+下面的 `## 安装与启动` 一节是开发/自托管形态的说明，学生不需要。
+
 ## 功能
 
 - **课程发现与同步**：IAAA 登录，自动识别当学期课程；同步公告、课件、作业到本地
@@ -34,6 +52,7 @@ uv run pku-sync automate                同步资料 → 下载新录像 → 转
 **完整说明见 `scripts/PIPELINE.md`**（组件清单、规范单一来源、存量页对齐流程、运行环境、迁移进度）。
 组合 E2E 的场景矩阵和验收标准见 [`docs/E2E_TEST_PLAN.md`](docs/E2E_TEST_PLAN.md)。
 首次部署和日常操作见 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)。
+学生 / 非开发者的试点安装与使用见 [`docs/PILOT_GUIDE.md`](docs/PILOT_GUIDE.md)。
 服务化方向：本项目是「PKU All in Notion」的**瘦客户端**（开源半边）；云端中转（转写计量、平台账号、兑换码）由平台另行运营，代码在私有仓，不在本仓库。
 
 ## 安装与启动
@@ -71,7 +90,7 @@ uv run pku-sync review              # 单独跑 Notion 晨检登记（经所选�
 uv run pku-sync automate            # daily + review 一把梭
 uv run pkutui                       # 交互式控制台：实时课程/DDL/录音 + 管道状态 + 按键触发
 uv run pku-sync doctor              # 一键自检：配置/凭据/依赖/宿主/日志/报告/磁盘
-uv run pku-sync panel                # localhost 状态面板（server extra：uv sync --extra server）
+uv run pku-sync panel                # 本地面板（只绑 127.0.0.1 的学生面板；FastAPI/uvicorn 属默认依赖）
 uv run pku-sync submit list --course 认知心理学
 uv run pku-sync submit text --course … --content … --file answer.md  # 默认干跑；确认后加 --yes 才提交
 uv run pku-sync submit file --course … --content … --file 作业.pdf   # 附件提交，同样默认干跑

@@ -1,6 +1,6 @@
-"""The localhost panel package (server extra).
+"""The localhost panel package (student-facing panel + engineering page).
 
-`webapi`/`pipelines` import fastapi/uvicorn and stay out of the default
-import path: `pku-sync --help` on a machine without the extra must not
-fail. Only `pku-sync panel` (and the panel tests) import them.
+`webapi`/`pipelines` import fastapi/uvicorn lazily inside the panel command,
+so importing the package never pulls the web stack onto the default import
+path. Only `pku-sync panel` (and the panel tests) import them.
 """

@@ -60,14 +60,14 @@ class Settings(BaseSettings):
     whisper_compute_type: str = "float16"
 
     # Where `process` sends a recording: "local" runs faster-whisper on this
-    # machine (default, unchanged behavior); "cloud" is the M2 transcription
-    # service — audio-only upload, deleted right after transcription
-    # (docs/SERVICE_PLAN.md §3.1-3.2). Until M2 ships, cloud refuses loudly.
+    # machine (default, unchanged behavior); "cloud" is the relay
+    # transcription service — audio-only upload, deleted right after
+    # transcription. Until the relay is reachable, cloud refuses loudly.
     transcription_backend: str = "local"
 
-    # M2 cloud wrapper (docs/SERVICE_PLAN.md §1.7, §3.2-3.3): audio is
-    # uploaded to OUR relay only, never to a third-party API; the relay
-    # holds the upstream ASR key and meters minutes per platform account.
+    # Cloud transcription (relay wrapper): audio is uploaded to OUR relay
+    # only, never to a third-party API; the relay holds the upstream ASR
+    # key and meters minutes per platform account.
     # All AI is proxied by the platform -- users never see any key.
     # PLATFORM_TOKEN is the account session the app writes automatically
     # at activation (devs may fill it by hand); empty values keep the

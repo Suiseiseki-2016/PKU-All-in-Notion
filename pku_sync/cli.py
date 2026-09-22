@@ -815,7 +815,7 @@ def panel_cmd(
         ),
     ] = "normal",
 ) -> None:
-    """启动 localhost 状态面板（server extra，只绑 127.0.0.1，8791→8792→8793 首个空闲）。"""
+    """启动 localhost 面板（只绑 127.0.0.1，8791→8792→8793 首个空闲）。"""
     import threading
     import webbrowser
 
@@ -826,7 +826,7 @@ def panel_cmd(
     from .autoupdate import UpdateService, fetch_release_version
     from .config import settings
 
-    host = "127.0.0.1"  # docs/SERVICE_PLAN.md §5.3：本地面板只绑回环地址
+    host = "127.0.0.1"  # 本地面板只绑回环地址
     # The student directory service (real adapter by default; the seeded-fake
     # mode for browser verification) is shared by the directory API routes.
     # Built before binding so an invalid fake variant fails cleanly.

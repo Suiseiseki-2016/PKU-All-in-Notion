@@ -3,13 +3,12 @@
 ``pipeline.process_job`` stays backend-agnostic: it asks this module to turn
 a video file into ``transcript.json``. The local backend wraps
 ``media.transcribe`` (faster-whisper on this machine). The cloud backend is
-the client half of the M2 wrapper service (docs/SERVICE_PLAN.md §1.7,
-§3.2-3.3): it extracts a 16 kHz mono audio track, uploads it to OUR relay
-with the platform account session (§1.7: users never see any key), and
-writes the returned transcript. The relay -- not the user -- holds the
-upstream ASR vendor key and meters minutes per platform account;
-classmates register no third-party account. Audio leaves the machine only
-toward the relay, never toward a vendor directly (§3.2).
+the client half of the relay transcription service: it extracts a 16 kHz
+mono audio track, uploads it to OUR relay with the platform account session
+(users never see any key), and writes the returned transcript. The relay --
+not the user -- holds the upstream ASR vendor key and meters minutes per
+platform account; classmates register no third-party account. Audio leaves
+the machine only toward the relay, never toward a vendor directly.
 
 Extraction decodes inside this process through PyAV, which links its own
 FFmpeg libraries, so a packaged install needs no media binary on PATH. The
@@ -46,7 +45,7 @@ def transcribe(video: Path, target: Path, settings: "Settings") -> dict:
     raise ValueError(f"unknown transcription backend: {settings.transcription_backend!r}")
 
 
-# What the relay's ASR vendor wants, and the cheapest useful shape (§3.2).
+# What the relay's ASR vendor wants, and the cheapest useful shape.
 _AUDIO_CODEC = "aac"
 _AUDIO_RATE = 16000
 _AUDIO_LAYOUT = "mono"
@@ -75,7 +74,7 @@ def _detail(exc: Exception) -> str:
 
 
 def _extract_audio(video: Path, out: Path) -> Path:
-    """16 kHz mono AAC track: §3.2 uploads audio only, never the video.
+    """16 kHz mono AAC track: uploads audio only, never the video.
 
     Decoding happens in this process. The import is deferred so the panel,
     sync and directory paths never load a media decoder they do not use, and
@@ -132,10 +131,9 @@ _RETRY_DELAY = 2.0  # covers an edge/failover reconnect window; tests zero it
 def _upload(url: str, key: str, audio: Path) -> dict:
     """POST the audio to the relay; the relay answers with the transcript.
 
-    One transport-level retry: a failover between relay hosts (the
-    no-perception switch, SERVICE_PLAN §1.7) kills the in-flight request
-    once, and that failure is absorbed here. HTTP status answers are
-    real answers (quota, auth) -- never retried.
+    One transport-level retry: a failover between relay hosts kills the
+    in-flight request once, and that failure is absorbed here. HTTP status
+    answers are real answers (quota, auth) -- never retried.
     """
     import httpx
 
@@ -178,14 +176,14 @@ def transcribe_cloud(video: Path, target: Path, settings: "Settings") -> dict:
     token = (getattr(settings, "platform_token", "") or "").strip()
     if not url:
         raise RuntimeError(
-            "cloud transcription needs CLOUD_TRANSCRIBE_URL (the M2 relay, "
-            "docs/SERVICE_PLAN.md §3.3); set TRANSCRIPTION_BACKEND=local for now"
+            "cloud transcription needs CLOUD_TRANSCRIBE_URL (the relay "
+            "transcription service); set TRANSCRIPTION_BACKEND=local for now"
         )
     if not token:
         raise RuntimeError(
             "cloud transcription needs PLATFORM_TOKEN (the platform account "
-            "session, written automatically at activation; "
-            "docs/SERVICE_PLAN.md §1.7); set TRANSCRIPTION_BACKEND=local for now"
+            "session, written automatically at activation); "
+            "set TRANSCRIPTION_BACKEND=local for now"
         )
     with tempfile.TemporaryDirectory(prefix="pku-sync-audio-") as tmp:
         audio = _extract_audio(video, Path(tmp) / "audio.m4a")

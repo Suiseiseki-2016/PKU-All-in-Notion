@@ -372,8 +372,8 @@ cleanup_status
 
 - **Notion OAuth login 完整真实闭环**：public integration（client_id
   `3ded872b…`）已注册，redirect URI `http://localhost:8765/callback`（Notion
-  实测接受 localhost 的 http 回调，推翻 SERVICE_PLAN 旧假设"回调必须
-  HTTPS"）。真实入口 `pku-sync notion login` → 浏览器真实授权（运营者本人，
+  实测接受 localhost 的 http 回调，推翻早期设计稿里「回调必须
+  HTTPS」的旧假设）。真实入口 `pku-sync notion login` → 浏览器真实授权（运营者本人，
   现有 workspace「Di Wu 的 Notion」，勾选课程 hub）→ `localhost:8765/callback`
   收到 code → 一次性交换成功 → `NOTION_TOKEN` 写入 `.env`（.gitignore 内）→
   新进程 `pku-sync notion check` 验证 whoami「PKU-All-in-Notion @ workspace」。

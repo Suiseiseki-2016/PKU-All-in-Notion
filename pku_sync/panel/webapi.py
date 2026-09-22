@@ -3,8 +3,7 @@
 Server-rendered with zero external assets (an offline campus laptop is a
 first-class environment), and the page polls an HTML fragment so a
 running job surfaces without a reload. Binds loopback only — the panel
-serves the machine's own user and carries no auth of its own
-(docs/SERVICE_PLAN.md §5.3).
+serves the machine's own user and carries no auth of its own.
 """
 
 from __future__ import annotations

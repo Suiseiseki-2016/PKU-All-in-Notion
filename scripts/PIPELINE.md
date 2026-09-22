@@ -34,7 +34,7 @@ agent host × lecture_batch_creator.md  扫描本地转写，幂等补建缺失�
 | 组件 | 位置 | 作用 |
 |---|---|---|
 | 同步管道 | `pku_sync/`（Python 包） | 教学网抓取、录音下载（HLS 走分片并发 + AES-128 解密，ffmpeg 仅兜底）、Whisper 转写、关键帧抽取 |
-| 转写后端 | `pku_sync/transcription.py` | `process` 的转写入口：`TRANSCRIPTION_BACKEND=local`（默认，本机 faster-whisper，行为不变）或 `cloud`（M2 包装服务客户端：本地抽 16k 音轨上传我们的中转、按平台账号计量，上游 ASR key 只在服务端、用户不持有任何 key；中转未部署/未配置时显式拒绝；见 `docs/SERVICE_PLAN.md` §1.7、§3.1-3.3） |
+| 转写后端 | `pku_sync/transcription.py` | `process` 的转写入口：`TRANSCRIPTION_BACKEND=local`（默认，本机 faster-whisper，行为不变）或 `cloud`（云端转写服务客户端：本地用 PyAV 抽 16k 音轨上传我们的中转、按平台账号计量，上游 ASR key 只在服务端、用户不持有任何 key；中转未部署/未配置时显式拒绝） |
 | 每日入口 | `pku_sync.cli automate` | 定时任务入口，一条命令串起 daily + 晨检 + 批量建页（v3 起 daily.ps1 退役，2026-09-16 已删除） |
 | 原生简报 | `pku_sync/summarize.py` + `pku_sync/llm.py` | 当日简报：LLM 后端 provider 抽象（OpenAI 兼容 API 或已登录 claude/codex/droid CLI） |
 | TUI 工作台 | `pku_sync/tui.py` + `tui_data.py` + `agent_runner.py` | `uv run pkutui`：先读本地课件、公告、作业、录音阶段和最近 Notion 报告，再登录教学网显示实时课程/DDL；课程表/DDL 失败会明确显示，绝不静默回退本地 DATA_DIR。管道状态**不等教学网即上屏**；实时抓取 4 路并发逐课推进，进度（N/总数 · 课程名 · 已用秒数）实时写进面板边框与状态行。选课后 `Enter` 看资料/录音详情，详情表给出摘要和本地路径；`Space` 勾选讲次，`a/o` 触发录音整理/评论重整，`z/g` 触发小测生成/批改，`n` 刷新 Notion 报告状态；所有写入交给受限 agent runbook + 官方 Notion MCP。数据层纯函数无 textual 依赖，单测覆盖本地工作台、实时快照、逐课错误、进度回调、并发抓取和无兜底失败路径 |
@@ -48,7 +48,7 @@ agent host × lecture_batch_creator.md  扫描本地转写，幂等补建缺失�
 | 本地 MCP server | `pku_sync/mcp_server.py` + `mcp_tools.py` | 只读 stdio MCP：health / list_courses / list_course_files / read_course_text / list_recording_status / get_daily_status（路径限制在 DATA_DIR 内，读取截断上限 200k 字符） |
 | MCP 宿主配置 | `pku_sync/mcp_setup.py` | `uv run pku-sync mcp configure <factory|claude|codex>`：为宿主注册 pku-sync + 官方 notion（`https://mcp.notion.com/mcp`）两个 MCP server，并可发起宿主侧 OAuth |
 | Agent runner | `pku_sync/agent_runner.py` | `uv run pku-sync review` / `uv run pku-sync lecture-batch`：把 `scripts/daily_review_mcp.md` / `scripts/lecture_batch_creator.md` 交给所选宿主的无人值守会话（droid/claude/codex 三态命令），报告落 logs/review_YYYYMMDD.md、logs/lecture_YYYYMMDD.md |
-| localhost 面板 | `pku_sync/panel/`（jobs + pipelines + webapi）+ CLI `panel` | `uv run pku-sync panel`（FastAPI + uvicorn 为默认依赖，只绑 127.0.0.1）：实时读 daily 日志尾/EXIT_CODE/录音阶段，按钮触发 daily/automate（单飞 JobRunner，忙时 409 不并行跑管道）；复用 M0 service 层同一代码路径；0 外部资源、浏览器即 UI（瘦客户端，迁移自由见 `docs/SERVICE_PLAN.md` §3.6）；产品化双视角设计后置 M3（§1.8） |
+| localhost 面板 | `pku_sync/panel/`（jobs + pipelines + webapi）+ CLI `panel` | `uv run pku-sync panel`（FastAPI + uvicorn 为默认依赖，只绑 127.0.0.1）：实时读 daily 日志尾/EXIT_CODE/录音阶段，按钮触发 daily/automate（单飞 JobRunner，忙时 409 不并行跑管道）；复用 M0 service 层同一代码路径；0 外部资源、浏览器即 UI（瘦客户端，跨平台可迁移）；学生端界面见 `pku_sync/panel/student_ui.py` |
 | 云端中转（M2 骨架） | 私有仓 `Suiseiseki-2016/PKU-All-in-Notion-server`（`server/accounts.py` + `relay.py`；服务端件不在本仓库） | 平台账号库（SQLite 单文件：账号/会话/兑换码/用量流水）+ `POST /v1/transcribe`（会话鉴权 → 余额闸 402 → ASR 注入位 → 实际秒数计量扣减 → 音频不落盘）+ `GET /v1/quota` + `POST /v1/redeem`（兑换码充值）+ `POST /v1/recharge`（501 支付预留）+ `/healthz`；上游 ASR 未配置时 503 响亮拒绝；用户不持有任何 key（§1.7）；部署目标 `pku.aeoluswu.info`（单一客户端域名；三台服务器主备，CF proxied） |
 | 可移植晨检手册 | `scripts/daily_review_mcp.md` | 宿主无关的 Notion 对账登记规范（动态发现 hub/数据库，不硬编码用户 id） |
 | 批量建页手册 | `scripts/lecture_batch_creator.md` | 为已有转写但还没有讲次页的课程幂等建页（v3 起可移植 MCP 版，由 agent_runner 分发，automate 自动拾起） |

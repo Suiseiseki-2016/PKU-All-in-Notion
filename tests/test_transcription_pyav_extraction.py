@@ -123,7 +123,7 @@ def test_extraction_writes_a_16k_mono_audio_only_track(tmp_path):
     assert shape["rate"] == 16000
     assert shape["channels"] == 1
     assert shape["layout"] == "mono"
-    # SERVICE_PLAN §3.2: audio only ever leaves the machine, never the video.
+    # Privacy rule: audio only ever leaves the machine, never the video.
     assert shape["video_streams"] == 0
     expected = 16000 * CLIP_SECONDS
     assert abs(shape["samples"] - expected) < 16000 * 0.25

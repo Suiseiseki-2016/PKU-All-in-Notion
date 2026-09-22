@@ -70,7 +70,7 @@ def get_session(
 
     Credentials default to the configured pair in ``.env``; explicit values
     override per call, so a service layer can inject one user's credentials
-    without touching global config (docs/SERVICE_PLAN.md, milestone M0).
+    without touching global config.
     Transport errors that survive the client's own retries are retried once more
     around the whole login; a rejected credential is raised immediately, since
     retrying cannot help.
@@ -98,7 +98,7 @@ def iaaa_authenticate(
     ``redir_url`` is the callback IAAA has registered for that appid. The
     token is what the caller exchanges for a session at the target's SSO
     endpoint. Explicit ``username``/``password`` override the configured
-    pair (service-layer injection, docs/SERVICE_PLAN.md M0); empty means
+    pair (service-layer injection); empty means
     "use .env".
     """
     user = username or settings.pku_username
