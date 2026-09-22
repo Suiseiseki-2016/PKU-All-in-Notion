@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     # Explicit, off-by-default gate for disposable [E2E] exercise pages.
     exercise_e2e_enabled: bool = False
 
+    # Scratch/test-instance flag (EXERCISE_UI_E2E_MODE; never set on a real
+    # install): the packaged student UI's organize confirm carries no
+    # e2e_mode field, so an attended window instance sets this to run the
+    # UI-driven organize in e2e mode — the created exercise page keeps the
+    # [E2E] title prefix and the workspace-mutation boundary holds. The
+    # exercise_e2e_enabled gate above still applies to the implied call.
+    exercise_ui_e2e_mode: bool = False
+
     delete_video_after_processing: bool = True
 
     @property

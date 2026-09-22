@@ -308,7 +308,8 @@ def create_app(
     add_directory_routes(app, directory_service)
     add_connection_routes(app, connection_service)
     add_student_ui_routes(app)
-    add_organize_routes(app, organizer_service, gate=exercise_job_gate)
+    add_organize_routes(app, organizer_service, gate=exercise_job_gate,
+                         ui_e2e_mode=bool(getattr(settings, "exercise_ui_e2e_mode", False)))
     add_grading_routes(app, grading_service, gate=exercise_job_gate)
 
     @app.get("/", response_class=HTMLResponse)

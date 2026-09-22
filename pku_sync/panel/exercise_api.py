@@ -28,11 +28,23 @@ class _OrganizeJob:
 
 
 class OrganizeJobController:
-    """Single-flight organizer runner with a metadata-only poll result."""
+    """Single-flight organizer runner with a metadata-only poll result.
 
-    def __init__(self, service, gate: ExerciseJobGate | None = None):
+    ``ui_e2e_mode`` is the scratch/test-instance setting
+    (EXERCISE_UI_E2E_MODE; false on every real install) that runs
+    UI-driven organize requests — the student SPA's confirm sends no
+    ``e2e_mode`` field — in e2e mode, so the created exercise page carries
+    the ``[E2E] `` title prefix. It exists so an attended window can have
+    the user drive the REAL student organize flow without mutating
+    non-disposable Notion pages; the organizer's own
+    ``EXERCISE_E2E_ENABLED`` gate still applies to the implied e2e call.
+    """
+
+    def __init__(self, service, gate: ExerciseJobGate | None = None,
+                 ui_e2e_mode: bool = False):
         self.service = service
         self.gate = gate or ExerciseJobGate()
+        self.ui_e2e_mode = bool(ui_e2e_mode)
         self._lock = threading.Lock()
         self._job = _OrganizeJob()
 
@@ -54,7 +66,8 @@ class OrganizeJobController:
 
     def _execute(self, job_id: str, request: OrganizeRequest) -> None:
         try:
-            if request.e2e_mode:
+            e2e_mode = bool(request.e2e_mode) or self.ui_e2e_mode
+            if e2e_mode:
                 result = self.service.organize(
                     request.course_id, request.lecture_ids, e2e_mode=True
                 )
@@ -89,8 +102,9 @@ class OrganizeJobController:
                      "retryable": True}, status.HTTP_409_CONFLICT)
 
 
-def add_organize_routes(app, service, *, gate: ExerciseJobGate | None = None) -> None:
-    controller = OrganizeJobController(service, gate=gate)
+def add_organize_routes(app, service, *, gate: ExerciseJobGate | None = None,
+                        ui_e2e_mode: bool = False) -> None:
+    controller = OrganizeJobController(service, gate=gate, ui_e2e_mode=ui_e2e_mode)
     app.state.organize_jobs = controller
 
     @app.get("/api/exercises/organize/estimate")
