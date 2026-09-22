@@ -13,3 +13,6 @@ data/
 logs/
 *.mp4
 *.ts
+
+# packaging build output (uv build -> dist\; see installer/windows/README.md)
+dist/
