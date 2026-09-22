@@ -1518,7 +1518,11 @@
       state.activated = true;
       state.notice = "";
       state.noticeKind = "hint";
-      return loadDirectory().then(function () {
+      // the sidebar quota card must show the freshly granted quota without a
+      // reload: refetch it as part of the activation success path
+      return loadQuota().then(function () {
+        return loadDirectory();
+      }).then(function () {
         render();
         showToast(COPY.onboarding.activated_toast);
       });
