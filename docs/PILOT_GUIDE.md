@@ -56,11 +56,12 @@ pku-sync panel
 
 ### 1.2 macOS
 
-在「终端」里依次运行（每条一行，照抄；第一条需要你的密码授权安装 uv）：
+在「终端」里依次运行（每条一行，照抄）：
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# 安装完成后重新打开一个终端窗口（让 uv 进入 PATH），然后：
+# 安装完成后重新打开一个终端窗口（让 uv 进入 PATH）。uv 装在你的用户目录
+# （~/.local/bin），不需要系统管理员权限。
 uv python install 3.11
 uv tool install --managed-python --python 3.11 --index https://pku.aeoluswu.info/packages/simple/ pku-course-sync
 ```
