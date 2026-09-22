@@ -6,7 +6,17 @@ user-approved packaging design (`library/packaging-design.md`, mission M5):
 - the `.exe` **wraps the uv bootstrap** (`bootstrap.ps1`): installs the
   official standalone uv when missing, provisions uv-managed Python 3.11
   (python-build-standalone — a fresh machine needs **no system Python**),
-  and installs the app as a **uv tool** from the bundled release wheel;
+  and installs the app as a **uv tool BY PACKAGE NAME** from the public
+  PEP 503 package index `https://aeoluswu.info/packages/simple/`
+  (independent static path on the user's website — never the deployed
+  relay). The uv receipt retains that index, so a later literal
+  `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path)
+  resolves a newer published wheel;
+- the bundled release wheel is kept ONLY as an explicit **offline fallback**:
+  when the public index is unreachable (or not yet deployed — its current
+  state, see `..\release\RUNBOOK.md`), bootstrap retries the same
+  by-name install with `--find-links <bundle dir>`. The fallback never
+  creates a wheel-path receipt (which would pin upgrades to one file);
 - per-user install (`PrivilegesRequired=lowest`, `{localappdata}\Programs`) —
   no admin prompt, nothing outside the user profile;
 - Start Menu / Desktop shortcuts start the panel via `launch-panel.ps1`,
@@ -17,7 +27,9 @@ user-approved packaging design (`library/packaging-design.md`, mission M5):
 - a PyPI mirror (TUNA) is supported through uv's own env vars: the
   `tunamirror` task passes `-Mirror` to `bootstrap.ps1` for the install and
   persists `UV_DEFAULT_INDEX` at the user level (HKCU, removed at uninstall)
-  so the in-app autoupdate's `uv tool upgrade` also resolves through it.
+  so dependency downloads (and later upgrades' dependency resolution) go
+  through it. The app package itself always resolves from the public index
+  recorded in the uv receipt.
 
 ## Layout
 
@@ -28,11 +40,17 @@ user-approved packaging design (`library/packaging-design.md`, mission M5):
 | `launch-panel.ps1` | panel launcher — shortcut target; CWD pinned to the app dir |
 
 `bootstrap.ps1` also runs standalone:
-`powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 [-Wheel <wheel-or-dir>] [-Mirror <url>] [-PythonVersion 3.11] [-AppDir <dir>]`.
-Exit codes: 0 ok; 2 wheel not found; 3 uv install failed; 4 Python
-provisioning failed; 5 tool install failed; 6 shim missing. It writes a
-transcript to `<AppDir>\install.log` (default app dir:
+`powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 [-Index <simple-index-url>] [-Wheel <wheel-or-dir>] [-Mirror <url>] [-PythonVersion 3.11] [-AppDir <dir>]`.
+Exit codes: 0 ok; 2 fallback wheel missing when needed (public index failed
+and no bundled wheel); 3 uv install failed; 4 Python provisioning failed;
+5 tool install failed (bad index/mirror URL, or both the public index and
+the offline fallback failed); 6 shim missing. It writes a transcript to
+`<AppDir>\install.log` (default app dir:
 `%USERPROFILE%\PKU-All-in-Notion`).
+
+The public index the installer defaults to (`-Index`) is deployed by the
+user from the checked-in upload tree and runbook in `..\release\`
+(`RUNBOOK.md`, `site/`, `make_simple_index.py`).
 
 ## Build (release engineer)
 
@@ -68,9 +86,19 @@ Setup 6 on the build machine.
 
 ## Update and uninstall semantics
 
-- Running a newer version's installer over an existing install is the
-  wave-1 update path: `uv tool install --force` replaces the tool env; the
-  per-user app dir (`.env`, data, logs) is never touched.
+- Index-backed installs (the normal path) upgrade two ways: (1) the in-app
+  autoupdate — the panel notifies from the GitHub Releases manifest and, on
+  the user's explicit request, applies a literal `uv tool upgrade
+  pku-course-sync` at the next start, which resolves the newer wheel from
+  the receipt-retained public index; (2) re-running a newer installer
+  (`uv tool install --force` moves to the newest published version). The
+  per-user app dir (`.env`, data, logs) is never touched by either path.
+- Installs made through the offline fallback (index not reachable) hold a
+  name-based `--find-links` receipt: a literal `uv tool upgrade` is a safe
+  no-op there. After the public index is deployed, one explicit
+  `uv tool upgrade pku-course-sync --index https://aeoluswu.info/packages/simple/`
+  both upgrades and rewrites the receipt to the index-backed form
+  (verified locally against a simple-index fixture).
 - Uninstall removes the uv tool (best effort) and the install dir, never
   the per-user app dir; the uninstaller says so explicitly. The persisted
   `UV_DEFAULT_INDEX` value is removed with it.

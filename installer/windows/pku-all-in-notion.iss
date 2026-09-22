@@ -4,7 +4,14 @@
 ; an Inno Setup .exe WRAPPING the uv bootstrap - it does not bundle Python or
 ; the application runtime. bootstrap.ps1 installs the official standalone uv,
 ; provisions uv-managed Python 3.11 (python-build-standalone, no system Python
-; required), and installs the app as a uv tool from the bundled release wheel.
+; required), and installs the app as a uv tool BY PACKAGE NAME from the public
+; PEP 503 package index at https://aeoluswu.info/packages/simple/ (an
+; independent static path on the user's website - never the deployed relay),
+; so the uv receipt retains that index and a literal
+; `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path) can
+; resolve a newer published wheel. The bundled release wheel is kept ONLY as
+; an explicit --find-links fallback for an unreachable/not-yet-published
+; index; the fallback still installs by name, never as a wheel-path receipt.
 ;
 ; Build (release engineer, Windows host with Inno Setup 6 installed):
 ;   1. uv build                                   (repo root; wheel -> dist\)
@@ -29,9 +36,16 @@
 #define MyAppName "PKU All in Notion"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "PKU All in Notion"
-; TUNA PyPI mirror (China-network fast path). The value is passed to
-; bootstrap.ps1 for this install and persisted as the user-level
-; UV_DEFAULT_INDEX so later `uv tool upgrade` runs use the same mirror.
+; Public PEP 503 package index (independent static path on the user's
+; website, deployed per installer/release/RUNBOOK.md). Passed to
+; bootstrap.ps1 so the normal install is BY NAME from this index and the uv
+; receipt retains it for literal `uv tool upgrade pku-course-sync`.
+#define PackageIndex "https://aeoluswu.info/packages/simple/"
+; TUNA PyPI mirror (China-network fast path) for DEPENDENCIES. The value is
+; passed to bootstrap.ps1 for this install and persisted as the user-level
+; UV_DEFAULT_INDEX so later `uv tool upgrade` runs resolve dependencies
+; through the same mirror; pku-course-sync itself always resolves from the
+; public package index recorded in the uv receipt.
 #define PyPIMirror "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [Setup]
@@ -66,7 +80,10 @@ Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescripti
 Name: "tunamirror"; Description: "使用清华 TUNA PyPI 镜像下载依赖（推荐国内网络；将写入用户环境变量 UV_DEFAULT_INDEX，卸载时移除）(&M)"; GroupDescription: "网络:"
 
 [Files]
-; The release wheel built by `uv build` at the repo root (dist\).
+; The bundled release wheel: the OFFLINE FALLBACK asset only (bootstrap.ps1
+; passes its directory to `uv tool install --find-links pku-course-sync`
+; when the public package index is unreachable). The normal path installs
+; by name from the public index.
 Source: "..\..\dist\pku_course_sync-{#MyAppVersion}-py3-none-any.whl"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bootstrap.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "launch-panel.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -95,9 +112,11 @@ begin
   begin
     AppDir := ExpandConstant('{app}');
     WheelName := 'pku_course_sync-{#MyAppVersion}-py3-none-any.whl';
-    // bootstrap.ps1 accepts the bundle dir and resolves the wheel itself;
-    // the explicit name keeps the log honest about what is being installed.
+    // bootstrap.ps1 installs BY NAME from the public package index
+    // (-Index); the bundled wheel is passed explicitly so the offline
+    // --find-links fallback resolves exactly the intended file.
     BootstrapParams := '-NoProfile -ExecutionPolicy Bypass -File "' + AppDir + '\bootstrap.ps1"' +
+      ' -Index "{#PackageIndex}"' +
       ' -Wheel "' + AppDir + '\' + WheelName + '"';
     if IsTaskSelected('tunamirror') then
       MirrorSuffix := ' -Mirror "{#PyPIMirror}"'

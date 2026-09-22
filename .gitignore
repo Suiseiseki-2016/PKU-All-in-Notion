@@ -16,3 +16,7 @@ logs/
 
 # packaging build output (uv build -> dist\; see installer/windows/README.md)
 dist/
+# release wheels staged into the public-index upload tree are build
+# artifacts; only the generated index.html + SHA256SUMS.txt are committed
+# (see installer/release/RUNBOOK.md)
+installer/release/site/wheels/*.whl

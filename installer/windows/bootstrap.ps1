@@ -9,32 +9,48 @@
 #      (https://astral.sh/uv/install.ps1);
 #   2. provisions uv-managed Python 3.11 (python-build-standalone - a fresh
 #      machine needs NO system Python);
-#   3. installs the app as a uv tool from the bundled release wheel
-#      (`uv tool install`, --force so re-running the installer updates the
-#      tool env in place);
+#   3. installs the app as a uv tool BY PACKAGE NAME from the public PEP 503
+#      package index (independent static path on aeoluswu.info, never the
+#      relay), so the uv receipt records the name requirement plus that
+#      index and a literal `uv tool upgrade pku-course-sync` (the in-app
+#      autoupdate apply path) can resolve a newer published wheel. The
+#      bundled release wheel is kept ONLY as an explicit --find-links
+#      fallback when the public index is unreachable - the fallback still
+#      installs by name, never as a wheel-path receipt (which would pin
+#      upgrades to one file);
 #   4. never writes secrets or data into the install dir: credentials live in
 #      the per-user app dir (%USERPROFILE%\PKU-All-in-Notion, created here,
 #      pinned by launch-panel.ps1).
 #
 # A PyPI mirror (e.g. TUNA) is honored through uv's own env vars
 # (UV_DEFAULT_INDEX), set for this process by the installer's mirror task.
-# The installer (Inno [Registry]) additionally persists UV_DEFAULT_INDEX at
-# the user level when the mirror task is selected, so later
-# `uv tool upgrade` runs (autoupdate) resolve through the same mirror.
+# The public package index is passed as an ADDITIONAL index (--index), so
+# dependencies keep resolving from PyPI or the mirror while pku-course-sync
+# itself comes from the public index (it is not published on PyPI). The
+# installer (Inno [Registry]) additionally persists UV_DEFAULT_INDEX at
+# the user level when the mirror task is selected; the receipt-retained
+# public index keeps literal `uv tool upgrade` working alongside it.
 #
-# Exit codes: 0 ok; 2 wheel not found; 3 uv install failed; 4 Python
-# provisioning failed; 5 tool install failed; 6 pku-sync shim missing.
+# Exit codes: 0 ok; 2 fallback wheel missing when needed; 3 uv install
+# failed; 4 Python provisioning failed; 5 tool install failed (bad index/
+# mirror URL, or both the public index and the offline fallback failed);
+# 6 pku-sync shim missing.
 #
 # NOTE: this file is UTF-8 with a leading BOM on purpose - Windows
 # PowerShell 5.1 decodes BOM-less .ps1 files as ANSI and would corrupt the
 # Chinese copy below.
 
 param(
-    # Path to the release wheel, or a directory containing exactly one
-    # pku_course_sync-*-py3-none-any.whl (default: the script's own bundle
-    # directory, which is where the Inno installer unpacks it).
+    # Public PEP 503 package index the app is installed from BY NAME. The
+    # uv receipt retains this index so a literal `uv tool upgrade
+    # pku-course-sync` resolves newer published wheels.
+    [string]$Index = 'https://aeoluswu.info/packages/simple/',
+    # Path to the bundled release wheel (offline fallback ONLY), or a
+    # directory containing exactly one pku_course_sync-*-py3-none-any.whl
+    # (default: the script's own bundle directory, which is where the Inno
+    # installer unpacks it).
     [string]$Wheel = $PSScriptRoot,
-    # Optional PyPI mirror URL, e.g. https://pypi.tuna.tsinghua.edu.cn/simple
+    # Optional PyPI mirror URL for DEPENDENCIES, e.g. https://pypi.tuna.tsinghua.edu.cn/simple
     [string]$Mirror = "",
     [string]$PythonVersion = "3.11",
     # Per-user app dir (holds .env + data; never inside the install dir).
@@ -72,7 +88,10 @@ function Invoke-Logged {
 Log ("=== PKU All in Notion bootstrap " + (Get-Date -Format s) + " ===")
 Log ("app dir: " + $AppDir)
 
-# --- 1. locate the release wheel -------------------------------------------
+# --- 1. locate the bundled wheel (offline fallback source) ------------------
+# The wheel is NOT the normal install source anymore; a missing or ambiguous
+# wheel only disables the offline fallback and is logged, never fatal for the
+# index-backed normal path below.
 $WheelPath = $null
 if (Test-Path $Wheel -PathType Leaf) {
     $WheelPath = (Resolve-Path $Wheel).Path
@@ -82,16 +101,23 @@ if (Test-Path $Wheel -PathType Leaf) {
     if ($candidates.Count -eq 1) {
         $WheelPath = $candidates[0].FullName
     } elseif ($candidates.Count -gt 1) {
-        Log ("bootstrap: 在安装目录里找到多个 wheel，请指定 -Wheel：")
+        Log "bootstrap: 安装目录里找到多个 wheel，离线回退不可用（不影响公共软件源安装）："
         foreach ($c in $candidates) { Log ("  " + $c.FullName) }
-        exit 2
     }
 }
 if (-not $WheelPath) {
-    Log "bootstrap: 没有找到应用 wheel（pku_course_sync-*-py3-none-any.whl）。"
-    exit 2
+    Log "bootstrap: 没有找到内置离线安装包（pku_course_sync-*-py3-none-any.whl）；公共软件源不可用时将无法回退。"
+} else {
+    Log ("offline fallback wheel: " + $WheelPath)
 }
-Log ("wheel: " + $WheelPath)
+
+# --- 1b. validate the public package index ---------------------------------
+if ($Index -notmatch '^https?://') {
+    Log ("bootstrap: 公共软件源地址必须是 http(s):// 开头：" + $Index)
+    exit 5
+}
+if (-not $Index.EndsWith('/')) { $Index = $Index + '/' }
+Log ("package index: " + $Index)
 
 # --- 2. locate or install the official standalone uv ----------------------
 $uvBinDir = Join-Path $env:USERPROFILE '.local\bin'
@@ -148,16 +174,47 @@ if ($rc -ne 0) {
     exit 4
 }
 
-# --- 5. install / update the app as a uv tool -------------------------------
+# --- 5. install / update the app as a uv tool (index-backed, by name) -------
+# `--index` adds the public package index on top of the default index (PyPI,
+# or the mirror set above), so dependencies resolve from there while
+# pku-course-sync itself comes from the public index (it is not on PyPI).
+# The receipt records the name requirement plus this index; a literal
+# `uv tool upgrade pku-course-sync` therefore resolves newer published
+# wheels - including for mirror users (a user-level UV_DEFAULT_INDEX only
+# replaces the default slot, and pku-course-sync is not on PyPI/mirrors).
 # --force: re-running the installer (the wave-1 update path) replaces the
-# tool env in place. The per-user app dir (.env + data) is never touched.
+# tool env in place, moving to the newest published version. The per-user
+# app dir (.env + data) is never touched.
 $rc = Invoke-Logged -Exe $uvExe -ArgList @(
         'tool', 'install', '--force', '--managed-python',
-        '--python', $PythonVersion, $WheelPath
-    ) -What 'uv tool install pku-course-sync（依赖下载可能需要几分钟）'
+        '--python', $PythonVersion, '--index', $Index, 'pku-course-sync'
+    ) -What ('uv tool install pku-course-sync（公共软件源 ' + $Index + '；依赖下载可能需要几分钟）')
 if ($rc -ne 0) {
-    Log ("bootstrap: 应用安装失败（退出码 " + $rc + "）。")
-    exit 5
+    # --- 5b. offline fallback: bundled release wheel via --find-links --------
+    # The bundled wheel is ONLY an explicit fallback for an unreachable or
+    # not-yet-published public index. The requirement stays BY NAME (never a
+    # wheel-path receipt, which pins upgrades to one file): uv's --find-links
+    # takes a directory, so a wheel file resolves to its parent directory
+    # (the Inno bundle dir holds exactly one wheel).
+    if (-not $WheelPath) {
+        Log ("bootstrap: 公共软件源安装失败（退出码 " + $rc + "），且没有内置离线安装包可回退。")
+        exit 2
+    }
+    Log ("bootstrap: 公共软件源安装失败（退出码 " + $rc + "），改用内置离线安装包（--find-links）…")
+    $fallbackLinks = if (Test-Path $WheelPath -PathType Leaf) {
+        Split-Path -Parent $WheelPath
+    } else {
+        $WheelPath
+    }
+    $rc = Invoke-Logged -Exe $uvExe -ArgList @(
+            'tool', 'install', '--force', '--managed-python',
+            '--python', $PythonVersion, '--find-links', $fallbackLinks, 'pku-course-sync'
+        ) -What 'uv tool install pku-course-sync（离线回退；依赖仍需从默认源下载）'
+    if ($rc -ne 0) {
+        Log ("bootstrap: 应用安装失败（公共软件源与离线回退均未成功；退出码 " + $rc + "）。")
+        exit 5
+    }
+    Log "bootstrap: 已用内置离线安装包完成安装（公共软件源当前不可用；部署后可用 uv tool upgrade pku-course-sync --index 切换到公共软件源）。"
 }
 
 # --- 6. verify the entry-point shim ----------------------------------------

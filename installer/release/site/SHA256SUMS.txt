@@ -1,0 +1,1 @@
+2a1de66498f9fb126dcece549d86bacffbe187cbaafdbe352621d6dcf5095d86  wheels/pku_course_sync-0.1.0-py3-none-any.whl
