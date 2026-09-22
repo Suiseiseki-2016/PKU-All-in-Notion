@@ -109,10 +109,14 @@ def bound_relay_content(content: Any, *,
 
     The slice never ends inside a codepoint, and the only input is the
     metered relay response text — no credentials can appear by construction.
+    Unpaired Unicode surrogates, which strict UTF-8 cannot encode, are
+    replaced (each surrogate unit becomes a ``?``) so a surrogate-bearing
+    response can never raise UnicodeEncodeError out of the diagnostics and
+    mask the exact blocked reason.
     """
     if not isinstance(content, str):
         return ""
-    raw = content.encode("utf-8")[:limit_bytes]
+    raw = content.encode("utf-8", errors="replace")[:limit_bytes]
     while raw:
         try:
             return raw.decode("utf-8")
@@ -124,20 +128,21 @@ def bound_relay_content(content: Any, *,
 def persist_parse_failure(directory: Path, content: Any) -> None:
     """Write one read-only evidence file holding the bounded raw quiz content.
 
-    A diagnostics write must never mask the original blocked reason, so any
-    filesystem failure is swallowed. Each failure gets its own unique file,
-    made read-only after writing.
+    A diagnostics write must never mask the original blocked reason, so the
+    capture itself stays inside the best-effort guard: any encoding or
+    filesystem failure while bounding or persisting the content is swallowed.
+    Each failure gets its own unique file, made read-only after writing.
     """
-    bounded = bound_relay_content(content)
-    if not bounded:
-        return
     try:
+        bounded = bound_relay_content(content)
+        if not bounded:
+            return
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         path = directory / f"quiz-parse-{stamp}-{uuid.uuid4().hex[:8]}.txt"
         path.write_text(bounded, encoding="utf-8")
         os.chmod(path, 0o444)
-    except OSError:
+    except (OSError, UnicodeError):
         pass
 
 
