@@ -977,6 +977,7 @@ name = "pku-course-sync"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "av" },
     { name = "beautifulsoup4" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -1000,6 +1001,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", specifier = ">=11" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.115" },

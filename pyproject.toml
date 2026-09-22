@@ -14,6 +14,11 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "mcp>=1.12,<2",
     "faster-whisper>=1.0",
+    # Cloud transcription decodes the recording's audio track in-process, so
+    # `av` is a direct requirement of the app rather than only a
+    # faster-whisper transitive: a packaged install must carry it even if
+    # faster-whisper's own dependencies change.
+    "av>=11",
     "opencv-python>=4.10",
     "openai>=1.40",
     # the localhost panel (pku_sync/panel/) is a core product feature (M1b)

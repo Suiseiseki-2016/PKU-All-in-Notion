@@ -10,13 +10,17 @@ writes the returned transcript. The relay -- not the user -- holds the
 upstream ASR vendor key and meters minutes per platform account;
 classmates register no third-party account. Audio leaves the machine only
 toward the relay, never toward a vendor directly (§3.2).
+
+Extraction decodes inside this process through PyAV, which links its own
+FFmpeg libraries, so a packaged install needs no media binary on PATH. The
+only remaining use of a system ffmpeg is the HLS download fallback in
+``media.py``.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -42,20 +46,83 @@ def transcribe(video: Path, target: Path, settings: "Settings") -> dict:
     raise ValueError(f"unknown transcription backend: {settings.transcription_backend!r}")
 
 
+# What the relay's ASR vendor wants, and the cheapest useful shape (§3.2).
+_AUDIO_CODEC = "aac"
+_AUDIO_RATE = 16000
+_AUDIO_LAYOUT = "mono"
+
+
+class _NoAudioTrack(Exception):
+    """The container opened and decoded, but carries no audio stream."""
+
+
+def _decoder_note() -> str:
+    """Support hint naming the decoder that actually runs.
+
+    This path used to shell out to a system ffmpeg, so "install ffmpeg" is
+    still the first thing a student (or a support thread) reaches for. Saying
+    plainly which decoder is in use is what stops that wrong fix.
+    """
+    if shutil.which("ffmpeg"):
+        return "（本机的 ffmpeg 不参与云端转写：音轨由应用内置解码器 PyAV 处理）"
+    return "（无需安装 ffmpeg：音轨由应用内置解码器 PyAV 处理）"
+
+
+def _detail(exc: Exception) -> str:
+    """One-line cause for the student-facing copy — never a stack trace."""
+    text = " ".join(str(exc).split()) or exc.__class__.__name__
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
 def _extract_audio(video: Path, out: Path) -> Path:
-    """16 kHz mono AAC track: §3.2 uploads audio only, never the video."""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
+    """16 kHz mono AAC track: §3.2 uploads audio only, never the video.
+
+    Decoding happens in this process. The import is deferred so the panel,
+    sync and directory paths never load a media decoder they do not use, and
+    so a broken install surfaces here as actionable copy instead of an import
+    error at startup.
+    """
+    try:
+        import av
+        from av.audio.resampler import AudioResampler
+    except Exception as exc:
         raise RuntimeError(
-            "cloud transcription needs ffmpeg to extract the audio track; "
-            "install ffmpeg or set TRANSCRIPTION_BACKEND=local"
-        )
-    subprocess.run(
-        [ffmpeg, "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(out)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+            f"云端转写需要应用内置的音频解码器（PyAV），当前安装里无法加载："
+            f"{_detail(exc)}。请重新安装本应用后重试{_decoder_note()}。"
+        ) from exc
+
+    try:
+        with av.open(str(video)) as container:
+            source = next((s for s in container.streams if s.type == "audio"), None)
+            if source is None:
+                raise _NoAudioTrack(video.name)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with av.open(str(out), mode="w") as sink:
+                track = sink.add_stream(_AUDIO_CODEC, rate=_AUDIO_RATE)
+                track.layout = _AUDIO_LAYOUT
+                resampler = AudioResampler(
+                    format=track.format.name, layout=_AUDIO_LAYOUT, rate=_AUDIO_RATE
+                )
+                for frame in container.decode(source):
+                    for resampled in resampler.resample(frame):
+                        for packet in track.encode(resampled):
+                            sink.mux(packet)
+                for resampled in resampler.resample(None):
+                    for packet in track.encode(resampled):
+                        sink.mux(packet)
+                for packet in track.encode(None):
+                    sink.mux(packet)
+    except _NoAudioTrack as exc:
+        raise RuntimeError(
+            f"云端转写在该录像里找不到音轨：{exc.args[0]}。"
+            f"请确认录像下载完整，或重新下载该录像后重试{_decoder_note()}。"
+        ) from None
+    except Exception as exc:
+        raise RuntimeError(
+            f"云端转写无法读取该录像的音轨：{_detail(exc)}。"
+            f"请确认录像文件完整（可重新下载后重试），或设置 "
+            f"TRANSCRIPTION_BACKEND=local 改用本机转写{_decoder_note()}。"
+        ) from exc
     return out
 
 
