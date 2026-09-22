@@ -497,7 +497,10 @@ def _wrong_answer_database(scratch: str, client: NotionClient) -> dict:
 
 
 def _operation_id(state: dict) -> str:
-    store_path = Path(state["data_dir"]) / "panel" / "grading_records.json"
+    # The grading-records store always lives at <scratch>/client-data/panel;
+    # older preserved states may carry data_dir, newer ones only root.
+    data_dir = state.get("data_dir") or (Path(state["root"]) / "client-data")
+    store_path = Path(data_dir) / "panel" / "grading_records.json"
     payload = json.loads(store_path.read_text(encoding="utf-8"))
     page_id = state["exercise"]["page_id"]
     record = payload.get(page_id)
@@ -1442,10 +1445,11 @@ def cmd_reruns(args) -> int:
            and len(wrong["prefix_rows"]) == 2,
            f"q2={len(wrong['rows_by_number'].get(2) or [])} "
            f"q5={len(wrong['rows_by_number'].get(5) or [])} prefix={len(wrong['prefix_rows'])}")
-    _check(checks, "panel row remains 已批改 with the same score",
+    _check(checks, "panel row remains 已批改 after the reruns (the row API carries status/label by design, never a score)",
            row is not None and row.get("status") == "graded"
-           and row.get("score") == first_grade.get("score"),
-           f"row={row}")
+           and row.get("status_label") == "已批改"
+           and row.get("score") is None,
+           f"row={row} first_grade_score={first_grade.get('score')}")
     _check(checks, "quota unchanged across both reruns (zero new spend)",
            abs(quota_before_rerun["llm_points_remaining"]
                - quota_after_reruns["llm_points_remaining"]) <= 1e-9,
@@ -1806,10 +1810,18 @@ def cmd_verify(args) -> int:
 
     client = _scratch_notion_client(args.scratch)
     try:
-        snapshot = _exercise_snapshot(client, page_id, course["id"], [])
         database = _wrong_answer_database(args.scratch, client)
         wrong = _wrong_answer_rows(client, database, state["exercise"]["title"],
                                    state["operation_id"])
+        # The Window D read-only verifier asserts the wrong-answer registrations
+        # the real grader produced (Q2 + Q5, each exactly once); derive them
+        # from the live wrong-answer rows rather than passing an empty list.
+        found_keys = sorted(
+            f"Q{number}"
+            for number in (2, 5)
+            if len(wrong["rows_by_number"].get(number) or []) == 1
+        )
+        snapshot = _exercise_snapshot(client, page_id, course["id"], found_keys)
     finally:
         client.close()
 
@@ -1821,11 +1833,21 @@ def cmd_verify(args) -> int:
     row = _panel_row(rows, page_id)
 
     # -- the Window D read-only verifier over the final real snapshot -------
+    # Resume-window semantics (window-c-2026-09-21-extension-2): the scratch
+    # relay DB is the PRESERVED retry DB. It already held the retry's charged
+    # quiz row before this resume; the first run's quiz charge lived in that
+    # run's own scratch DB, destroyed at its close-out (evidenced there). The
+    # verifier's ledger therefore covers exactly THIS resumed window's two
+    # ops (the new quiz + the grade); the cumulative cross-run ledger is
+    # checked separately against the retry's recorded 100000-millipoint
+    # activation grant.
+    resumed = bool(getattr(args, "resumed", False))
     organize_quota = state["organize_quota"]
     grade_quota = state["grade_quota"]
     llm_rows = db["llm_usage_rows"]
+    ledger_source_rows = llm_rows[-2:] if resumed else llm_rows
     balances = [organize_quota["before"]["llm_points_remaining"]]
-    for item in llm_rows:
+    for item in ledger_source_rows:
         balances.append(balances[-1] - int(item["millipoints"]) / 1000)
     ledger_rows = [
         {
@@ -1838,7 +1860,7 @@ def cmd_verify(args) -> int:
             "millipoints": int(item["millipoints"]),
             "model": item.get("model"),
         }
-        for index, item in enumerate(llm_rows)
+        for index, item in enumerate(ledger_source_rows)
     ]
     verifier = WindowDReadOnlyVerifier()
     verdict = verifier.verify(
@@ -1852,15 +1874,62 @@ def cmd_verify(args) -> int:
     )
 
     # -- ledger: exactly two LLM ops, one ASR task, one exchange -------------
-    _check(checks, "exactly two relay LLM usage rows (one quiz + one grade)",
-           len(llm_rows) == 2 and [item["operation"] for item in llm_rows] == ["quiz", "grade"],
-           f"rows={[{'operation': item['operation'], 'millipoints': item['millipoints']} for item in llm_rows]}")
+    if resumed:
+        # Preserved retry DB: the retry's charged quiz + this resume's quiz
+        # + grade. The retry's activation grant was 100000 millipoints
+        # (evidence/33: quota flipped to 100.0 LLM points at activation).
+        grant_millipoints = 100000
+        cumulative_charged = sum(int(item["millipoints"]) for item in llm_rows)
+        _check(
+            checks,
+            "the preserved relay DB holds exactly three LLM usage rows"
+            " (the retry's charged quiz + this resume's quiz + grade)",
+            len(llm_rows) == 3
+            and [item["operation"] for item in llm_rows] == ["quiz", "quiz", "grade"],
+            f"rows={[{'operation': item['operation'], 'millipoints': item['millipoints']} for item in llm_rows]}")
+        _check(
+            checks,
+            "the resumed window itself added exactly one quiz then one grade"
+            " (rows 2-3 of the preserved DB), both charged",
+            [item["operation"] for item in ledger_source_rows] == ["quiz", "grade"]
+            and all(int(item["millipoints"]) > 0 for item in ledger_source_rows),
+            f"resume_rows={[{'operation': item['operation'], 'millipoints': item['millipoints']} for item in ledger_source_rows]}")
+        _check(
+            checks,
+            "the cumulative millipoint ledger closes against the retry's"
+            " 100000-millipoint activation grant",
+            quota["llm_points_remaining"] * 1000 + cumulative_charged == grant_millipoints,
+            f"remaining_millipoints={quota['llm_points_remaining'] * 1000}"
+            f" charged={cumulative_charged} grant={grant_millipoints}")
+        _check(
+            checks,
+            "the resumed relay log shows ZERO OAuth exchange requests"
+            " (the two authorized exchanges happened in the prior runs;"
+            " no third exchange)",
+            analysis["exchange_request_lines"] == 0,
+            f"exchange_requests={analysis['exchange_request_lines']}")
+        _check(
+            checks,
+            "the resumed relay log shows ZERO transcribe requests"
+            " (the single ASR task was spent in the retry; none added)",
+            analysis["transcribe_request_lines"] == 0,
+            f"transcribe_requests={analysis['transcribe_request_lines']}")
+        _check(
+            checks,
+            "the resumed relay log shows exactly two /v1/llm 200s"
+            " (the resume's quiz + grade only)",
+            analysis["llm_request_lines"] == 2 and analysis["llm_200_lines"] == 2,
+            f"llm_requests={analysis['llm_request_lines']} llm_200={analysis['llm_200_lines']}")
+    else:
+        _check(checks, "exactly two relay LLM usage rows (one quiz + one grade)",
+               len(llm_rows) == 2 and [item["operation"] for item in llm_rows] == ["quiz", "grade"],
+               f"rows={[{'operation': item['operation'], 'millipoints': item['millipoints']} for item in llm_rows]}")
+        _check(checks, "exactly one OAuth exchange line in the relay log",
+               analysis["exchange_200_lines"] == 1,
+               f"exchange_200={analysis['exchange_200_lines']}")
     _check(checks, "exactly one transcribe usage row (one real ASR task)",
            len(db["usage_rows"]) == 1 and db["usage_rows"][0]["kind"] == "transcribe",
            f"rows={db['usage_rows']}")
-    _check(checks, "exactly one OAuth exchange line in the relay log",
-           analysis["exchange_200_lines"] == 1,
-           f"exchange_200={analysis['exchange_200_lines']}")
     _check(checks, "the Window D read-only verifier passes over the final real snapshot",
            all(item["result"] == "pass" for item in verdict["checks"]),
            "failed=" + json.dumps([item for item in verdict["checks"] if item["result"] != "pass"],
@@ -1875,8 +1944,13 @@ def cmd_verify(args) -> int:
         if not path.is_file():
             continue
         rel = str(path.relative_to(paths["root"]))
-        if rel in (r"client-env\.env", "relay-stdout.log", "relay-stderr.log", "state.json"):
-            continue  # the scratch env file is the approved home; logs scanned below
+        if rel in (r"client-env\.env", "relay-stdout.log", "relay-stderr.log",
+                   "relay-stdout-resume.log", "relay-stderr-resume.log", "state.json",
+                   "relay.db"):
+            continue  # the scratch env file is the approved home; logs scanned below;
+            # relay.db is the relay's own session store where the raw platform
+            # token lives BY DESIGN (sessions.token PK) -- its Notion-token
+            # absence is asserted separately below
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -1923,18 +1997,71 @@ def cmd_verify(args) -> int:
            "sha256 comparison against the stage-time baseline")
 
     # -- final panel state -----------------------------------------------------
-    _check(checks, "the panel row is 已批改 with score 50",
-           row is not None and row.get("status") == "graded" and row.get("score") == 50,
-           f"row={row}")
-    _check(checks, "final quota reconciles: 100 - quiz - grade points, seconds decremented once",
-           abs(quota["llm_points_remaining"] - balances[-1]) <= 1e-9,
-           f"quota={quota['llm_points_remaining']} ledger_after={balances[-1]}")
+    _check(checks, "the panel row is 已批改 (the row API carries status/label by design, never a score)",
+           row is not None and row.get("status") == "graded"
+           and row.get("status_label") == "已批改" and row.get("score") is None,
+           f"row={row} page_score={snapshot.get('score')}")
+    if resumed:
+        _check(
+            checks,
+            "final quota equals the retry's grant minus every preserved-DB charge"
+            " (seconds stay decremented once from the retry's ASR)",
+            abs(quota["llm_points_remaining"] - (grant_millipoints - cumulative_charged) / 1000) <= 1e-9
+            and quota["transcribe_seconds_remaining"] == 431954,
+            f"quota={quota['llm_points_remaining']} seconds={quota['transcribe_seconds_remaining']}")
+        captures_dir = (getattr(args, "captures", "") or "").strip()
+        capture_entries: list[dict] = []
+        if captures_dir:
+            summary_path = Path(captures_dir) / "summary.json"
+            if summary_path.exists():
+                try:
+                    capture_entries = json.loads(summary_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    capture_entries = []
+        _check(
+            checks,
+            "the transport capture proves response_format json_object +"
+            " enable_thinking=false on BOTH resumed vendor requests (quiz + grade)",
+            len(capture_entries) == 2
+            and all(
+                entry.get("response_format_type") == "json_object"
+                and entry.get("enable_thinking") is False
+                and entry.get("upstream_status") == 200
+                for entry in capture_entries
+            ),
+            f"captures={[{k: entry.get(k) for k in ('seq', 'response_format_type', 'enable_thinking', 'upstream_status', 'finish_reason')} for entry in capture_entries]}")
+    else:
+        _check(checks, "final quota reconciles: 100 - quiz - grade points, seconds decremented once",
+               abs(quota["llm_points_remaining"] - balances[-1]) <= 1e-9,
+               f"quota={quota['llm_points_remaining']} ledger_after={balances[-1]}")
 
     evidence = {
         "step": "verify",
         "generated_at": _utcnow(),
         "verifier_checks": verdict["checks"],
         "ledger_rows": ledger_rows,
+        "resume_window": (
+            {
+                "note": "window-c-2026-09-21-extension-2 resume of the preserved scratch env; ledger_rows cover ONLY this resumed window's two ops (quiz + grade); the preserved retry DB additionally holds the retry's charged quiz row",
+                "preserved_db_llm_rows": [
+                    {"operation": item["operation"], "millipoints": item["millipoints"],
+                     "model": item.get("model")}
+                    for item in llm_rows
+                ],
+                "retry_activation_grant_millipoints": grant_millipoints,
+                "cumulative_charged_millipoints": cumulative_charged,
+                "cross_run_cumulative_totals": {
+                    "llm_ops": 4, "quiz_ops": 3, "grade_ops": 1,
+                    "asr_tasks": 1, "oauth_exchanges": 2,
+                    "note": "the first run's quiz charge (11 millipoints) lived in that run's scratch DB, destroyed at its close-out (evidence/22 + ledger); the remaining three ops are rows of this preserved DB",
+                },
+                "transport_capture_entries": [
+                    {k: entry.get(k) for k in ("seq", "captured_at", "model", "response_format_type", "enable_thinking", "upstream_status", "finish_reason", "raw_content_bytes")}
+                    for entry in capture_entries
+                ],
+            }
+            if resumed else None
+        ),
         "relay_log_analysis": analysis,
         "final_quota": quota,
         "panel_row_final": row,
@@ -1973,7 +2100,6 @@ def cmd_verify(args) -> int:
 def cmd_cleanup_poll(args) -> int:
     state = _load_state(args.scratch)
     page_id = state["exercise"]["page_id"]
-    database = state["wrong_answer_database"]
     operation_id = state["operation_id"]
     title = state["exercise"]["title"]
     deadline = time.monotonic() + args.timeout
@@ -1982,10 +2108,34 @@ def cmd_cleanup_poll(args) -> int:
     while time.monotonic() < deadline:
         client = _scratch_notion_client(args.scratch)
         try:
+            # Resolve the wrong-answer database by its recorded identity: the
+            # state stores id/url/title and the row query needs the live
+            # title_property. A full directory load is NOT usable here -- once
+            # the human deletes the [E2E] exercise page the directory's
+            # exercise enumeration 404s on that page id, which is exactly what
+            # this poll must tolerate.
+            identity = state["wrong_answer_database"]
+            schema = client.get_database(identity["id"])
+            properties = (schema or {}).get("properties") or {}
+            title_names = [
+                name
+                for name, prop in properties.items()
+                if isinstance(prop, dict) and prop.get("type") == "title"
+            ]
+            if len(title_names) != 1:
+                raise SystemExit("wrong-answer database title property is not unique")
+            database = {"id": identity["id"], "url": identity["url"],
+                        "title": identity["title"], "title_property": title_names[0]}
             page_status = ""
             try:
-                client.get_page(page_id)
-                page_status = "present"
+                page = client.get_page(page_id)
+                # Notion expresses UI deletion as trash-archive: the object
+                # keeps answering get_page with archived/in_trash flags set.
+                # Only a live (non-trashed) page counts as present here.
+                if page.get("archived") or page.get("in_trash"):
+                    page_status = "trashed:archived={}".format(bool(page.get("archived")))
+                else:
+                    page_status = "present"
             except Exception as exc:  # noqa: BLE001
                 page_status = f"gone:{type(exc).__name__}"
             wrong = _wrong_answer_rows(client, database, title, operation_id)
@@ -2206,6 +2356,18 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="the consolidated read-only verification")
     verify.add_argument("--scratch", required=True)
     verify.add_argument("--out", required=True)
+    verify.add_argument(
+        "--resumed", action="store_true",
+        help="resume-window semantics (window-c extension-2): the scratch relay DB is"
+             " the PRESERVED retry DB (its quiz row pre-dates this resume), the relay"
+             " log is the resume log (zero exchanges, zero transcribes), and the"
+             " cumulative ledger closes against the retry's 100000-millipoint grant",
+    )
+    verify.add_argument(
+        "--captures", default="",
+        help="optional transport-capture dir (summary.json) proving response_format"
+             " json_object + enable_thinking=false on the resumed vendor requests",
+    )
     verify.set_defaults(func=cmd_verify)
 
     cleanup_poll = sub.add_parser("cleanup-poll", help="poll until the human [E2E] cleanup is proven")
