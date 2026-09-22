@@ -270,6 +270,7 @@ def _prompt(course_title: str, lecture_titles: list[str], notes: list[dict]) -> 
     )
     prompt = (
         "请根据以下课堂笔记整理一套 5 道练习，必须各有且仅有一道选择、判断、填空、简答、论述题；"
+        "JSON 的 type 字段必须严格是以下五个值之一：选择、判断、填空、简答、论述，不得添加“题”后缀；"
         "每题必须带来源。"
         "只返回 JSON：{title, questions:[{type,question,source,answer}]}。\n"
         f"课程：{course_title}\n讲次：{'、'.join(lecture_titles)}\n\n{sources}"
@@ -295,6 +296,8 @@ def _parse_quiz(content: Any) -> tuple[str, list[dict]]:
         if not isinstance(item, dict):
             raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
         question = {key: str(item.get(key) or "").strip() for key in ("type", "question", "source", "answer")}
+        if question["type"].endswith("题"):
+            question["type"] = question["type"][:-1]
         if question["type"] not in QUESTION_TYPES or not all(question.values()):
             raise OrganizeBlocked(502, "AI 返回的练习格式不完整，请重试。")
         normalized.append(question)
