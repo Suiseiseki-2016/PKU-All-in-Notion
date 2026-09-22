@@ -1,0 +1,42 @@
+# Minimal CI matrix for the public client repo (M5 feature pkg-ci-matrix).
+#
+# One job per OS, each running the same two gates the mission uses everywhere:
+#   - python -m compileall -q pku_sync  (typecheck)
+#   - the full fake-based pytest suite   (uv run pytest, locked deps only)
+#
+# The suite is fake-based: no credentials, tokens, .env, real relay, or real
+# upstream services are ever used in CI. The macOS and Linux legs are the
+# ongoing cross-platform evidence backbone (the Windows leg is also exercised
+# locally on every developer host).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fake-suite:
+    name: compileall + fake pytest suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Sync locked dependencies (all extras)
+        run: uv sync --all-extras
+
+      - name: compileall typecheck
+        run: uv run python -m compileall -q pku_sync
+
+      - name: Fake-based pytest suite
+        run: uv run pytest --basetemp=.pytest-basetemp -q

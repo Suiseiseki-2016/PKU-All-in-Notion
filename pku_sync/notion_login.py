@@ -37,7 +37,6 @@ from __future__ import annotations
 import base64
 import secrets as secrets_mod
 import socket
-import sys
 import threading
 import time
 import webbrowser
@@ -306,8 +305,10 @@ class _CallbackServer(ThreadingHTTPServer):
         # would defeat the 8765→8766 fallback: an occupied port must raise
         # OSError. Bind exclusively on Windows so this listener is an honest
         # occupant too; other platforms keep the standard SO_REUSEADDR
-        # semantics (TIME_WAIT-only reuse).
-        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # semantics (TIME_WAIT-only reuse). SO_EXCLUSIVEADDRUSE exists only
+        # on Windows sockets, so the capability check keeps this branch
+        # cross-platform without naming an OS.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.allow_reuse_address = False
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()

@@ -15,7 +15,6 @@ unstealable occupant).
 from __future__ import annotations
 
 import socket
-import sys
 
 # The only loopback ports the student panel may ever bind, in fallback order.
 # Occupants are never killed; a busy port just moves us to the next approved
@@ -36,12 +35,15 @@ class PanelPortError(RuntimeError):
 def _open_socket(port: int) -> socket.socket:
     """Bind ``127.0.0.1:port`` exclusively; OSError when the port is taken."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-        # Windows SO_REUSEADDR would let a second bind "hijack" an occupied
-        # port and defeat the fallback; exclusive use keeps this probe honest.
-        # (SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are mutually exclusive inside
-        # one socket, so we only set the exclusive flag — same as the OAuth
-        # callback listener.)
+    # SO_EXCLUSIVEADDRUSE exists only on Windows sockets, so the capability
+    # check alone keeps this branch cross-platform without naming an OS
+    # (the constant is simply absent on other systems). On Windows,
+    # SO_REUSEADDR would let a second bind "hijack" an occupied port and
+    # defeat the fallback; exclusive use keeps this probe honest.
+    # (SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are mutually exclusive inside
+    # one socket, so we only set the exclusive flag — same as the OAuth
+    # callback listener.)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     sock.bind(("127.0.0.1", port))
     sock.listen(socket.SOMAXCONN)
