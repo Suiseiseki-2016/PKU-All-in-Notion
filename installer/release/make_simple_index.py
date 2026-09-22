@@ -1,9 +1,10 @@
 """Assemble the user-owned public PEP 503 upload tree for pku-course-sync.
 
 The packaged client installs and upgrades by package name from the public
-simple index at ``https://aeoluswu.info/packages/simple/pku-course-sync/``
-(an independent static path on the user's website — never the deployed relay
-path). This script builds the exact tree the website must serve:
+simple index at ``https://pku.aeoluswu.info/packages/simple/pku-course-sync/``
+(an ADDITIVE static location on the same host as the deployed relay — it
+never routes through the relay application and never modifies relay routes).
+This script builds the exact tree the website must serve:
 
     <out>/
       simple/pku-course-sync/index.html   PEP 503 page, sha256-pinned anchors
@@ -30,7 +31,11 @@ import shutil
 import sys
 from pathlib import Path
 
-DEFAULT_BASE_URL = "https://aeoluswu.info/packages/"
+# User-authorized production route (feature m5-fix-production-index-route,
+# 2026-09-22): the additive static /packages/ location on the SAME host as
+# the deployed relay (pku.aeoluswu.info). The earlier apex aeoluswu.info
+# base never served and was replaced by this user-authorized route.
+DEFAULT_BASE_URL = "https://pku.aeoluswu.info/packages/"
 DEFAULT_PROJECT = "pku-course-sync"
 DEFAULT_REQUIRES_PYTHON = ">=3.11"
 

@@ -7,9 +7,10 @@ user-approved packaging design (`library/packaging-design.md`, mission M5):
   official standalone uv when missing, provisions uv-managed Python 3.11
   (python-build-standalone — a fresh machine needs **no system Python**),
   and installs the app as a **uv tool BY PACKAGE NAME** from the public
-  PEP 503 package index `https://aeoluswu.info/packages/simple/`
-  (independent static path on the user's website — never the deployed
-  relay). The uv receipt retains that index, so a later literal
+  PEP 503 package index `https://pku.aeoluswu.info/packages/simple/`
+  (an additive static `/packages/` location on the relay host — never
+  routed through the relay application). The uv receipt retains that
+  index, so a later literal
   `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path)
   resolves a newer published wheel;
 - the bundled release wheel is kept ONLY as an explicit **offline fallback**:
@@ -96,7 +97,7 @@ Setup 6 on the build machine.
 - Installs made through the offline fallback (index not reachable) hold a
   name-based `--find-links` receipt: a literal `uv tool upgrade` is a safe
   no-op there. After the public index is deployed, one explicit
-  `uv tool upgrade pku-course-sync --index https://aeoluswu.info/packages/simple/`
+  `uv tool upgrade pku-course-sync --index https://pku.aeoluswu.info/packages/simple/`
   both upgrades and rewrites the receipt to the index-backed form
   (verified locally against a simple-index fixture).
 - Uninstall removes the uv tool (best effort) and the install dir, never

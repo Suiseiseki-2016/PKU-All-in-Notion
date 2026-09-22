@@ -5,8 +5,9 @@
 ; the application runtime. bootstrap.ps1 installs the official standalone uv,
 ; provisions uv-managed Python 3.11 (python-build-standalone, no system Python
 ; required), and installs the app as a uv tool BY PACKAGE NAME from the public
-; PEP 503 package index at https://aeoluswu.info/packages/simple/ (an
-; independent static path on the user's website - never the deployed relay),
+; PEP 503 package index at https://pku.aeoluswu.info/packages/simple/ (an
+; ADDITIVE static /packages/ location on the relay host - never routed
+; through the relay application),
 ; so the uv receipt retains that index and a literal
 ; `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path) can
 ; resolve a newer published wheel. The bundled release wheel is kept ONLY as
@@ -36,11 +37,12 @@
 #define MyAppName "PKU All in Notion"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "PKU All in Notion"
-; Public PEP 503 package index (independent static path on the user's
-; website, deployed per installer/release/RUNBOOK.md). Passed to
-; bootstrap.ps1 so the normal install is BY NAME from this index and the uv
-; receipt retains it for literal `uv tool upgrade pku-course-sync`.
-#define PackageIndex "https://aeoluswu.info/packages/simple/"
+; Public PEP 503 package index (the user-authorized ADDITIVE static
+; /packages/ location on pku.aeoluswu.info, the relay host - deployed per
+; installer/release/RUNBOOK.md). Passed to bootstrap.ps1 so the normal
+; install is BY NAME from this index and the uv receipt retains it for
+; literal `uv tool upgrade pku-course-sync`.
+#define PackageIndex "https://pku.aeoluswu.info/packages/simple/"
 ; TUNA PyPI mirror (China-network fast path) for DEPENDENCIES. The value is
 ; passed to bootstrap.ps1 for this install and persisted as the user-level
 ; UV_DEFAULT_INDEX so later `uv tool upgrade` runs resolve dependencies

@@ -1,9 +1,14 @@
-"""Release simple-index generator tests (m5-fix-index-backed-install-autoupdate).
+"""Release simple-index generator tests (m5-fix-index-backed-install-autoupdate,
+route base updated by m5-fix-production-index-route).
 
 Covers `installer/release/make_simple_index.py`, the tool that assembles the
-user-owned public PEP 503 upload tree for `https://aeoluswu.info/packages/`
-(hash-pinned anchors + SHA256SUMS manifest + copied wheels). The generator is
-stdlib-only and deterministic so a regenerated index is byte-stable.
+user-owned public PEP 503 upload tree for
+`https://pku.aeoluswu.info/packages/` (hash-pinned anchors + SHA256SUMS
+manifest + copied wheels). The generator is stdlib-only and deterministic so
+a regenerated index is byte-stable. The base URL was repointed from the never-
+served apex `aeoluswu.info` to the user-authorized additive static location on
+`pku.aeoluswu.info` (2026-09-22); the dedicated
+`test_default_base_url_is_authorized_production_route` pins that decision.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GENERATOR_PATH = REPO_ROOT / "installer" / "release" / "make_simple_index.py"
-DEFAULT_BASE_URL = "https://aeoluswu.info/packages/"
+DEFAULT_BASE_URL = "https://pku.aeoluswu.info/packages/"
 
 
 @pytest.fixture(scope="module")
@@ -163,6 +168,26 @@ def test_empty_wheels_directory_rejected(generator, tmp_path, capsys):
         run_generator(generator, wheels, tmp_path / "site")
     assert excinfo.value.code == 2
     assert "wheel" in capsys.readouterr().err
+
+
+def test_default_base_url_is_authorized_production_route(generator, tmp_path):
+    """The generator's default must be the user-authorized additive static
+    location on pku.aeoluswu.info (feature m5-fix-production-index-route;
+    the earlier apex aeoluswu.info base never served — the user authorized
+    the /packages/ static location on the relay subdomain host instead)."""
+    assert generator.DEFAULT_BASE_URL == "https://pku.aeoluswu.info/packages/"
+
+    # ...and main() without --base-url bakes that default into the page.
+    wheels = tmp_path / "wheels"
+    wheel = write_wheel(wheels, "0.1.0")
+    out = tmp_path / "site"
+    generator.main(["--wheels", str(wheels), "--out", str(out)])
+
+    html = (out / "simple" / "pku-course-sync" / "index.html").read_text(encoding="utf-8")
+    assert (
+        f'href="https://pku.aeoluswu.info/packages/wheels/{wheel.name}'
+        f'#sha256={sha256_of(wheel)}"' in html
+    )
 
 
 def test_build_site_reusable_directly(generator, tmp_path):

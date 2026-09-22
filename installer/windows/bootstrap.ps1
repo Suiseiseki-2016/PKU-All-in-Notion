@@ -10,8 +10,10 @@
 #   2. provisions uv-managed Python 3.11 (python-build-standalone - a fresh
 #      machine needs NO system Python);
 #   3. installs the app as a uv tool BY PACKAGE NAME from the public PEP 503
-#      package index (independent static path on aeoluswu.info, never the
-#      relay), so the uv receipt records the name requirement plus that
+#      package index (an ADDITIVE static /packages/ location on
+#      pku.aeoluswu.info - the same host as the relay, but never routed
+#      through the relay application), so the uv receipt records the name
+#      requirement plus that
 #      index and a literal `uv tool upgrade pku-course-sync` (the in-app
 #      autoupdate apply path) can resolve a newer published wheel. The
 #      bundled release wheel is kept ONLY as an explicit --find-links
@@ -43,8 +45,10 @@
 param(
     # Public PEP 503 package index the app is installed from BY NAME. The
     # uv receipt retains this index so a literal `uv tool upgrade
-    # pku-course-sync` resolves newer published wheels.
-    [string]$Index = 'https://aeoluswu.info/packages/simple/',
+    # pku-course-sync` resolves newer published wheels. Default is the
+    # user-authorized additive static location on pku.aeoluswu.info (the
+    # relay host); see installer/release/RUNBOOK.md.
+    [string]$Index = 'https://pku.aeoluswu.info/packages/simple/',
     # Path to the bundled release wheel (offline fallback ONLY), or a
     # directory containing exactly one pku_course_sync-*-py3-none-any.whl
     # (default: the script's own bundle directory, which is where the Inno

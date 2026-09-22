@@ -10,21 +10,28 @@ but never deploy, push, or publish.
 The packaged client installs and upgrades **by package name** from:
 
 ```text
-https://aeoluswu.info/packages/simple/pku-course-sync/    (PEP 503 project page)
-https://aeoluswu.info/packages/wheels/<wheel-file>        (release wheels)
+https://pku.aeoluswu.info/packages/simple/pku-course-sync/    (PEP 503 project page)
+https://pku.aeoluswu.info/packages/wheels/<wheel-file>        (release wheels)
 ```
 
 `installer/windows/bootstrap.ps1` defaults `-Index` to
-`https://aeoluswu.info/packages/simple/` and passes it as uv's `--index`
+`https://pku.aeoluswu.info/packages/simple/` and passes it as uv's `--index`
 (an *additional* index on top of PyPI, so dependencies still resolve from
 PyPI or the TUNA mirror). The uv receipt records the name requirement plus
 this index, which is what makes a literal `uv tool upgrade pku-course-sync`
 (the in-app autoupdate apply path) resolve newer published wheels — verified
 locally against a loopback simple-index fixture with a 0.1.0 → 0.1.1 swap.
 
-The index is an **independent static path**: it must not be served by or
-routed through the deployed relay (`pku.aeoluswu.info`) and requires no
-relay change.
+The route is the **user-authorized additive static location on the same
+host as the deployed relay** (`pku.aeoluswu.info`): nginx serves `/packages/`
+from an uploaded static tree while every existing route — `/`, `/v1/*`,
+`/healthz` — keeps its existing proxy behavior unchanged. It is NOT served
+by the relay application, never routes through the relay container, and
+requires **no relay code, container, or database change**. (2026-09-22
+note: this route replaced the earlier `aeoluswu.info` apex base, which
+never served — TLS failure via proxy, no DNS direct — while the
+`pku.aeoluswu.info` host answers normally. The user explicitly authorized
+the additive `pku.aeoluswu.info/packages/` production route.)
 
 ## Layout
 
@@ -46,17 +53,106 @@ site/
 
 ## One-time hosting setup (user action, before the first release)
 
-1. Serve `https://aeoluswu.info/packages/` as static HTTPS files from the
-   `site/` tree above (any static hosting the owner controls; NOT the relay
-   service, NOT a relay route).
-2. **Cache headers matter.** Serve the `/packages/simple/` pages with
-   `Cache-Control: no-cache` (or `max-age` ≤ 60s). Verified locally: with no
-   cache header, uv can keep using a cached copy of the project page within
-   its freshness window and a just-published version is invisible to
-   `uv tool upgrade` until that window expires. Wheel files may be cached
-   long — their filenames are unique per version.
-3. Do not add authentication: the index and wheels are public release
-   artifacts (no secrets, no user data — see the security notes).
+The deployment host is the machine that already terminates TLS for
+`pku.aeoluswu.info` in front of the relay container (per the relay repo
+README: nginx terminates TLS; public traffic reaches the relay through
+nginx and Cloudflare). The location below is **purely additive** — do not
+touch any existing `location`, `proxy_pass`, or server block directive.
+
+### 1. Upload the static tree
+
+Copy the prepared tree (from this directory) to a path on that host, e.g.
+`/var/www/pku-packages/` (the on-disk root in the snippet below; adapt the
+path if your layout differs, and keep it OUTSIDE the relay container's
+data volume):
+
+```text
+/var/www/pku-packages/
+  simple/pku-course-sync/index.html
+  wheels/pku_course_sync-<version>-py3-none-any.whl
+  SHA256SUMS.txt
+```
+
+e.g. from a machine holding the repo:
+
+```bash
+scp -r installer/release/site/* <user>@<host>:/var/www/pku-packages/
+```
+
+If your nginx runs **in a container**, mount the uploaded directory into
+that container instead (e.g. `-v /var/www/pku-packages:/var/www/pku-packages:ro`)
+and use the in-container path in the snippet.
+
+### 2. Add the additive nginx location (exact snippet)
+
+Inside the EXISTING `server { ... }` block for `pku.aeoluswu.info` — the
+one that already proxies `/v1/*` and `/healthz` to the relay — add these
+three locations (and nothing else):
+
+```nginx
+# --- BEGIN PKU package index (additive static location; m5-fix-production-index-route) ---
+# Serves the public PEP 503 index from the uploaded static tree. Purely
+# additive: /, /v1/*, /healthz keep their existing proxy behavior.
+# ^~ keeps regex locations in this server block from hijacking wheel paths.
+location ^~ /packages/simple/ {
+    alias /var/www/pku-packages/simple/;
+    index index.html;
+    autoindex off;
+    # REQUIRED: hard caching hides newly published versions from
+    # `uv tool upgrade` within uv's freshness window (verified locally).
+    add_header Cache-Control "no-cache" always;
+}
+location ^~ /packages/wheels/ {
+    alias /var/www/pku-packages/wheels/;
+    autoindex off;
+    # Wheel filenames are unique per version; caching them is safe.
+    add_header Cache-Control "public, max-age=86400" always;
+}
+location ^~ /packages/ {
+    alias /var/www/pku-packages/;
+    autoindex off;
+}
+# --- END PKU package index ---
+```
+
+Notes:
+- The longest-prefix rule picks `^~ /packages/simple/` over
+  `^~ /packages/` for simple pages, so only those carry `no-cache`.
+- `add_header` does not inherit from the server block into a location
+  that declares its own; if you rely on server-level `add_header` values
+  (e.g. HSTS) under `/packages/`, repeat them inside these locations.
+- No Cloudflare change is needed: the hostname is already proxied, and
+  this only adds an origin-served path under it. (Cache rules at the edge
+  still see `Cache-Control: no-cache` from origin for simple pages.)
+- If the host runs multiple origin servers behind the same hostname
+  (primary/backup), apply the SAME snippet on each so the route is
+  consistent after failover.
+
+### 3. Validate and reload (user action)
+
+```bash
+nginx -t          # MUST report "ok / successful" before reloading
+nginx -s reload   # or: systemctl reload nginx
+```
+
+(For a containerized nginx: `docker exec <nginx-container> nginx -t` then
+`docker exec <nginx-container> nginx -s reload`. Never restart or modify
+the relay container itself — the reload is in the TLS-terminating nginx
+only, and a reload does not drop proxied traffic.)
+
+### 4. Cache headers
+
+`Cache-Control: no-cache` on `/packages/simple/` pages is a hard
+requirement, not a preference — verified locally: with no cache header, uv
+can keep using a cached copy of the project page within its freshness
+window and a just-published version is invisible to `uv tool upgrade`
+until that window expires. Wheel files may be cached long — their
+filenames are unique per version.
+
+### 5. No authentication
+
+Do not add authentication: the index and wheels are public release
+artifacts (no secrets, no user data — see the security notes).
 
 ## Per-release steps (hash-pinned)
 
@@ -65,7 +161,7 @@ site/
    `uv build --wheel` → `dist/pku_course_sync-X.Y.Z-py3-none-any.whl`.
 3. Regenerate the upload tree from the repo root:
    `py installer\release\make_simple_index.py --wheels dist --out installer\release\site`
-   (default `--base-url https://aeoluswu.info/packages/`). The page lists
+   (default `--base-url https://pku.aeoluswu.info/packages/`). The page lists
    every wheel in `dist/` — copy previously published wheels into `dist/`
    first if you want them to remain listed (old versions should stay
    listed so downgrades and older installs keep working).
@@ -96,15 +192,35 @@ site/
 
 6. Commit the regenerated `site/simple/pku-course-sync/index.html` and
    `site/SHA256SUMS.txt` (the repo tracks the published index state).
-7. **Upload** (user action): copy the `site/` tree to the website so the
-   two URL-contract paths above serve it.
-8. **Post-deploy verification** (user, read-only):
-   `curl.exe -s https://aeoluswu.info/packages/simple/pku-course-sync/`
-   shows the new anchor; a scratch
-   `uv tool install --index https://aeoluswu.info/packages/simple/ pku-course-sync`
-   succeeds and the downloaded wheel's sha256 equals `SHA256SUMS.txt`; with
-   two versions published, a literal `uv tool upgrade pku-course-sync`
-   swaps to the newest.
+7. **Upload** (user action): copy the `site/` tree to the uploaded static
+   root from the one-time hosting setup (e.g. `/var/www/pku-packages/`) so
+   the two URL-contract paths above serve it; then reload nginx per that
+   section (a reload is only needed when the location itself changed, not
+   for routine wheel/index file updates).
+8. **Post-deploy verification** (read-only; once the user confirms the
+   deployment, the mission runs these checks and records them in
+   `validation\m5-packaging-pilot\` — the user can run the same commands):
+   - `curl.exe -s https://pku.aeoluswu.info/packages/simple/pku-course-sync/`
+     shows the hash-pinned anchor;
+   - the response headers on that page include `Cache-Control: no-cache`;
+   - `curl.exe -s -o <scratch> https://pku.aeoluswu.info/packages/wheels/<wheel>`
+     downloads the wheel and its sha256 equals the `SHA256SUMS.txt` line
+     (and the `#sha256=` anchor);
+   - a scratch `uv tool install --index
+     https://pku.aeoluswu.info/packages/simple/ pku-course-sync`
+     (scratch `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`/`UV_CACHE_DIR`, never the
+     real user tool dir) succeeds by name and the receipt retains the
+     public index;
+   - with two versions published, a literal `uv tool upgrade pku-course-sync`
+     in that scratch env swaps to the newest;
+   - the relay routes are UNCHANGED: `https://pku.aeoluswu.info/healthz`
+     still returns `200 {"ok":true}` and a representative authenticated
+     relay route (`https://pku.aeoluswu.info/v1/quota` without a session
+     token) still returns the relay's `401` — the recorded pre-deploy
+     baseline (2026-09-22) for both is in
+     `validation\m5-packaging-pilot\m5-fix-production-index-route\evidence\production-pre-deploy-baseline.txt`.
+     A static hijack of `/v1/*` would return 404 instead of 401, so this
+     pair is the regression proof.
 9. Publish the GitHub release with tag `vX.Y.Z` matching the wheel version —
    the client's notify-only update check reads this manifest
    (`api.github.com/repos/Suiseiseki-2016/PKU-All-in-Notion/releases/latest`).
@@ -131,21 +247,51 @@ site/
 
 ## Pre-deployment state (recorded 2026-09-22)
 
-`https://aeoluswu.info/packages/simple/pku-course-sync/` is **not yet
-deployed**: probes from the mission host returned a TLS handshake failure
-via the local proxy and 502/HTTP on the apex domain (the relay subdomain
-`pku.aeoluswu.info` answers normally, so the apex static path is the gap).
-Until deployment, installs take the installer's bundled-wheel `--find-links`
-fallback (still a name-based receipt). After deployment, existing
-fallback-installed clients switch to the index-backed form with the one-time
-command:
+`https://pku.aeoluswu.info/packages/simple/pku-course-sync/` is **not yet
+deployed**: a read-only probe from the mission host returned the relay's
+JSON 404 fallthrough (`{"detail":"Not Found"}`) for that path, while
+`/healthz` answered `200 {"ok":true}` and `GET /v1/quota` without a token
+answered the relay's `401 {"detail":"missing session token"}` — the
+recorded pre-deploy baseline. (The earlier `aeoluswu.info` apex base never
+served at all: TLS handshake failure via the local proxy, no DNS direct,
+502 over HTTP — which is why the user authorized the additive
+`pku.aeoluswu.info/packages/` route instead.) Until deployment, installs
+take the installer's bundled-wheel `--find-links` fallback (still a
+name-based receipt; verified locally end-to-end against the unreachable
+production default). After deployment, existing fallback-installed
+clients switch to the index-backed form with the one-time command:
 
 ```powershell
-uv tool upgrade pku-course-sync --index https://aeoluswu.info/packages/simple/
+uv tool upgrade pku-course-sync --index https://pku.aeoluswu.info/packages/simple/
 ```
 
 (verified locally: this both upgrades and rewrites the receipt to the
 index-backed form, after which literal upgrades work).
+
+## Rollback (user action; recorded per the m5-fix-production-index-route requirement)
+
+The deployment is a self-contained additive nginx location — rolling it
+back restores exactly the pre-deploy state and touches nothing else:
+
+1. Remove the three `location` blocks added in the one-time hosting
+   setup (everything between the `BEGIN PKU package index` and
+   `END PKU package index` comment markers). No other nginx directive
+   was changed, so nothing else needs restoring.
+2. `nginx -t` — must pass — then `nginx -s reload` (or the containerized
+   equivalents from the hosting section).
+3. Optional: remove the uploaded tree (`/var/www/pku-packages/`) and the
+   container mount if one was added.
+4. Verify the rollback (read-only):
+   `curl.exe -s https://pku.aeoluswu.info/packages/simple/pku-course-sync/`
+   returns the relay's JSON 404 fallthrough again, while
+   `https://pku.aeoluswu.info/healthz` still returns `200 {"ok":true}`.
+
+Client-side effect of a rollback: `uv tool upgrade pku-course-sync` stops
+resolving new versions (installed clients keep working — the installed
+tool env is self-contained), and fresh installs fall back to the
+installer's bundled wheel via `--find-links` (name-based receipt). The
+relay application, its container, and its database were never involved at
+any point, so they need no rollback action.
 
 ## Verified upgrade semantics (local fixture evidence, 2026-09-22)
 
