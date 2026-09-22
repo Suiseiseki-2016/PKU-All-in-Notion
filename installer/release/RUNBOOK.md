@@ -1,9 +1,12 @@
-# Public package index — release runbook (user-owned deployment)
+# Public package index — release runbook
 
 This is the exact procedure for publishing `pku-course-sync` releases to the
-public PEP 503 index on the user's website. **Website deployment and release
-publication are user-owned actions** — workers prepare this tree and runbook
-but never deploy, push, or publish.
+public PEP 503 index on the user's website. **Per-release publication is a
+user-owned action** — workers never push code or publish releases. The one
+recorded exception is the one-time hosting setup below: the user explicitly
+authorized the packaging worker to deploy the additive `/packages/` nginx
+location on live server-a, which was executed and verified on 2026-09-22
+(see "Deployment record" at the end of this runbook).
 
 ## URL contract (what the installer depends on)
 
@@ -51,7 +54,7 @@ site/
   SHA256SUMS.txt
 ```
 
-## One-time hosting setup (user action, before the first release)
+## One-time hosting setup (deployed 2026-09-22 under explicit user authorization)
 
 The deployment host is the machine that already terminates TLS for
 `pku.aeoluswu.info` in front of the relay container (per the relay repo
@@ -245,20 +248,45 @@ artifacts (no secrets, no user data — see the security notes).
 - Never serve the index from the deployed relay path and never put relay
   credentials anywhere near this tree.
 
-## Pre-deployment state (recorded 2026-09-22)
+## Deployment record (2026-09-22; VAL-PKG-009)
 
-`https://pku.aeoluswu.info/packages/simple/pku-course-sync/` is **not yet
-deployed**: a read-only probe from the mission host returned the relay's
-JSON 404 fallthrough (`{"detail":"Not Found"}`) for that path, while
-`/healthz` answered `200 {"ok":true}` and `GET /v1/quota` without a token
-answered the relay's `401 {"detail":"missing session token"}` — the
-recorded pre-deploy baseline. (The earlier `aeoluswu.info` apex base never
-served at all: TLS handshake failure via the local proxy, no DNS direct,
-502 over HTTP — which is why the user authorized the additive
-`pku.aeoluswu.info/packages/` route instead.) Until deployment, installs
-take the installer's bundled-wheel `--find-links` fallback (still a
-name-based receipt; verified locally end-to-end against the unreachable
-production default). After deployment, existing fallback-installed
+The route is **deployed and live**. Under the user's explicit authorization,
+the packaging worker performed exactly the one-time hosting setup above on
+live server-a (the only host behind `pku.aeoluswu.info`; server-b/c are
+standby nodes without nginx and were not touched):
+
+- Uploaded tree: `/var/www/pku-packages/` with
+  `simple/pku-course-sync/index.html`, the 0.1.0 wheel
+  (sha256 `2a1de664…5095d86`), and `SHA256SUMS.txt` — byte-identical to the
+  committed `site/` tree (hash-verified on both sides).
+- Config: the three additive `/packages/` locations from the snippet above
+  were added to both existing `pku.aeoluswu.info` server blocks (:80 and
+  :443, so either Cloudflare SSL mode serves the route) in
+  `/etc/nginx/conf/conf.d/pku.conf`; nothing else in the file changed
+  (pre-deploy sha256 `ef7d1b6f…`, deployed `c44f93a4…`).
+- Gating: `/etc/nginx/sbin/nginx -t -c /etc/nginx/conf/nginx.conf` passed
+  (only the pre-existing v2ray ssl_stapling warning) and the same compiled
+  nginx instance was gracefully reloaded — the relay container and its
+  database were never touched, and the apt nginx at `/usr/sbin/nginx` was
+  not involved.
+- Verified live: the project page serves the hash-pinned anchor with
+  `Cache-Control: no-cache`, the wheel downloads with its pinned sha256 and
+  `Cache-Control: public, max-age=86400`, `/healthz` still answers
+  `200 {"ok":true}` and `/v1/quota` without a token still answers the
+  relay's `401` — on both origin server blocks and through Cloudflare.
+- Rollback proof executed: restoring the pre-packages config (kept at
+  `/root/pku-package-index-backup/pku.conf.pre-packages` on server-a)
+  returned the exact pre-deploy state (relay JSON 404 fallthrough, healthz
+  200, quota 401, relay container not restarted), and re-applying restored
+  the route — each step gated by `nginx -t`.
+- Full transcripts: the mission validation directory,
+  `validation/m5-packaging-pilot/m5-fix-production-index-route/evidence/`
+  (deploy-* and postdeploy-* files), including the retained pre-deploy
+  baseline (`production-pre-deploy-baseline.txt`).
+
+Fresh installs now install by name from the production index; the
+installer's bundled-wheel `--find-links` fallback (still a name-based
+receipt) remains for offline installs, and existing fallback-installed
 clients switch to the index-backed form with the one-time command:
 
 ```powershell
