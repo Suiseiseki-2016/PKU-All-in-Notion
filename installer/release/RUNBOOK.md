@@ -2,11 +2,22 @@
 
 This is the exact procedure for publishing `pku-course-sync` releases to the
 public PEP 503 index on the user's website. **Per-release publication is a
-user-owned action** — workers never push code or publish releases. The one
-recorded exception is the one-time hosting setup below: the user explicitly
-authorized the packaging worker to deploy the additive `/packages/` nginx
-location on live server-a, which was executed and verified on 2026-09-22
-(see "Deployment record" at the end of this runbook).
+user-owned action** — workers never push code or publish releases. Two
+recorded exceptions exist, both under explicit dated user authorization:
+
+- the one-time hosting setup below: the user explicitly authorized the
+  packaging worker to deploy the additive `/packages/` nginx location on
+  live server-a, which was executed and verified on 2026-09-22 (see
+  "Deployment record" at the end of this runbook);
+- the bounded v0.1.1 client release (authorization dated 2026-09-23): the
+  user explicitly authorized the mission's
+  `m5-authorized-client-release-publish` feature to perform exactly this
+  runbook's per-release steps for v0.1.1 — version bump, wheel build,
+  deterministic index regeneration, GitHub main/tag/release publication,
+  and the `site/` upload to live server-a — plus the read-only
+  post-publish verification. That authorization does not extend to relay
+  code, containers, databases, `/v1/*`, `/healthz`, Cloudflare,
+  server-b/c, or any other release.
 
 ## URL contract (what the installer depends on)
 
@@ -195,9 +206,10 @@ artifacts (no secrets, no user data — see the security notes).
 
 6. Commit the regenerated `site/simple/pku-course-sync/index.html` and
    `site/SHA256SUMS.txt` (the repo tracks the published index state).
-7. **Upload** (user action): copy the `site/` tree to the uploaded static
-   root from the one-time hosting setup (e.g. `/var/www/pku-packages/`) so
-   the two URL-contract paths above serve it; then reload nginx per that
+7. **Upload** (user action; for the bounded v0.1.1 release the 2026-09-23
+   authorized worker performed it): copy the `site/` tree to the uploaded
+   static root from the one-time hosting setup (e.g. `/var/www/pku-packages/`)
+   so the two URL-contract paths above serve it; then reload nginx per that
    section (a reload is only needed when the location itself changed, not
    for routine wheel/index file updates).
 8. **Post-deploy verification** (read-only; once the user confirms the

@@ -35,7 +35,7 @@
 ;     NEVER deletes the per-user app dir; it says so explicitly.
 
 #define MyAppName "PKU All in Notion"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "PKU All in Notion"
 ; Public PEP 503 package index (the user-authorized ADDITIVE static
 ; /packages/ location on pku.aeoluswu.info, the relay host - deployed per

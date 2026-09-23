@@ -18,7 +18,8 @@ Usage (release engineer, from the repo root):
 
 The output is deterministic (no timestamps, sorted versions), so regenerating
 from identical wheels yields byte-identical files. Website deployment is a
-user-owned action; see installer/release/RUNBOOK.md.
+user-owned action except as explicitly recorded in
+installer/release/RUNBOOK.md (dated per-release authorizations).
 """
 
 from __future__ import annotations
