@@ -133,14 +133,14 @@ begin
         BootstrapParams + MirrorSuffix, AppDir, SW_SHOW, ewWaitUntilTerminated,
         ResultCode) then
     begin
-      raise Exception.Create(
+      RaiseException(
         '运行环境安装程序无法启动（powershell.exe）。' + #13#10 +
         '请重试安装；若仍失败，请把日志发给支持：' + GetEnv('USERPROFILE') +
         '\PKU-All-in-Notion\install.log');
     end;
     if ResultCode <> 0 then
     begin
-      raise Exception.Create(
+      RaiseException(
         '运行环境安装失败（退出码 ' + IntToStr(ResultCode) + '）。' + #13#10 +
         '请重试安装；若仍失败，请把日志发给支持：' + GetEnv('USERPROFILE') +
         '\PKU-All-in-Notion\install.log');
