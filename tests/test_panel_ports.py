@@ -14,7 +14,6 @@ proof, mirroring the 8765/8766 callback-fallback tests.
 from __future__ import annotations
 
 import socket
-import sys
 
 import pytest
 
@@ -29,6 +28,10 @@ from pku_sync.panel.ports import (
 def require_free(port: int) -> None:
     """Skip honestly when a foreign process already holds an approved port."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if not hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # posix: allow binding over TIME_WAIT remnants of earlier tests in
+        # this session; a LIVE foreign listener still refuses the bind.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind(("127.0.0.1", port))
     except OSError:
@@ -40,10 +43,15 @@ def require_free(port: int) -> None:
 def occupy_port(port: int) -> socket.socket:
     """A validator-owned loopback listener: a REAL occupant for the fallback."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
         # Windows SO_REUSEADDR would let a second bind "hijack" the port;
         # exclusive use makes this dummy a genuine, unstealable occupant.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # posix: TIME_WAIT-only reuse so this dummy binds despite remnants of
+        # earlier tests; a second LIVE bind is still refused (that needs
+        # SO_REUSEPORT), so the fallback it stands in for stays honest.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", port))
     sock.listen(8)
     return sock

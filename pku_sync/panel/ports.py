@@ -41,10 +41,18 @@ def _open_socket(port: int) -> socket.socket:
     # SO_REUSEADDR would let a second bind "hijack" an occupied port and
     # defeat the fallback; exclusive use keeps this probe honest.
     # (SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are mutually exclusive inside
-    # one socket, so we only set the exclusive flag — same as the OAuth
-    # callback listener.)
+    # one socket, so the exclusive flag is the only option set there — same
+    # as the OAuth callback listener.)
     if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        # Without the exclusive-use capability, the standard SO_REUSEADDR
+        # semantics apply: a quick panel restart re-binds its preferred
+        # approved port despite TIME_WAIT remnants (the same default uvicorn
+        # uses for its own binds), while a LIVE listener still refuses the
+        # bind — two active listeners need SO_REUSEPORT — so the approved
+        # fallback and the never-hijack guarantee both stay honest.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", port))
     sock.listen(socket.SOMAXCONN)
     return sock

@@ -171,7 +171,7 @@ def _run_login_thread(settings, **kwargs):
 
     thread = threading.Thread(target=run)
     thread.start()
-    for _ in range(200):  # wait for the local server + URL
+    for _ in range(600):  # wait for the local server + URL (slow CI runners)
         if urls:
             break
         time.sleep(0.05)

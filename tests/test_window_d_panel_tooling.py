@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -177,11 +178,20 @@ def test_build_rejects_nonempty_unowned_scratch_root(tmp_path):
 
 
 def test_required_automate_regression_probe_uses_current_service_seam():
+    # UTF-8 end to end: the child emits CJK/arrow copy and CI runners may run
+    # a non-UTF-8 default codepage, where a strict locale decode kills the
+    # capture reader thread and leaves stdout None (recorded on
+    # windows-latest, 2026-09-23). PYTHONUTF8=1 pins the child's output
+    # encoding and the explicit utf-8/replace decode makes the ASCII sentinel
+    # assertion deterministic on every runner.
     result = subprocess.run(
         [sys.executable, "scripts/e2e_automate_workflow.py"],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
     assert "E2E PASS: automate ran daily" in result.stdout
