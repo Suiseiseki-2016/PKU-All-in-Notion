@@ -33,14 +33,25 @@ from pku_sync.panel.ports import bind_panel
 HAS_EXCLUSIVE = hasattr(socket, "SO_EXCLUSIVEADDRUSE")
 
 
+def _reuseaddr_is_set(sock: socket.socket) -> bool:
+    """Whether SO_REUSEADDR is set, truthy-vs-zero.
+
+    BSD/macOS getsockopt returns the option's numeric value (e.g. 4) rather
+    than the boolean 1 that Linux/Windows return, so the honest cross-
+    platform predicate is non-zero (recorded on macos-latest, 2026-09-23,
+    run 35809101530: ``assert 4 == 1``).
+    """
+    return sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) != 0
+
+
 def test_panel_listener_socket_option_policy():
     bound, port = bind_panel()
     try:
         assert bound.getsockname()[0] == "127.0.0.1"  # loopback only
         if HAS_EXCLUSIVE:
-            assert bound.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 0
+            assert not _reuseaddr_is_set(bound)
         else:
-            assert bound.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
+            assert _reuseaddr_is_set(bound)
     finally:
         bound.close()
 
@@ -50,12 +61,8 @@ def test_callback_listener_socket_option_policy():
     try:
         assert server.server_address[0] == "127.0.0.1"  # loopback only
         if HAS_EXCLUSIVE:
-            assert server.socket.getsockopt(
-                socket.SOL_SOCKET, socket.SO_REUSEADDR
-            ) == 0
+            assert not _reuseaddr_is_set(server.socket)
         else:
-            assert server.socket.getsockopt(
-                socket.SOL_SOCKET, socket.SO_REUSEADDR
-            ) == 1
+            assert _reuseaddr_is_set(server.socket)
     finally:
         server.server_close()
