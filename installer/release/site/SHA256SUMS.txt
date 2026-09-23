@@ -1,1 +1,2 @@
 2a1de66498f9fb126dcece549d86bacffbe187cbaafdbe352621d6dcf5095d86  wheels/pku_course_sync-0.1.0-py3-none-any.whl
+c6c6a8ab7bbe8a2cf4f4000d672da2245fd10c1d966def15c8cb20654b344ea9  wheels/pku_course_sync-0.1.1-py3-none-any.whl
