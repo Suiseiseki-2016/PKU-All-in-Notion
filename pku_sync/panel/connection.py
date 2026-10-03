@@ -31,27 +31,27 @@ CONNECTION_STATES = (STATE_CONNECTED, STATE_DISCONNECTED, STATE_CONNECTING)
 
 # Approved prototype copy (docs/UI_DESIGN.html onboarding connection row).
 CONNECTED_COPY = "内容将同步至你的空间 · 已连接"
-DISCONNECTED_COPY = "已断开 · 可随时重新连接"
+DISCONNECTED_COPY = "尚未连接 · 点击连接 Notion 开始"
 REVOKE_LABEL = "撤销连接"
-RECONNECT_LABEL = "重新连接"
+RECONNECT_LABEL = "连接 Notion"
 DISCONNECT_TOAST = "已断开 Notion 连接，可随时重新连接。"
 RECONNECT_TOAST = "已重新连接 Notion 学习空间。"
 
 # In-flight and failure copy for the panel-triggered reconnect. The real flow
 # waits for a browser authorization, so the panel needs an explicit in-flight
 # label the prototype (which fakes the flip) does not carry.
-CONNECTING_COPY = "正在重新连接 Notion · 请在浏览器中完成授权。"
-CONNECT_BUSY_MESSAGE = "正在重新连接 Notion，请稍候。"
-CONNECT_FAILED_COPY = "重新连接没有成功，请稍后重试。"
+CONNECTING_COPY = "正在连接 Notion · 请在浏览器中完成授权。"
+CONNECT_BUSY_MESSAGE = "正在连接 Notion，请稍候。"
+CONNECT_FAILED_COPY = "连接 Notion 没有成功，请稍后重试。"
+CONNECT_SERVICE_UNAVAILABLE_COPY = "云端 Notion 授权服务尚未配置，请联系管理员处理后再试。"
 
 # The dedicated disconnected directory state: distinct from the sync error
 # and empty states (library/notion-workspace.md rule 10).
-DISCONNECTED_DIRECTORY_TITLE = "Notion 已断开"
+DISCONNECTED_DIRECTORY_TITLE = "Notion 尚未连接"
 DISCONNECTED_DIRECTORY_COPY = (
-    "已断开 Notion 连接：客户端不会显示上次读取的索引。"
-    "重新连接后，讲次与资料索引会立即恢复。"
+    "连接 Notion 后，这里会显示讲次与资料索引。"
 )
-DISCONNECTED_DIRECTORY_ACTION = "重新连接 Notion"
+DISCONNECTED_DIRECTORY_ACTION = "连接 Notion"
 
 
 class ConnectionBusy(RuntimeError):
@@ -142,11 +142,18 @@ class ConnectionService:
         try:
             self.provider.connect()
         except Exception as exc:  # noqa: BLE001 - every failure is one safe state
+            status = getattr(exc, "status", None)
             with self._lock:
-                self._error = CONNECT_FAILED_COPY
-            # the exception type only: a Notion/relay message may quote the
-            # authorization code or the provider body
-            logger.info("panel notion reconnect failed: %s", type(exc).__name__)
+                self._error = (
+                    CONNECT_SERVICE_UNAVAILABLE_COPY if status == 503
+                    else CONNECT_FAILED_COPY
+                )
+            # Never log the exception message: a provider response could quote
+            # the single-use authorization code. Class and HTTP status suffice.
+            logger.warning(
+                "panel notion connect failed: type=%s status=%s",
+                type(exc).__name__, status if isinstance(status, int) else "none",
+            )
         finally:
             with self._lock:
                 self._connecting = False
@@ -202,6 +209,13 @@ class RealConnectionProvider:
         # the login already wrote the .env; the live settings must agree so
         # the panel state flips without a restart
         self._settings.notion_token = token
+        template_id = (token_info or {}).get("duplicated_template_id")
+        if template_id:
+            from .notion_home import adopt_oauth_template
+            try:
+                adopt_oauth_template(Path(self._settings.data_dir), token, template_id)
+            except Exception:
+                logger.exception("Notion OAuth template adoption failed")
 
 
 class FakeConnectionProvider:
@@ -270,6 +284,7 @@ __all__ = [
     "CONNECTING_COPY",
     "CONNECT_BUSY_MESSAGE",
     "CONNECT_FAILED_COPY",
+    "CONNECT_SERVICE_UNAVAILABLE_COPY",
     "DISCONNECTED_DIRECTORY_TITLE",
     "DISCONNECTED_DIRECTORY_COPY",
     "DISCONNECTED_DIRECTORY_ACTION",

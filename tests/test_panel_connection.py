@@ -28,6 +28,7 @@ from pku_sync.panel.connection import (
     CONNECTED_COPY,
     CONNECT_BUSY_MESSAGE,
     CONNECT_FAILED_COPY,
+    CONNECT_SERVICE_UNAVAILABLE_COPY,
     CONNECTING_COPY,
     DISCONNECT_TOAST,
     DISCONNECTED_COPY,
@@ -241,6 +242,24 @@ def test_reconnect_failure_is_generic_and_never_echoes_the_provider_detail(tmp_p
     assert leak not in rendered and "invalid_grant" not in rendered
 
 
+def test_reconnect_reports_unconfigured_relay_without_leaking_provider_detail(tmp_path):
+    settings = make_settings(tmp_path)
+
+    def failing_login(login_settings, **kwargs):
+        raise NotionError("private code=abcdef123456", status=503)
+
+    service = make_connection_service(
+        settings, env_path=tmp_path / ".env", login=failing_login
+    )
+    client = make_app(service, settings=settings)
+    client.post("/api/connection/connect")
+
+    assert wait_for(lambda: service.snapshot()["error"] is not None)
+    body = client.get("/api/connection").json()
+    assert body["error"] == CONNECT_SERVICE_UNAVAILABLE_COPY
+    assert "abcdef123456" not in json.dumps(body)
+
+
 def test_concurrent_reconnect_is_rejected_with_the_pinned_busy_copy(tmp_path):
     settings = make_settings(tmp_path)
     release = threading.Event()
@@ -303,7 +322,7 @@ def test_real_provider_reads_connection_from_the_live_settings(tmp_path):
 
 def test_connection_copy_matches_the_approved_prototype():
     assert CONNECTED_COPY == "内容将同步至你的空间 · 已连接"
-    assert DISCONNECTED_COPY == "已断开 · 可随时重新连接"
+    assert DISCONNECTED_COPY == "尚未连接 · 点击连接 Notion 开始"
     assert DISCONNECT_TOAST == "已断开 Notion 连接，可随时重新连接。"
     assert RECONNECT_TOAST == "已重新连接 Notion 学习空间。"
 
@@ -313,9 +332,25 @@ def test_disconnected_directory_state_copy_is_dedicated_and_distinct():
 
     # the disconnected directory state is its own state: not a sync error and
     # not the generic empty copy
-    assert DISCONNECTED_DIRECTORY_TITLE == "Notion 已断开"
-    assert "重新连接" in DISCONNECTED_DIRECTORY_COPY
-    assert DISCONNECTED_DIRECTORY_ACTION == "重新连接 Notion"
+    assert DISCONNECTED_DIRECTORY_TITLE == "Notion 尚未连接"
+    assert "连接 Notion" in DISCONNECTED_DIRECTORY_COPY
+    assert DISCONNECTED_DIRECTORY_ACTION == "连接 Notion"
     for reason in (SYNC_ERROR_GENERIC, SYNC_ERROR_READ):
         assert DISCONNECTED_DIRECTORY_COPY != reason
     assert "还没有已索引的课程" not in DISCONNECTED_DIRECTORY_COPY
+
+def test_relay_oauth_template_is_adopted_as_learning_home(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    calls = []
+    from pku_sync.panel import notion_home
+    monkeypatch.setattr(notion_home, "adopt_oauth_template",
+                        lambda data_dir, token, page_id: calls.append((data_dir, token, page_id)))
+    provider = RealConnectionProvider(
+        settings, env_path=tmp_path / ".env",
+        login=lambda *_args, **_kwargs: {
+            "access_token": SEEDED_TOKEN, "duplicated_template_id": "new-home"
+        },
+    )
+    provider.connect()
+    assert settings.notion_token == SEEDED_TOKEN
+    assert calls == [(tmp_path, SEEDED_TOKEN, "new-home")]

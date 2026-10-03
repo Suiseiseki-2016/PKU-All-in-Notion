@@ -45,6 +45,86 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 EMPTY_CODE_NOTICE = "请输入兑换码后再试一次。"
 ACTIVATED_TOAST = "学习空间已激活，课程索引已就绪。"
+REDEEMED_TOAST = "额度已到账。"
+LOGGED_IN_TOAST = "已登录。"
+REGISTERED_TOAST = "注册成功。请查收验证邮件后再兑换额度或使用云端功能。"
+FORGOT_TOAST = "如果该邮箱已注册，重置链接会发到你的邮箱。"
+RESEND_TOAST = "如果该邮箱尚未验证，验证链接会重新发送。"
+
+AUTH_COPY = {
+    "aside": {
+        "eyebrow": "PKU · 学习工作台",
+        "title_lines": ["把每一堂课，", "变成可复习的知识。"],
+        "lead": (
+            "注册产品账号后登录，连接 Notion，再兑换额度。"
+            "邮箱验证完成前可以查看状态，但不能兑换或使用云端转写与 AI。"
+        ),
+        "note": "产品账号与校园网账号、Notion 身份相互独立。",
+    },
+    "mini_status": "安全连接",
+    "role": "学生端",
+    "modes": {
+        "login": "登录",
+        "register": "注册",
+        "forgot": "重置密码",
+    },
+    "login": {
+        "eyebrow": "产品账号",
+        "title": "登录学习空间",
+        "subtitle": "使用注册邮箱和密码登录。未验证邮箱也可登录查看状态。",
+        "submit": "登录",
+        "switch_register": "没有账号？注册",
+        "switch_forgot": "忘记密码",
+    },
+    "register": {
+        "eyebrow": "产品账号",
+        "title": "注册学习空间",
+        "subtitle": "注册后会收到验证邮件；验证完成前不能兑换额度或使用云端功能。",
+        "submit": "注册",
+        "switch_login": "已有账号？登录",
+    },
+    "forgot": {
+        "eyebrow": "产品账号",
+        "title": "重置密码",
+        "subtitle": "我们会向邮箱发送一次性重置链接（在浏览器中打开完成重置）。",
+        "submit": "发送重置邮件",
+        "switch_login": "返回登录",
+    },
+    "email_label": "邮箱",
+    "email_placeholder": "name@example.com",
+    "password_label": "密码",
+    "password_placeholder": "至少 8 位",
+    "confirm_password_label": "确认密码",
+    "confirm_password_placeholder": "再次输入密码",
+    "password_mismatch": "两次输入的密码不一致。",
+    "empty_email": "请输入邮箱后再试一次。",
+    "empty_password": "请输入密码后再试一次。",
+    "failed": "操作没有成功，请稍后重试。",
+    "logged_in_toast": LOGGED_IN_TOAST,
+    "registered_toast": REGISTERED_TOAST,
+    "forgot_toast": FORGOT_TOAST,
+}
+
+ACCOUNT_COPY = {
+    "title": "产品账号",
+    "signed_out": "未登录",
+    "verified": "邮箱已验证",
+    "unverified": "邮箱未验证",
+    "unverified_help": "请先打开验证邮件中的链接；验证前不能兑换额度、转写或使用 AI。",
+    "resend": "重发验证邮件",
+    "refresh_verification": "我已验证，刷新状态",
+    "verified_toast": "邮箱验证已完成。",
+    "logout": "退出登录",
+    "redeem_label": "兑换码",
+    "redeem_placeholder": "输入 8–16 位兑换码",
+    "redeem": "兑换额度",
+    "redeem_help": "兑换码只增加额度，不会创建新账号。",
+    "redeem_gated": "完成邮箱验证后即可兑换额度。",
+    "empty_code_notice": EMPTY_CODE_NOTICE,
+    "redeemed_toast": REDEEMED_TOAST,
+    "redeem_failed": "兑换没有成功，请稍后重试。",
+    "resend_toast": RESEND_TOAST,
+}
 
 ONBOARDING_COPY = {
     "aside": {
@@ -127,6 +207,7 @@ CONNECTION_COPY = {
     "reconnect_toast": RECONNECT_TOAST,
     "busy": CONNECT_BUSY_MESSAGE,
     "failed": CONNECT_FAILED_COPY,
+    "timeout": "仍在等待 Notion 授权；完成浏览器中的授权后，请重新打开面板查看状态。",
     "manage_label": "Notion 连接",
 }
 
@@ -247,6 +328,21 @@ COURSE_COPY = {
         "正文、笔记与练习都在 Notion 讲次页中打开。"
     ),
     "sync_action": "同步已选内容",
+    "tabs": {"materials": "讲次与资料", "recordings": "课堂录像", "exercises": "课程练习"},
+    "recordings": {
+        "title": "课堂录像",
+        "intro": "先查看录像目录；只有确认某条录像后才下载、转写并生成笔记。",
+        "source": "教学网课程",
+        "source_missing": "选择这门课程对应的教学网课程",
+        "sync": "同步录像目录",
+        "save": "保存教学网账号",
+        "username": "教学网账号",
+        "password": "教学网密码",
+        "empty": "这门课程暂时没有已索引的录像。",
+        "choose_lecture": "选择要写入的讲次",
+        "organize": "下载并整理这条录像",
+        "status": {"indexed": "可整理", "downloaded": "已下载", "transcribed": "已转写", "notes_ready": "笔记已生成", "unavailable": "暂不可用"},
+    },
     "lectures": {
         "title": "课程讲次",
         "note": "{lectures} 个讲次 · 选择后查看讲次索引",
@@ -350,6 +446,7 @@ LAUNCH_COPY = {
     "course": "正在打开 Notion 课程页。",
     "failed": LAUNCH_FAILED_COPY,
     "retry": "重新打开",
+    "opened_external": "已在浏览器打开 Notion；可返回本窗口继续使用。",
     "opening": "正在打开 Notion",
     "missing_title": "待建讲次页",
     "missing_body": "讲次页尚未建立 · 整理完成后自动出现",
@@ -366,14 +463,17 @@ PANEL_COPY = {
     "nav": {"label": "主导航", "kicker": "学习空间", "dashboard": "总览"},
     "update": {
         "version": "Version {version}",
+        "desktop_managed": "桌面版启动后会检查更新；发现新版本时会提示安装。",
         "up_to_date": "up to date",
-        "available": "new version {version} available",
-        "action": "Apply on next start",
+        "available": "发现新版本 {version}",
+        "action": "下次启动时更新",
         "retry": "Retry on next start",
         "requested": "Update requested for next start",
         "deferred": "Update deferred. The current version is still running; restart after retrying.",
         "request_failed": "Update request failed. Try again.",
     },
+    "auth": AUTH_COPY,
+    "account": ACCOUNT_COPY,
     "onboarding": ONBOARDING_COPY,
     "connection": CONNECTION_COPY,
     "directory": DIRECTORY_COPY,

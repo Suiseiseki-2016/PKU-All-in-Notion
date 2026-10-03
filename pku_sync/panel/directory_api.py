@@ -57,6 +57,13 @@ def add_directory_routes(app, service: DirectoryService) -> None:
         except DirectoryApiError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
+    @app.get("/api/courses/{course_id}/exercises")
+    def course_exercises_endpoint(course_id: str) -> dict:
+        try:
+            return service.course_exercises(course_id)
+        except DirectoryApiError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
     @app.get("/api/exercises")
     def exercises_endpoint() -> dict:
         try:

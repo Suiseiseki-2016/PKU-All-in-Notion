@@ -103,8 +103,26 @@ def test_student_ui_has_no_answer_or_editor_surface():
     for name, text in assets.items():
         assert "textarea" not in text.lower(), name
         assert "contenteditable" not in text.lower(), name
-    # the only text input on the surface is the redemption code field
-    assert assets["js"].count('type="text"') <= 1
+    # redeem / legacy activation keep one plain text code field; auth uses
+    # email + password inputs instead of free-form answer editors
+    assert 'type="email"' in assets["js"]
+    assert 'type="password"' in assets["js"]
+    assert 'id="auth-form"' in assets["js"]
+    assert 'id="redeem-form' in assets["js"]
+
+
+def test_auth_copy_is_shipped_for_product_account_flows():
+    auth = PANEL_COPY["auth"]
+    assert auth["login"]["title"] == "登录学习空间"
+    assert auth["register"]["submit"] == "注册"
+    assert auth["forgot"]["submit"] == "发送重置邮件"
+    account = PANEL_COPY["account"]
+    assert account["unverified"] == "邮箱未验证"
+    assert account["redeem"] == "兑换额度"
+    assert account["redeem_gated"] == "完成邮箱验证后即可兑换额度。"
+    page = student_page()
+    assert "登录学习空间" in page
+    assert "兑换额度" in page
 
 
 def test_student_ui_never_carries_content_paths_or_tokens():
@@ -158,7 +176,7 @@ def test_onboarding_shows_the_two_connection_rows_with_both_notion_states():
     assert onboarding["campus"]["detail"] == "校园身份已确认"
     assert onboarding["notion"]["title"] == "Notion 学习空间"
     assert onboarding["notion"]["revoke"] == "撤销连接"
-    assert onboarding["notion"]["reconnect"] == "重新连接"
+    assert onboarding["notion"]["reconnect"] == "连接 Notion"
     connection = PANEL_COPY["connection"]
     assert connection["connected"] == CONNECTED_COPY
     assert connection["disconnected"] == DISCONNECTED_COPY

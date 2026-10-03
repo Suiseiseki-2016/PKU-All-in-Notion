@@ -21,6 +21,7 @@ def run_pipeline(settings, kind: str) -> int:
     if kind == "daily":
         result = service.run_daily(
             settings,
+            skip_recordings=True,
             recorder=cli.RichConsoleRecorder(cli.console),
             steps=cli._daily_steps(),
         )
@@ -28,6 +29,7 @@ def run_pipeline(settings, kind: str) -> int:
     if kind == "automate":
         result = service.run_automate(
             settings,
+            skip_recordings=True,
             recorder=cli.RichConsoleRecorder(cli.console),
             steps=cli._daily_steps(),
             review=cli.review_cmd,

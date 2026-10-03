@@ -108,4 +108,5 @@ def test_exercise_ui_uses_purpose_specific_launch_and_missing_mapping_controls()
     assert "launch-exercise-fallback" in script
     assert "result.body.fallback.url" in script
     assert "course.title === row.course" not in script
-    assert "window.location.assign(result.body.url)" in script
+    assert "openNotionPreview(result.body.url" in script
+    assert "window.location.assign(result.body.url" not in script

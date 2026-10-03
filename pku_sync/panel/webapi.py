@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..pipeline import collect_jobs, recording_stage
 from .jobs import ExerciseJobGate, JobRunner
@@ -245,6 +245,7 @@ def create_app(
     grading_service=None,
     exercise_job_gate: ExerciseJobGate | None = None,
     update_service=None,
+    notion_opener=None,
 ) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
@@ -304,6 +305,7 @@ def create_app(
     from .student_ui import add_student_ui_routes
     from .exercise_api import add_organize_routes
     from .grading_api import add_grading_routes
+    from .external_navigation import add_external_navigation_routes
 
     add_directory_routes(app, directory_service)
     add_connection_routes(app, connection_service)
@@ -311,6 +313,21 @@ def create_app(
     add_organize_routes(app, organizer_service, gate=exercise_job_gate,
                          ui_e2e_mode=bool(getattr(settings, "exercise_ui_e2e_mode", False)))
     add_grading_routes(app, grading_service, gate=exercise_job_gate)
+    add_external_navigation_routes(app, opener=notion_opener)
+    from .recordings_api import RecordingWorkManager, add_recording_routes
+    recording_manager = RecordingWorkManager(settings, directory_service)
+    app.state.recording_manager = recording_manager
+    from .connection import FakeConnectionProvider
+    demo_connection = (isinstance(connection_service.provider, FakeConnectionProvider)
+                       and not getattr(settings, "notion_token", ""))
+    add_recording_routes(app, recording_manager, demo_connection=demo_connection)
+    from .assignment_workflow import add_assignment_routes
+    add_assignment_routes(app, recording_manager)
+
+    @app.get("/recordings")
+    def recordings_page() -> RedirectResponse:
+        """Old bookmark: recording actions now live inside each course."""
+        return RedirectResponse("/app", status_code=307)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -324,6 +341,12 @@ def create_app(
     def status_json() -> dict:
         return _status_payload(settings, runner)
 
+    def _platform_http(exc) -> HTTPException:
+        status = int(getattr(exc, "status_code", None) or 400)
+        if status not in (400, 401, 403, 409, 429, 502, 503):
+            status = 400
+        return HTTPException(status_code=status, detail=str(exc))
+
     @app.get("/api/platform/quota")
     def platform_quota() -> dict:
         return platform_service.quota()
@@ -335,7 +358,67 @@ def create_app(
         try:
             return platform_service.activate(code)
         except PlatformError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/platform/redeem")
+    def platform_redeem(code: str = Body(..., embed=True)) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.redeem(code)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/register")
+    def auth_register(
+        email: str = Body(...), password: str = Body(...)
+    ) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.register(email, password)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/login")
+    def auth_login(email: str = Body(...), password: str = Body(...)) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.login(email, password)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/logout")
+    def auth_logout() -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.logout()
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.get("/api/auth/me")
+    def auth_me() -> dict:
+        return platform_service.me()
+
+    @app.post("/api/auth/forgot")
+    def auth_forgot(email: str = Body(..., embed=True)) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.forgot_password(email)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/resend-verification")
+    def auth_resend(email: str = Body(..., embed=True)) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            return platform_service.resend_verification(email)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
 
     @app.get("/api/update")
     def update_status() -> dict:

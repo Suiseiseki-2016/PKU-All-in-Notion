@@ -620,6 +620,21 @@ class DirectoryService:
         data, _ = self._snapshot()
         return data
 
+    def course_exercises(self, course_id: str) -> dict:
+        """Exercise rows for one stable Notion course identity."""
+        data, generation = self._snapshot()
+        course = _find_course(data, course_id)
+        rows = [
+            exercise_row(
+                entity,
+                launch_started=entity.id in self.exercise_events.launched_ids(),
+                local_record=self.local_grading_records.get(entity.id),
+            )
+            for entity in data.exercises_by_course.get(course.id, [])
+        ]
+        self._validate_snapshot(data, generation)
+        return {"items": rows}
+
     def material_view(
         self, course_id: str, view: str, *, lecture_id: str | None = None
     ) -> dict:

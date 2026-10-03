@@ -68,12 +68,10 @@ def test_completed_grade_applies_the_server_settlement_to_client_balance():
     assert "state.quota.llm_points_remaining = next.body.points_remaining" in script
 
 
-def test_active_grading_replaces_the_dashboard_content():
+def test_active_grading_stays_inside_the_selected_course():
     script = APP_JS.read_text(encoding="utf-8")
-    assert 'if (state.grading.status !== "idle") return gradingScreen();' in script
-    start = script.index("function gradingScreen()")
+    start = script.index("function courseExercisesScreen()")
     end = script.index("\n  }", start)
     screen = script[start:end]
-    assert "gradingCard()" in screen
-    for unrelated in ("statsSection()", "organizeCard()", "exerciseDirectorySection()", "courseGrid()", "activitySection()"):
-        assert unrelated not in screen
+    assert "organizeCard() + gradingCard() + contents" in screen
+    assert 'if (state.grading.status !== "idle") screen = gradingScreen();' not in script
