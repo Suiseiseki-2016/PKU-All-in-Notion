@@ -1,9 +1,9 @@
 # PKU Course Sync Lecture Notes
 
 ## Current Status
-**Blocker**: None. The 2026-09-09 CNS解剖 real reprocessing run completed, published to Notion, and the final regression is green.
-**Last action**: 2026-10-03 - Published the reorganized CNS解剖 2026-09-09第5-6节 note (13/13 chapters, 48,582 chars) under the lecture acceptance page; verified focused regression (237 passed) and full regression (1625 passed, 2 xfailed).
-**Next action**: Human review of the `unverified` / 回看-marked sections in the new note; then decide how to commit the large working tree (49 modified files, ~100 untracked).
+**Blocker**: None. The real reprocessing run is published, the regression is green, and the entire working tree is committed as 10 module batches on local `main`.
+**Last action**: 2026-10-03 - Committed the accumulated working tree as 10 module batches (a03f4f9..cd289d3, 347 files, ~48k insertions) after full verification; nothing pushed yet.
+**Next action**: Human review of the `unverified` / 回看-marked sections in the new note; push the batched commits when ready.
 
 ## Decision Log
 | Date | Decision | Reasoning | Outcome |
