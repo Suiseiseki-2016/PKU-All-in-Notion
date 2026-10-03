@@ -4,6 +4,10 @@
 
 纯 Python 单机项目：同一套代码在 Windows / macOS / Linux 上行为一致，不调用任何操作系统的专属接口。
 
+## 产品状态
+
+当前 `0.1.1` 是浏览器面板技术试点，不是正式桌面产品。试点中的兑换码仅用于创建匿名平台会话，不能视为正式产品账号体系或正式兑换码设计。正式产品的已确认目标、身份边界和待实现范围见 [`docs/PRODUCT_PLAN.md`](docs/PRODUCT_PLAN.md)。
+
 ## 安装（学生 / Pilot）
 
 试点学生请直接看 **[`docs/PILOT_GUIDE.md`](docs/PILOT_GUIDE.md)**（非开发者
@@ -25,11 +29,11 @@ macOS / Linux 的真机验收步骤见 [`docs/MACOS_LINUX_VALIDATION.md`](docs/M
 ## 功能
 
 - **课程发现与同步**：IAAA 登录，自动识别当学期课程；同步公告、课件、作业到本地
-- **课堂录像**：枚举录播、解析真实媒体地址、断点续传下载；HLS 走分片并发下载（AES-128 自动解密，ffmpeg 只作兜底）
+- **课堂录像**：枚举录播、解析真实媒体地址、断点续传下载；HLS 走分片并发下载（AES-128 自动解密，ffmpeg 只作兜底）；发布讲次页时可将“回看”标记生成 ≤5 MB 的短视频块，失败时保留文字时间标记
 - **转写与加工**：faster-whisper 转写全文、OpenCV 抽取关键帧、LLM 生成结构化讲次笔记
-- **每日管道**：`uv run pku-sync automate` 一条命令跑完整链条，由你选择的系统调度器定时触发（项目本身不注册调度）
+- **每日管道**：`uv run pku-sync automate` 默认同步课程索引、生成简报并执行 Notion 步骤；录像下载和转写由用户按需启动
 - **Notion 自动化**：晨检对账（新作业/课件/公告登记 + 讲次页口头任务、自测错题联动）+ 讲次页幂等创建与重整（每讲附 3~5 题自测）
-- **考前课程总结**：`scripts/course_summary.md` 把一门课全部讲次页聚成一页快照——老师点名考点置顶带出处、考核与 DDL 汇总、缺口清单
+- **考前课程总结**：桌面课程页可一键生成《课程总结》快照（汇总讲次状态、笔记主题要点、老师口头线索、正式作业 DDL 与缺口清单，只新建当日页面、不覆盖旧页、不消耗 AI 额度）；同步 Notion 课程与讲次页完成后会自动为每门课各建一页。需要人工判断的考点归并与口头任务补登仍按 `scripts/course_summary.md` 运行
 - **TUI 工作台**：`uv run pkutui` 先展示本地课件、公告、作业、录音处理阶段和最近 Notion 报告，再实时读取教学网课程/DDL；管道健康状态**不等教学网秒级上屏**，实时抓取 4 路并发逐课推进。选中课程后可用 `Enter` 查看详情，`a/o` 让 AI 整理录音或读取评论重整讲次页，`z/g` 生成或批改 Notion 小测，`n` 查看 Notion 状态；所有 Notion 写入仍经 Factory/Claude/Codex 的官方 MCP runbook
 - **作业提交**：`uv run pku-sync submit` 把文本或附件作业交回教学网——list 查 content_id，text / file 都默认干跑、`--yes` 才真正提交，带已提交守卫与逾期警告（运行手册见 `scripts/assignment_submit.md`）
 - **课表与成绩（只读）**：`uv run pku-sync coursetable` 读门户个人课表（`--list-terms` 列可选学期、`--term` 查指定学期），`uv run pku-sync grades` 读教学网成绩明细；两者只读，不写任何内容
@@ -39,7 +43,7 @@ macOS / Linux 的真机验收步骤见 [`docs/MACOS_LINUX_VALIDATION.md`](docs/M
 ## 每日管道
 
 ```
-uv run pku-sync automate                同步资料 → 下载新录像 → 转写/关键帧/笔记 → 当日简报（原生 LLM）
+uv run pku-sync automate                同步资料及录像索引 → 当日简报（原生 LLM）；不自动下载或整理录像
   └─ agent 宿主 × daily_review_mcp.md     与 Notion 对账登记（宿主经官方 notion MCP 写 Notion）
 ```
 
@@ -53,6 +57,7 @@ uv run pku-sync automate                同步资料 → 下载新录像 → 转
 组合 E2E 的场景矩阵和验收标准见 [`docs/E2E_TEST_PLAN.md`](docs/E2E_TEST_PLAN.md)。
 首次部署和日常操作见 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)。
 学生 / 非开发者的试点安装与使用见 [`docs/PILOT_GUIDE.md`](docs/PILOT_GUIDE.md)。
+正式产品化目标见 [`docs/PRODUCT_PLAN.md`](docs/PRODUCT_PLAN.md)。
 服务化方向：本项目是「PKU All in Notion」的**瘦客户端**（开源半边）；云端中转（转写计量、平台账号、兑换码）由平台另行运营，代码在私有仓，不在本仓库。
 
 ## 安装与启动
@@ -83,11 +88,11 @@ uv run pku-sync doctor        # 运行环境自检
 uv run pku-sync setup               # 首次配置（账号 + MCP 宿主，一条命令）
 uv run pku-sync discover            # 列出账号可见课程及本学期选中课程
 uv run pku-sync sync                # 同步公告/课件/作业 + 录像元数据
-uv run pku-sync download            # 下载已索引的录像（断点续传）
-uv run pku-sync process             # 转写 + 关键帧 + LLM 笔记
-uv run pku-sync daily               # 以上三步 + 当日简报（--skip-summary 跳过简报）
+uv run pku-sync download            # 下载已索引的录像（断点续传；可加 --workers 2）
+uv run pku-sync process             # 转写 + 关键帧 + LLM 笔记（云端可加 --workers 2；本地 Whisper 保持串行）
+uv run pku-sync daily               # 默认同步资料和录像索引 + 当日简报；--with-recordings 才批量处理媒体
 uv run pku-sync review              # 单独跑 Notion 晨检登记（经所选宿主的两组 MCP）
-uv run pku-sync automate            # daily + review 一把梭
+uv run pku-sync automate            # daily + review；默认不下载或转写录像
 uv run pkutui                       # 交互式控制台：实时课程/DDL/录音 + 管道状态 + 按键触发
 uv run pku-sync doctor              # 一键自检：配置/凭据/依赖/宿主/日志/报告/磁盘
 uv run pku-sync panel                # 本地面板（只绑 127.0.0.1 的学生面板；FastAPI/uvicorn 属默认依赖）

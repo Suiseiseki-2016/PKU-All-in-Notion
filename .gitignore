@@ -2,15 +2,22 @@
 # no trailing slash: the venv may be a symlink to storage outside an
 # iCloud-synced folder (see docs/USER_GUIDE.md §7)
 .venv
+.venv-windows-test/
 __pycache__/
 *.pyc
 .pytest_cache/
-.pytest-basetemp/
+.pytest-*/
 .ruff_cache/
+.probe/
 
 # synced course material and derived artifacts
 data/
 logs/
+attachments/
+outputs/
+tmp/
+# Windows reserved-name artifact from a faulty redirect
+NUL
 *.mp4
 *.ts
 

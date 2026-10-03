@@ -1,6 +1,6 @@
 [project]
 name = "pku-course-sync"
-version = "0.1.1"
+version = "0.1.20"
 description = "Daily sync of PKU Teaching Network course materials and lecture recordings"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,13 +12,20 @@ dependencies = [
     "rich>=13.7",
     "textual>=0.79",
     "beautifulsoup4>=4.12",
+    # Lecture slides and official homework are often PDFs; use their text as
+    # source material when checking generated study notes.
+    "pypdf>=6.18.1,<7",
+    # Slide alignment renders slide PDFs to bitmaps and matches them against
+    # video keyframes, so note citations can use the pages actually shown.
+    "pypdfium2>=4.30",
     "mcp>=1.12,<2",
-    "faster-whisper>=1.0",
-    # Cloud transcription decodes the recording's audio track in-process, so
-    # `av` is a direct requirement of the app rather than only a
-    # faster-whisper transitive: a packaged install must carry it even if
-    # faster-whisper's own dependencies change.
+    # Cloud transcription decodes the recording's audio track in-process.
+    # The student installer does not bundle a local speech recognition model.
     "av>=11",
+    # Cloud ASR returns Traditional Chinese for some courses. Note text and
+    # every anchor comparison are Simplified, so without this converter
+    # re-listen markers collapse onto their chapter start (see media.to_simplified).
+    "zhconv>=1.4",
     "opencv-python>=4.10",
     "openai>=1.40",
     # the localhost panel (pku_sync/panel/) is a core product feature (M1b)
@@ -28,6 +35,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+dev-browser = ["pytest>=8.0", "playwright>=1.55"]
+local-asr = ["faster-whisper>=1.0"]
 
 [project.scripts]
 pku-sync = "pku_sync.cli:app"
