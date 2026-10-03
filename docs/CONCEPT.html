@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f8f5">
+  <title>PKU All in Notion</title>
+  <style>
+    :root {
+      --ink: #203531;
+      --muted: #6d807a;
+      --line: #dfe8e2;
+      --paper: #fffefa;
+      --canvas: #f4f7f3;
+      --mint: #dceee5;
+      --green: #2e7761;
+      --green-deep: #205647;
+      --shadow: 0 22px 60px rgba(42, 72, 62, .09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 88% -12%, rgba(221, 238, 229, .9), transparent 32rem),
+        var(--canvas);
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+      line-height: 1.55;
+    }
+    img { max-width: 100%; height: auto; display: block; }
+    .wrap { width: min(1080px, calc(100% - 40px)); margin: 0 auto; }
+
+    header.top {
+      padding: 22px 0 0;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 13px;
+      border: 1px solid #c6dfd0;
+      background: linear-gradient(145deg, #eef8f0, #cde9d9);
+      color: var(--green-deep);
+      font-weight: 800;
+      letter-spacing: -1px;
+    }
+    .brand strong { display: block; font-size: 16px; letter-spacing: -.02em; }
+    .brand small { color: var(--muted); font-size: 11px; }
+
+    .hero { padding: 48px 0 20px; }
+    .hero h1 {
+      margin: 0 0 16px;
+      max-width: 16ch;
+      font-size: clamp(40px, 7vw, 68px);
+      line-height: 1.08;
+      letter-spacing: -.04em;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 34em;
+      color: #4a5f59;
+      font-size: 20px;
+    }
+
+    .values {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 12px 0 48px;
+    }
+    .values article {
+      padding: 22px 22px 20px;
+      border-radius: 18px;
+      background: #fff;
+      border: 1px solid var(--line);
+    }
+    .values h2 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: -.02em;
+    }
+    .values p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    section.shot {
+      padding: 8px 0 56px;
+    }
+    section.shot h2 {
+      margin: 0 0 6px;
+      font-size: clamp(26px, 4vw, 36px);
+      letter-spacing: -.03em;
+    }
+    section.shot .lead {
+      margin: 0 0 20px;
+      max-width: 34em;
+      color: #4a5f59;
+      font-size: 17px;
+    }
+    .frame {
+      padding: 14px;
+      border-radius: 26px;
+      background: #edf3ee;
+      border: 1px solid #d7e4db;
+      box-shadow: var(--shadow);
+    }
+    .frame img {
+      border-radius: 16px;
+      background: #fff;
+    }
+    .caption {
+      margin: 10px 4px 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .duo {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .phone {
+      padding: 14px;
+      border-radius: 26px;
+      background: #edf3ee;
+      border: 1px solid #d7e4db;
+    }
+    .phone img {
+      max-width: 360px;
+      margin: 0 auto;
+      border-radius: 16px;
+    }
+
+    .promise {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      padding: 8px 0 56px;
+    }
+    .promise article {
+      padding: 22px;
+      border-radius: 18px;
+      background: #fff;
+      border: 1px solid var(--line);
+    }
+    .promise h2 { margin: 0 0 8px; font-size: 18px; }
+    .promise p { margin: 0; color: var(--muted); font-size: 14px; }
+
+    .close {
+      padding: 8px 0 72px;
+    }
+    .close-card {
+      padding: 40px 36px;
+      border-radius: 28px;
+      background:
+        linear-gradient(160deg, rgba(227, 242, 232, .96), rgba(255, 254, 250, .92));
+      border: 1px solid #d4e4d8;
+    }
+    .close-card h2 {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 4vw, 40px);
+      letter-spacing: -.03em;
+    }
+    .close-card p {
+      margin: 0;
+      max-width: 32em;
+      color: #4a5f59;
+      font-size: 17px;
+    }
+
+    footer {
+      padding: 0 0 40px;
+      color: #8a9a94;
+      font-size: 12px;
+    }
+
+    @media (max-width: 820px) {
+      .values, .duo, .promise { grid-template-columns: 1fr; }
+      .hero h1 { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap brand">
+      <span class="mark">PKU</span>
+      <span>
+        <strong>All in Notion</strong>
+        <small>北京大学 · 学习工作台</small>
+      </span>
+    </div>
+  </header>
+
+  <section class="hero wrap">
+    <h1>把每一堂课，变成可复习的知识。</h1>
+    <p>教学网上的课，会自动变成你 Notion 里的讲次、笔记和练习。客户端只负责打开那一页，学习发生在你自己的空间里。</p>
+  </section>
+
+  <section class="wrap values">
+    <article>
+      <h2>课在教学网</h2>
+      <p>公告、课件、作业、课堂录像，每天自动同步。不用再凌晨去翻课程平台。</p>
+    </article>
+    <article>
+      <h2>学在 Notion</h2>
+      <p>阅读、划重点、写笔记、做练习、看解析，全部留在你已经熟悉的 Notion 页面。</p>
+    </article>
+    <article>
+      <h2>面板只是入口</h2>
+      <p>本机打开工作台，看见索引和状态。正文、题目、答案，从来不会出现在浏览器里。</p>
+    </article>
+  </section>
+
+  <section class="shot wrap">
+    <h2>一分钟，学习空间就亮起来。</h2>
+    <p class="lead">连上学校身份和 Notion，输入助教发的兑换码。转写和练习额度会显示在工作台里，用多少看多少。</p>
+    <figure class="frame">
+      <img src="ui-screenshots/onboarding.png" alt="开通学习空间">
+      <figcaption class="caption">开通页。左边是主张，右边是连接。</figcaption>
+    </figure>
+  </section>
+
+  <section class="shot wrap">
+    <h2>每天打开，先看见自己的课。</h2>
+    <p class="lead">已索引的讲次、资料、上次同步，还有最近在 Notion 里发生的事。想复习哪一门，点进去就好。</p>
+    <div class="duo">
+      <figure class="frame">
+        <img src="ui-screenshots/dashboard.png" alt="学习空间总览">
+        <figcaption class="caption">总览。课程、动态、同步，一屏看完。</figcaption>
+      </figure>
+      <figure class="phone">
+        <img src="ui-screenshots/responsive-dashboard.png" alt="手机上的总览">
+        <figcaption class="caption">同一份工作台，在手机上同样安静。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="shot wrap">
+    <h2>一门课，就是一份清晰的目录。</h2>
+    <p class="lead">讲次列在左边，资料份数在右边。点开某一讲，只看到标题、日期和关联材料。完整内容，去 Notion 打开。</p>
+    <figure class="frame">
+      <img src="ui-screenshots/courses.png" alt="计算机网络课程页">
+      <figcaption class="caption">课程页。选讲次，不翻讲义。</figcaption>
+    </figure>
+  </section>
+
+  <section class="shot wrap">
+    <h2>笔记和练习，都在你点一下之后发生。</h2>
+    <p class="lead">写笔记、开始练习、查看资料，工作台只负责跳到正确的 Notion 页面。没有内嵌编辑器，也没有第二套内容。</p>
+    <figure class="frame">
+      <img src="ui-screenshots/lecture.png" alt="讲次页">
+      <figcaption class="caption">讲次索引。学习，去右边那扇门。</figcaption>
+    </figure>
+  </section>
+
+  <section class="shot wrap">
+    <h2>练习整理好，答题仍在 Notion。</h2>
+    <p class="lead">选一讲，生成一套混合题型，写进你的空间。作答、交卷、看解析，都不离开 Notion。回到工作台，只看见状态和分数。</p>
+    <div class="duo">
+      <figure class="frame">
+        <img src="ui-screenshots/notion-quiz.png" alt="练习中心">
+        <figcaption class="caption">练习目录。待作答、待批改、已批改。</figcaption>
+      </figure>
+      <figure class="phone">
+        <img src="ui-screenshots/notion-quiz-mobile.png" alt="手机上的练习中心">
+        <figcaption class="caption">整理和批改，拇指就能碰到。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="shot wrap">
+    <h2>分数在这里，解析在那边。</h2>
+    <p class="lead">批改完成，工作台只报一个总分和这次用掉的 AI 点。逐题说明已经写回 Notion，点一下就能看。</p>
+    <div class="duo">
+      <figure class="frame">
+        <img src="ui-screenshots/notion-quiz-graded.png" alt="批改完成">
+        <figcaption class="caption">88 分。题目和答案，不在这张图里。</figcaption>
+      </figure>
+      <figure class="phone">
+        <img src="ui-screenshots/notion-quiz-graded-mobile.png" alt="手机上的批改结果">
+        <figcaption class="caption">同一句话：去 Notion 看解析。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="wrap promise">
+    <article>
+      <h2>你的内容，只为你服务</h2>
+      <p>只同步你选中的课。课堂正文、转写和答案不进浏览器，也不落在别人的设备上。</p>
+    </article>
+    <article>
+      <h2>凭据不进画面</h2>
+      <p>教学网密码、兑换码、Notion 授权，都不会出现在工作台里。面板只在你自己的电脑上打开。</p>
+    </article>
+    <article>
+      <h2>额度看得见</h2>
+      <p>课堂转写按分钟计，整理和批改按 AI 点计。用完找助教补一张兑换码，没有隐藏扣费。</p>
+    </article>
+    <article>
+      <h2>失败也说人话</h2>
+      <p>同步遇到问题，就写同步遇到问题。打开没有成功，就请你再试一次。不会用空白假装一切正常。</p>
+    </article>
+  </section>
+
+  <section class="close wrap">
+    <div class="close-card">
+      <h2>给北大同学的学习工作台。</h2>
+      <p>课从教学网来，知识留在 Notion。打开面板，继续上周没看完的那一讲。</p>
+    </div>
+  </section>
+
+  <footer class="wrap">PKU All in Notion · 学生端</footer>
+</body>
+</html>

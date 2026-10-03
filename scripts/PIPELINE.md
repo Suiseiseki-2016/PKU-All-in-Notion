@@ -33,8 +33,8 @@ agent host × lecture_batch_creator.md  扫描本地转写，幂等补建缺失�
 
 | 组件 | 位置 | 作用 |
 |---|---|---|
-| 同步管道 | `pku_sync/`（Python 包） | 教学网抓取、录音下载（HLS 走分片并发 + AES-128 解密，ffmpeg 仅兜底）、Whisper 转写、关键帧抽取 |
-| 转写后端 | `pku_sync/transcription.py` | `process` 的转写入口：`TRANSCRIPTION_BACKEND=local`（默认，本机 faster-whisper，行为不变）或 `cloud`（云端转写服务客户端：本地用 PyAV 抽 16k 音轨上传我们的中转、按平台账号计量，上游 ASR key 只在服务端、用户不持有任何 key；中转未部署/未配置时显式拒绝） |
+| 同步管道 | `pku_sync/`（Python 包） | 教学网抓取、录音下载（HLS 走分片并发 + AES-128 解密，ffmpeg 仅兜底）、云端转写、关键帧抽取 |
+| 转写后端 | `pku_sync/transcription.py` | `process` 的转写入口：`TRANSCRIPTION_BACKEND=cloud`（默认；本地仅用 PyAV 抽取 16k 音轨，向平台云端服务上传并按账号计量）。桌面版只支持云端；CLI 诊断若显式选择 `local`，需另装 `local-asr` 可选依赖。 |
 | 每日入口 | `pku_sync.cli automate` | 定时任务入口，一条命令串起 daily + 晨检 + 批量建页（v3 起 daily.ps1 退役，2026-09-16 已删除） |
 | 原生简报 | `pku_sync/summarize.py` + `pku_sync/llm.py` | 当日简报：LLM 后端 provider 抽象（OpenAI 兼容 API 或已登录 claude/codex/droid CLI） |
 | TUI 工作台 | `pku_sync/tui.py` + `tui_data.py` + `agent_runner.py` | `uv run pkutui`：先读本地课件、公告、作业、录音阶段和最近 Notion 报告，再登录教学网显示实时课程/DDL；课程表/DDL 失败会明确显示，绝不静默回退本地 DATA_DIR。管道状态**不等教学网即上屏**；实时抓取 4 路并发逐课推进，进度（N/总数 · 课程名 · 已用秒数）实时写进面板边框与状态行。选课后 `Enter` 看资料/录音详情，详情表给出摘要和本地路径；`Space` 勾选讲次，`a/o` 触发录音整理/评论重整，`z/g` 触发小测生成/批改，`n` 刷新 Notion 报告状态；所有写入交给受限 agent runbook + 官方 Notion MCP。数据层纯函数无 textual 依赖，单测覆盖本地工作台、实时快照、逐课错误、进度回调、并发抓取和无兜底失败路径 |
@@ -78,7 +78,7 @@ agent host × lecture_batch_creator.md  扫描本地转写，幂等补建缺失�
 
 - 代码怎么到运行机由操作者决定（git clone / 任意文件同步工具均可）；项目本身不内置跨机同步机制，也不感知镜像。
 - 定时任务、agent 宿主（droid exec）都在运行机上跑；调度 = 系统调度器里的一条定时命令（现役：计划任务 `pku-course-sync` 06:00 = `automate`）。
-- **启动规则**：首次安装或明确升级依赖时执行 `uv sync --all-extras`；日常运行统一使用 `uv run pkutui` 或 `uv run pku-sync <子命令>`。媒体转写、关键帧和 OpenAI 依赖属于默认项目依赖，裸 `uv run` 不会卸载运行所需的媒体栈。不写 PowerShell profile，不设置 `UV_NO_SYNC`，不使用包装器，也不使用 `--no-sync`。依赖变更后重新执行 `uv sync --all-extras`，再运行 `uv run pku-sync doctor`。
+- **启动规则**：首次安装或明确升级依赖时执行 `uv sync --extra dev`（按需添加其他 extra；普通运行用 `uv sync`）；日常运行统一使用 `uv run pkutui` 或 `uv run pku-sync <子命令>`。媒体转写、关键帧和 OpenAI 依赖属于默认项目依赖，裸 `uv run` 不会卸载运行所需的媒体栈。不写 PowerShell profile，不设置 `UV_NO_SYNC`，不使用包装器，也不使用 `--no-sync`。依赖变更后重新执行 `uv sync`，再运行 `uv run pku-sync doctor`。
 - **项目入口**：`pkutui` 是 `pku_sync.cli:tui_cmd` 的项目脚本；`pku-sync` 提供同步、处理、Notion 晨检、批量建页和自检子命令。两者都必须通过 `uv run` 启动，以确保使用当前项目锁文件。
 - Windows 运行机实测备忘（2026-09-16 切换时根治的坑）：
   - **schtasks 会话是完整用户环境**（有 PATH、无需代理快照）；`.env` 双路径查找已覆盖 system32 起点 cwd。
