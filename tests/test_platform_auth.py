@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from pku_sync import platform
+from pku_sync.panel.platform_bridge import RealPlatformBridge
 
 
 def settings(tmp_path, **overrides):
@@ -88,6 +89,56 @@ def test_login_surfaces_relay_detail_and_status(tmp_path, monkeypatch):
         platform.login("a@b.c", "wrong", s)
     assert caught.value.status_code == 401
     assert s.platform_token == ""
+
+
+def test_panel_login_reconciles_account_profile(tmp_path, monkeypatch):
+    s = settings(tmp_path)
+    monkeypatch.setattr(
+        platform,
+        "login",
+        lambda email, password, settings: {
+            "email": email,
+            "email_verified": True,
+            "active": True,
+        },
+    )
+    monkeypatch.setattr(
+        platform,
+        "sync_account_profile",
+        lambda settings: {"available": True, "status": "pulled", "revision": 3},
+    )
+
+    result = RealPlatformBridge(s).login("a@b.c", "password1")
+
+    assert result["profile_sync"] == {
+        "available": True,
+        "status": "pulled",
+        "revision": 3,
+    }
+
+
+def test_existing_panel_session_reconciles_profile_once(tmp_path, monkeypatch):
+    s = settings(tmp_path, platform_token="session")
+    calls = []
+    monkeypatch.setattr(
+        platform,
+        "auth_me",
+        lambda settings: {
+            "active": True,
+            "available": True,
+            "email_verified": True,
+        },
+    )
+    monkeypatch.setattr(
+        platform,
+        "sync_account_profile",
+        lambda settings: calls.append(settings) or {"status": "current"},
+    )
+    bridge = RealPlatformBridge(s)
+
+    assert bridge.me()["profile_sync"] == {"status": "current"}
+    assert "profile_sync" not in bridge.me()
+    assert calls == [s]
 
 
 def test_logout_clears_local_token(tmp_path, monkeypatch):

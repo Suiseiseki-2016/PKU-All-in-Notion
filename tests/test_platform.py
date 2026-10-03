@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -55,6 +56,40 @@ def test_quota_does_not_expose_platform_token(monkeypatch, tmp_path):
         "transcribe_seconds_remaining": 3600,
     }
     assert seen["Authorization"] == "Bearer opaque-token"
+
+
+def test_cloud_request_retries_direct_when_proxy_transport_fails(monkeypatch):
+    monkeypatch.setattr(
+        platform.httpx,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("proxy TLS")),
+    )
+    seen = {}
+
+    class DirectClient:
+        def __init__(self, *, trust_env):
+            seen["trust_env"] = trust_env
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def request(self, method, url, **kwargs):
+            seen.update({"method": method, "url": url})
+            return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(platform.httpx, "Client", DirectClient)
+
+    response = platform._get("https://relay.example/v1/profile", timeout=15)
+
+    assert response.status_code == 200
+    assert seen == {
+        "trust_env": False,
+        "method": "GET",
+        "url": "https://relay.example/v1/profile",
+    }
 
 
 def test_notes_job_retries_lost_enqueue_with_same_idempotency_key(monkeypatch, tmp_path):
@@ -168,3 +203,106 @@ def test_notes_timeout_respects_config_and_preserves_retry_key(monkeypatch, tmp_
     with pytest.raises(platform.PlatformError, match="仍在云端进行"):
         platform.llm("notes", "原文", s)
     assert keys[0] == keys[1]
+
+
+def test_profile_bootstraps_remote_from_safe_local_home(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "account-session"
+    s.notion_token = "local-notion-secret"
+    s.pku_password = "local-pku-secret"
+    home = {
+        "id": "3e591b6f-53e1-81b5-9320-c73c5f64ee6e",
+        "url": "https://app.notion.com/p/PKU-All-in-Notion-3e591b6f53e181b59320c73c5f64ee6e",
+        "parent_id": "32091b6f-53e1-80fc-8ec8-e650b4479f5d",
+    }
+    (tmp_path / "notion-learning-home.json").write_text(
+        json.dumps(home), encoding="utf-8"
+    )
+    sent = {}
+    monkeypatch.setattr(
+        platform,
+        "_get",
+        lambda *args, **kwargs: httpx.Response(
+            200, json={"revision": 0, "profile": {}, "updated_at": None}
+        ),
+    )
+
+    def fake_put(url, **kwargs):
+        sent.update(kwargs)
+        return httpx.Response(200, json={"revision": 1, "profile": kwargs["json"]["profile"]})
+
+    monkeypatch.setattr(platform, "_put", fake_put)
+
+    assert platform.sync_account_profile(s)["status"] == "pushed"
+    assert sent["json"] == {"revision": 0, "profile": {"notion_home": home}}
+    encoded = json.dumps(sent["json"])
+    assert "local-notion-secret" not in encoded
+    assert "local-pku-secret" not in encoded
+    assert "account-session" not in encoded
+
+
+def test_profile_pulls_accessible_remote_home_and_keeps_backup(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "account-session"
+    s.notion_token = "notion-token"
+    local = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "url": "https://www.notion.so/old",
+        "parent_id": "22222222-2222-2222-2222-222222222222",
+    }
+    remote = {
+        "id": "3e591b6f-53e1-81b5-9320-c73c5f64ee6e",
+        "url": "https://app.notion.com/p/new",
+        "parent_id": "32091b6f-53e1-80fc-8ec8-e650b4479f5d",
+    }
+    path = tmp_path / "notion-learning-home.json"
+    path.write_text(json.dumps(local), encoding="utf-8")
+    monkeypatch.setattr(
+        platform,
+        "_get",
+        lambda *args, **kwargs: httpx.Response(
+            200, json={"revision": 7, "profile": {"notion_home": remote}}
+        ),
+    )
+    monkeypatch.setattr(platform, "_notion_home_accessible", lambda *args: True)
+
+    assert platform.sync_account_profile(s) == {
+        "available": True,
+        "status": "pulled",
+        "revision": 7,
+    }
+    assert json.loads(path.read_text("utf-8")) == remote
+    backup = tmp_path / "notion-learning-home.pre-account-sync.json"
+    assert json.loads(backup.read_text("utf-8")) == local
+
+
+def test_profile_does_not_replace_home_without_notion_access(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "account-session"
+    local = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "url": "https://www.notion.so/old",
+        "parent_id": "22222222-2222-2222-2222-222222222222",
+    }
+    path = tmp_path / "notion-learning-home.json"
+    path.write_text(json.dumps(local), encoding="utf-8")
+    monkeypatch.setattr(
+        platform,
+        "_get",
+        lambda *args, **kwargs: httpx.Response(
+            200,
+            json={
+                "revision": 2,
+                "profile": {
+                    "notion_home": {
+                        "id": "33333333-3333-3333-3333-333333333333",
+                        "url": "https://www.notion.so/new",
+                        "parent_id": "44444444-4444-4444-4444-444444444444",
+                    }
+                },
+            },
+        ),
+    )
+
+    assert platform.sync_account_profile(s)["status"] == "notion_reconnect_required"
+    assert json.loads(path.read_text("utf-8")) == local

@@ -1387,6 +1387,8 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             raise HTTPException(status_code=409, detail="请先连接 Notion。")
         try:
             home = create_home(Path(manager.settings.data_dir), token, body.parent_page_id)
+            from ..platform import publish_account_profile
+            home["profile_sync"] = publish_account_profile(manager.settings)
             from .campus_catalog import campus_courses
             if campus_courses(Path(manager.settings.data_dir))["courses"]:
                 if manager.state().get("state") == "running":
@@ -1407,7 +1409,10 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         if not token:
             raise HTTPException(status_code=409, detail="请先连接 Notion。")
         try:
-            return move_home(Path(manager.settings.data_dir), token, body.parent_page_id)
+            home = move_home(Path(manager.settings.data_dir), token, body.parent_page_id)
+            from ..platform import publish_account_profile
+            home["profile_sync"] = publish_account_profile(manager.settings)
+            return home
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

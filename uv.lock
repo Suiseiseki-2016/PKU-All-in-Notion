@@ -1051,7 +1051,7 @@ wheels = [
 
 [[package]]
 name = "pku-course-sync"
-version = "0.1.19"
+version = "0.1.21"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
@@ -1070,6 +1070,7 @@ dependencies = [
     { name = "textual" },
     { name = "typer" },
     { name = "uvicorn" },
+    { name = "zhconv" },
 ]
 
 [package.optional-dependencies]
@@ -1106,6 +1107,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.79" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", specifier = ">=0.30" },
+    { name = "zhconv", specifier = ">=1.4" },
 ]
 provides-extras = ["dev", "dev-browser", "local-asr"]
 
@@ -1801,3 +1803,9 @@ sdist = { url = "https://files.pythonhosted.org/packages/5d/ad/04bbb797c84fc1f26
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/18/0eea75741ee812e9f598b687619ce2454f6c3a1c5cd21ea990ec6bd26f45/uvicorn-0.53.0-py3-none-any.whl", hash = "sha256:e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e", size = 87081, upload-time = "2026-09-14T07:44:22.179Z" },
 ]
+
+[[package]]
+name = "zhconv"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/47/c8ae2d5d4025e253211ff3d8c163f457db1da94976cb582337a5ab76cb87/zhconv-1.4.3.tar.gz", hash = "sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45", size = 211571, upload-time = "2021-10-31T05:59:44.096Z" }

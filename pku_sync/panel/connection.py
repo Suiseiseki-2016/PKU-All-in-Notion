@@ -216,6 +216,9 @@ class RealConnectionProvider:
                 adopt_oauth_template(Path(self._settings.data_dir), token, template_id)
             except Exception:
                 logger.exception("Notion OAuth template adoption failed")
+        from ..platform import sync_account_profile
+
+        sync_account_profile(self._settings)
 
 
 class FakeConnectionProvider:

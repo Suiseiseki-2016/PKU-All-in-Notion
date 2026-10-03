@@ -14,19 +14,19 @@ import httpx
 
 from .envfile import write_env_values
 from .notion_login import env_file_path
-from .network import dead_loopback_proxy
 
 DEFAULT_TRANSCRIBE_URL = "https://pku.aeoluswu.info/v1/transcribe"
 
 
 def _request(method: str, url: str, **kwargs) -> httpx.Response:
-    """Retry directly if an inherited localhost proxy has gone away."""
-    sender = httpx.post if method == "POST" else httpx.get
+    """Retry relay requests directly when an inherited proxy transport fails."""
+    sender = {"GET": httpx.get, "POST": httpx.post, "PUT": httpx.put}[method]
     try:
         return sender(url, **kwargs)
     except httpx.TransportError:
-        if not dead_loopback_proxy():
-            raise
+        # A configured proxy can be alive while still breaking TLS for this
+        # relay. Retry the same HTTPS request directly before surfacing an
+        # offline state; authentication remains protected by TLS either way.
         with httpx.Client(trust_env=False) as client:
             return client.request(method, url, **kwargs)
 
@@ -37,6 +37,10 @@ def _post(url: str, **kwargs) -> httpx.Response:
 
 def _get(url: str, **kwargs) -> httpx.Response:
     return _request("GET", url, **kwargs)
+
+
+def _put(url: str, **kwargs) -> httpx.Response:
+    return _request("PUT", url, **kwargs)
 
 
 class PlatformError(RuntimeError):
@@ -99,6 +103,192 @@ def _auth_session_payload(payload: dict, settings) -> dict:
         "email_verified": verified,
         "active": True,
     }
+
+
+def _profile_headers(settings) -> dict[str, str] | None:
+    token = (getattr(settings, "platform_token", "") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else None
+
+
+def _profile_endpoint(settings) -> str | None:
+    configured = getattr(settings, "cloud_transcribe_url", None)
+    if not isinstance(configured, str):
+        return None
+    return _endpoint(configured, "/v1/profile")
+
+
+def _local_notion_home(settings) -> dict:
+    path = Path(settings.data_dir) / "notion-learning-home.json"
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    keys = ("id", "url", "parent_id", "origin")
+    home = {key: value[key] for key in keys if isinstance(value.get(key), str)}
+    if not all(home.get(key) for key in ("id", "url", "parent_id")):
+        return {}
+    return home
+
+
+def _save_synced_notion_home(settings, home: dict) -> None:
+    path = Path(settings.data_dir) / "notion-learning-home.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        backup = path.with_name("notion-learning-home.pre-account-sync.json")
+        try:
+            backup.write_bytes(path.read_bytes())
+        except OSError:
+            pass
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(home, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _notion_home_accessible(settings, home: dict) -> bool:
+    token = (getattr(settings, "notion_token", "") or "").strip()
+    if not token:
+        return False
+    try:
+        from .notion import NotionClient
+
+        with NotionClient(token) as client:
+            page = client.get_page(home["id"])
+    except (httpx.HTTPError, KeyError, RuntimeError, TypeError, ValueError):
+        return False
+    return bool(page.get("id")) and not bool(page.get("archived"))
+
+
+def _fetch_account_profile(settings) -> dict:
+    headers = _profile_headers(settings)
+    if headers is None:
+        return {"available": False, "status": "signed_out"}
+    url = _profile_endpoint(settings)
+    if url is None:
+        return {"available": False, "status": "client_unconfigured"}
+    try:
+        response = _get(
+            url,
+            headers=headers,
+            timeout=15,
+        )
+    except httpx.HTTPError:
+        return {"available": False, "status": "offline"}
+    if response.status_code == 403:
+        return {"available": True, "status": "email_verification_required"}
+    if response.status_code in {404, 501, 503}:
+        return {"available": False, "status": "server_upgrade_required"}
+    if response.status_code != 200:
+        return {"available": False, "status": "unavailable"}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"available": False, "status": "invalid_response"}
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    profile = payload.get("profile") if isinstance(payload, dict) else None
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(profile, dict)
+    ):
+        return {"available": False, "status": "invalid_response"}
+    return {"available": True, "status": "ready", "revision": revision, "profile": profile}
+
+
+def _put_account_profile(settings, revision: int, profile: dict) -> dict:
+    headers = _profile_headers(settings)
+    if headers is None:
+        return {"available": False, "status": "signed_out"}
+    url = _profile_endpoint(settings)
+    if url is None:
+        return {"available": False, "status": "client_unconfigured"}
+    try:
+        response = _put(
+            url,
+            headers=headers,
+            json={"revision": revision, "profile": profile},
+            timeout=15,
+        )
+    except httpx.HTTPError:
+        return {"available": False, "status": "offline"}
+    if response.status_code == 409:
+        return {"available": True, "status": "conflict"}
+    if response.status_code != 200:
+        return {"available": False, "status": "unavailable"}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"available": False, "status": "invalid_response"}
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    return {
+        "available": True,
+        "status": "pushed",
+        "revision": revision if isinstance(revision, int) else None,
+    }
+
+
+def sync_account_profile(settings) -> dict:
+    """Reconcile safe account settings without ever uploading credentials or content."""
+    remote = _fetch_account_profile(settings)
+    if remote.get("status") != "ready":
+        return remote
+    revision = remote["revision"]
+    profile = remote["profile"]
+    remote_home = profile.get("notion_home")
+    local_home = _local_notion_home(settings)
+    if not isinstance(remote_home, dict):
+        if not local_home:
+            return {"available": True, "status": "current", "revision": revision}
+        pushed = _put_account_profile(
+            settings, revision, {**profile, "notion_home": local_home}
+        )
+        return pushed
+    if remote_home == local_home:
+        return {"available": True, "status": "current", "revision": revision}
+    if not _notion_home_accessible(settings, remote_home):
+        return {
+            "available": True,
+            "status": "notion_reconnect_required",
+            "revision": revision,
+        }
+    try:
+        _save_synced_notion_home(settings, remote_home)
+    except OSError:
+        return {
+            "available": True,
+            "status": "local_write_failed",
+            "revision": revision,
+        }
+    return {"available": True, "status": "pulled", "revision": revision}
+
+
+def publish_account_profile(settings) -> dict:
+    """Publish an explicitly created or moved local Notion home."""
+    local_home = _local_notion_home(settings)
+    if not local_home:
+        return {"available": False, "status": "no_local_home"}
+    remote = _fetch_account_profile(settings)
+    if remote.get("status") != "ready":
+        return remote
+    profile = {**remote["profile"], "notion_home": local_home}
+    result = _put_account_profile(settings, remote["revision"], profile)
+    if result.get("status") != "conflict":
+        return result
+    latest = _fetch_account_profile(settings)
+    if latest.get("status") != "ready":
+        return latest
+    return _put_account_profile(
+        settings,
+        latest["revision"],
+        {**latest["profile"], "notion_home": local_home},
+    )
 
 
 def activate(code: str, settings) -> dict:

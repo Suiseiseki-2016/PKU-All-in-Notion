@@ -14,6 +14,7 @@ FAKE_AUTH_EMAIL = "demo@example.com"
 class RealPlatformBridge:
     def __init__(self, settings):
         self._settings = settings
+        self._profile_synced = False
 
     def quota(self) -> dict:
         from ..platform import quota
@@ -32,16 +33,33 @@ class RealPlatformBridge:
         return register(email, password, self._settings)
 
     def login(self, email: str, password: str) -> dict:
-        from ..platform import login
-        return login(email, password, self._settings)
+        from ..platform import login, sync_account_profile
+
+        result = login(email, password, self._settings)
+        result["profile_sync"] = sync_account_profile(self._settings)
+        self._profile_synced = True
+        return result
 
     def logout(self) -> dict:
         from ..platform import logout
-        return logout(self._settings)
+
+        result = logout(self._settings)
+        self._profile_synced = False
+        return result
 
     def me(self) -> dict:
-        from ..platform import auth_me
-        return auth_me(self._settings)
+        from ..platform import auth_me, sync_account_profile
+
+        result = auth_me(self._settings)
+        if (
+            not self._profile_synced
+            and result.get("active")
+            and result.get("available")
+            and result.get("email_verified")
+        ):
+            result["profile_sync"] = sync_account_profile(self._settings)
+            self._profile_synced = True
+        return result
 
     def forgot_password(self, email: str) -> dict:
         from ..platform import forgot_password
