@@ -175,8 +175,7 @@ def _apply_subject_info(recording: Recording, data: dict) -> None:
 
     content = data.get("content") or {}
     recording.mp4_url = _pick_mp4(content)
-    if not recording.mp4_url:
-        recording.m3u8_url = _pick_m3u8(content)
+    recording.m3u8_url = _pick_m3u8(content)
 
 
 def _pick_mp4(content: dict) -> str:

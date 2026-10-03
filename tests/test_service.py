@@ -216,3 +216,55 @@ def test_run_automate_unexpected_review_error_propagates(tmp_path):
             events=make_events(fired),
         )
     assert fired == []  # lecture never ran; only controlled exits are swallowed
+
+def test_run_daily_skip_recordings_keeps_sync_and_summary(tmp_path):
+    sink: dict = {}
+    result = service.run_daily(
+        SimpleNamespace(data_dir=tmp_path),
+        skip_recordings=True,
+        recorder=ListRecorder(),
+        steps=make_steps(sink),
+    )
+    assert result.exit_code == 0
+    assert sink["calls"] == ["sync", "summarize"]
+
+
+def test_run_automate_skip_recordings_keeps_notion_steps(tmp_path):
+    sink: dict = {}
+    fired: list[str] = []
+    result = service.run_automate(
+        SimpleNamespace(data_dir=tmp_path),
+        skip_recordings=True,
+        recorder=ListRecorder(),
+        steps=make_steps(sink),
+        review=lambda: fired.append("review"),
+        lecture=lambda: fired.append("lecture"),
+        events=make_events(fired),
+    )
+    assert result.daily.exit_code == 0
+    assert sink["calls"] == ["sync", "summarize"]
+    assert fired == ["review", "lecture"]
+
+def test_panel_daily_buttons_never_process_recordings(monkeypatch):
+    from pku_sync import cli
+    from pku_sync.panel import pipelines
+
+    received = []
+    monkeypatch.setattr(cli, "_daily_steps", lambda: object())
+    monkeypatch.setattr(
+        service, "run_daily",
+        lambda settings, **kwargs: (
+            received.append(("daily", kwargs["skip_recordings"]))
+            or SimpleNamespace(exit_code=0)
+        ),
+    )
+    monkeypatch.setattr(
+        service, "run_automate",
+        lambda settings, **kwargs: (
+            received.append(("automate", kwargs["skip_recordings"]))
+            or SimpleNamespace(daily=SimpleNamespace(exit_code=0))
+        ),
+    )
+    assert pipelines.run_pipeline(SimpleNamespace(), "daily") == 0
+    assert pipelines.run_pipeline(SimpleNamespace(), "automate") == 0
+    assert received == [("daily", True), ("automate", True)]

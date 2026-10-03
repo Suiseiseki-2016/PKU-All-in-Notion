@@ -8,6 +8,7 @@ from ..platform import PlatformError
 
 FAKE_TRANSCRIBE_SECONDS = 3600
 FAKE_LLM_POINTS = 100.0
+FAKE_AUTH_EMAIL = "demo@example.com"
 
 
 class RealPlatformBridge:
@@ -21,6 +22,34 @@ class RealPlatformBridge:
     def activate(self, code: str) -> dict:
         from ..platform import activate
         return activate(code, self._settings)
+
+    def redeem(self, code: str) -> dict:
+        from ..platform import redeem
+        return redeem(code, self._settings)
+
+    def register(self, email: str, password: str) -> dict:
+        from ..platform import register
+        return register(email, password, self._settings)
+
+    def login(self, email: str, password: str) -> dict:
+        from ..platform import login
+        return login(email, password, self._settings)
+
+    def logout(self) -> dict:
+        from ..platform import logout
+        return logout(self._settings)
+
+    def me(self) -> dict:
+        from ..platform import auth_me
+        return auth_me(self._settings)
+
+    def forgot_password(self, email: str) -> dict:
+        from ..platform import forgot_password
+        return forgot_password(email, self._settings)
+
+    def resend_verification(self, email: str) -> dict:
+        from ..platform import resend_verification
+        return resend_verification(email, self._settings)
 
     def quiz(self, prompt: str) -> dict:
         from ..platform import llm
@@ -46,7 +75,9 @@ class FakePlatformBridge:
                  grade_with_wrong_answer: bool = False,
                  quiz_fail_status: int | None = None,
                  grade_fail_status: int | None = None,
-                 grade_fail_once: int | None = None):
+                 grade_fail_once: int | None = None,
+                 email: str = "",
+                 email_verified: bool = False):
         self._activated = bool(activated)
         self._llm_points = float(llm_points)
         self._points_charged = float(points_charged)
@@ -55,7 +86,15 @@ class FakePlatformBridge:
         self._quiz_fail_status = quiz_fail_status
         self._grade_fail_status = grade_fail_status
         self._grade_fail_once = grade_fail_once
+        self._email = (email or "").strip().lower()
+        self._email_verified = bool(email_verified)
+        self._password = "password1"
         self.llm_calls: list[dict] = []
+        self.auth_calls: list[dict] = []
+        if self._activated and not self._email:
+            # Fake panel defaults: logged-in verified product account.
+            self._email = FAKE_AUTH_EMAIL
+            self._email_verified = True
 
     @staticmethod
     def _relay_error(message: str, status: int) -> PlatformError:
@@ -63,22 +102,121 @@ class FakePlatformBridge:
         error.status_code = status
         return error
 
+    def _require_verified_for_metered(self) -> None:
+        if self._email and not self._email_verified:
+            raise self._relay_error(
+                "请先完成邮箱验证后再使用转写、AI 或兑换额度", 403
+            )
+
     def quota(self) -> dict:
         if not self._activated:
             return {"active": False}
-        return {"active": True, "available": True,
-                "transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS,
-                "llm_points_remaining": self._llm_points}
+        result = {
+            "active": True,
+            "available": True,
+            "transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS,
+            "llm_points_remaining": self._llm_points,
+        }
+        if self._email:
+            result["email"] = self._email
+            result["email_verified"] = self._email_verified
+            result["legacy_activate"] = False
+        else:
+            result["email"] = None
+            result["email_verified"] = True
+            result["legacy_activate"] = True
+        return result
 
     def activate(self, code: str) -> dict:
         if not (code or "").strip():
             raise PlatformError("请输入兑换码")
         self._activated = True
+        self._email = ""
+        self._email_verified = True
         return {"transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS}
+
+    def redeem(self, code: str) -> dict:
+        if not (code or "").strip():
+            raise PlatformError("请输入兑换码")
+        if not self._activated:
+            raise PlatformError("请先登录后再兑换额度")
+        self._require_verified_for_metered()
+        self.auth_calls.append({"op": "redeem"})
+        return {"transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS}
+
+    def register(self, email: str, password: str) -> dict:
+        clean = (email or "").strip().lower()
+        if not clean or "@" not in clean:
+            raise self._relay_error("请输入有效的邮箱地址", 400)
+        if not isinstance(password, str) or len(password) < 8:
+            raise self._relay_error("密码至少 8 位", 400)
+        if self._email == clean and self._activated:
+            raise self._relay_error("该邮箱已注册", 409)
+        self._email = clean
+        self._password = password
+        self._email_verified = False
+        self._activated = True
+        self.auth_calls.append({"op": "register", "email": clean})
+        return {"email": clean, "email_verified": False, "active": True}
+
+    def login(self, email: str, password: str) -> dict:
+        clean = (email or "").strip().lower()
+        if clean != self._email or password != self._password:
+            # Constant-ish copy matching the relay.
+            if not self._email:
+                self._email = clean
+                self._password = password
+                self._email_verified = False
+            else:
+                raise self._relay_error("邮箱或密码不正确", 401)
+        self._activated = True
+        self.auth_calls.append({"op": "login", "email": clean})
+        return {
+            "email": self._email,
+            "email_verified": self._email_verified,
+            "active": True,
+        }
+
+    def logout(self) -> dict:
+        self.auth_calls.append({"op": "logout"})
+        self._activated = False
+        return {"ok": True}
+
+    def me(self) -> dict:
+        if not self._activated:
+            return {"active": False}
+        return {
+            "active": True,
+            "available": True,
+            "email": self._email or None,
+            "email_verified": self._email_verified if self._email else True,
+            "legacy_activate": not bool(self._email),
+            "transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS,
+            "llm_points_remaining": self._llm_points,
+        }
+
+    def forgot_password(self, email: str) -> dict:
+        clean = (email or "").strip().lower()
+        if not clean or "@" not in clean:
+            raise self._relay_error("请输入有效的邮箱地址", 400)
+        self.auth_calls.append({"op": "forgot", "email": clean})
+        return {"ok": True}
+
+    def resend_verification(self, email: str) -> dict:
+        clean = (email or "").strip().lower()
+        if not clean or "@" not in clean:
+            raise self._relay_error("请输入有效的邮箱地址", 400)
+        self.auth_calls.append({"op": "resend", "email": clean})
+        return {"ok": True}
+
+    def mark_verified(self) -> None:
+        """Fake-only helper for tests that need a verified product account."""
+        self._email_verified = True
 
     def quiz(self, prompt: str) -> dict:
         if not self._activated:
             raise PlatformError("云端登录已失效，请重新激活后重试。")
+        self._require_verified_for_metered()
         self.llm_calls.append({"operation": "quiz"})
         if self._quiz_fail_status is not None:
             # fake-only organize failure injection (organize-blocked variant)
@@ -101,6 +239,7 @@ class FakePlatformBridge:
     def grade(self, prompt: str) -> dict:
         if not self._activated:
             raise PlatformError("云端登录已失效，请重新激活后重试。")
+        self._require_verified_for_metered()
         self.llm_calls.append({"operation": "grade"})
         # Relay pre-check: remaining < charge → 402, no upstream call,
         # no partial decrement.
@@ -128,5 +267,5 @@ class FakePlatformBridge:
         }
 
 
-__all__ = ["FAKE_TRANSCRIBE_SECONDS", "FAKE_LLM_POINTS", "RealPlatformBridge",
-           "FakePlatformBridge"]
+__all__ = ["FAKE_TRANSCRIBE_SECONDS", "FAKE_LLM_POINTS", "FAKE_AUTH_EMAIL",
+           "RealPlatformBridge", "FakePlatformBridge"]

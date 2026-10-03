@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated
 
@@ -219,6 +220,10 @@ def sync_cmd(
 def download_cmd(
     course: Annotated[str, typer.Option(help="Only download this Blackboard course id")] = "",
     limit: Annotated[int, typer.Option(help="Stop after this many recordings (0 = all)")] = 0,
+    workers: Annotated[
+        int, typer.Option("--workers", min=1, max=4,
+                          help="Concurrent recording downloads (default: 1)")
+    ] = 1,
 ) -> None:
     """Download lecture recordings listed by a previous `sync`."""
     from .auth import get_session
@@ -235,26 +240,39 @@ def download_cmd(
         raise typer.Exit(1)
 
     client = get_session()
-    done = 0
-    for job in jobs:
-        if limit and done >= limit:
-            break
-        result = download_job(client, job)
+
+    def show(job, result) -> None:
         if result.skipped:
             console.print(f"[dim]已完整 {job.label}[/dim]")
         elif result.path is not None:
             size = result.path.stat().st_size / 1e6
             verb = "续传" if result.resumed else "下载"
             console.print(f"[green]{verb}完成[/green] {job.label} → {size:.0f} MB")
-            done += 1
         else:
             console.print(f"[yellow]失败[/yellow] {job.label}: {result.error}")
+
+    selected = jobs[:limit] if limit else jobs
+    try:
+        if workers <= 1 or len(selected) <= 1:
+            for job in selected:
+                show(job, download_job(client, job))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(download_job, client, job): job for job in selected}
+                for future in as_completed(futures):
+                    show(futures[future], future.result())
+    finally:
+        client.close()
 
 
 @app.command(name="process")
 def process_cmd(
     course: Annotated[str, typer.Option(help="Only process this Blackboard course id")] = "",
     limit: Annotated[int, typer.Option(help="Stop after this many recordings (0 = all)")] = 0,
+    workers: Annotated[
+        int, typer.Option("--workers", min=1, max=4,
+                          help="Concurrent cloud processing jobs (default: 1)")
+    ] = 1,
 ) -> None:
     """Transcribe downloaded recordings, extract keyframes and write notes."""
     from .config import settings
@@ -265,11 +283,14 @@ def process_cmd(
         console.print("[yellow]No downloaded videos found. Run `download` first.[/yellow]")
         raise typer.Exit(1)
 
-    for index, job in enumerate(jobs):
-        if limit and index >= limit:
-            break
+    selected = jobs[:limit] if limit else jobs
+    backend = (getattr(settings, "transcription_backend", "cloud") or "cloud").strip().lower()
+    if workers > 1 and backend == "local":
+        console.print("[yellow]本地 Whisper 共享 GPU 模型不启用并发，已改为串行。[/yellow]")
+        workers = 1
+
+    def show(job, result) -> None:
         console.print(f"\n[bold]{job.label}[/bold]")
-        result = process_job(job, settings)
         console.print(
             f"  转录 {'完成' if result.transcribed else '失败'}"
             f"  关键帧 {result.keyframes}"
@@ -278,6 +299,15 @@ def process_cmd(
         )
         for error in result.errors:
             console.print(f"  [yellow]{error}[/yellow]")
+
+    if workers <= 1 or len(selected) <= 1:
+        for job in selected:
+            show(job, process_job(job, settings))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(process_job, job, settings): job for job in selected}
+            for future in as_completed(futures):
+                show(futures[future], future.result())
 
 
 @app.command(name="setup")
@@ -716,6 +746,9 @@ def daily_cmd(
     skip_process: Annotated[
         bool, typer.Option("--skip-process", help="Download only; leave transcription for the GPU host")
     ] = False,
+    skip_recordings: Annotated[
+        bool, typer.Option("--skip-recordings/--with-recordings", help="Only sync recording metadata by default; media processing needs explicit opt-in")
+    ] = True,
     skip_summary: Annotated[
         bool, typer.Option("--skip-summary", help="Skip the LLM daily summary step")
     ] = False,
@@ -727,6 +760,7 @@ def daily_cmd(
     result = run_daily(
         settings,
         skip_process=skip_process,
+        skip_recordings=skip_recordings,
         skip_summary=skip_summary,
         recorder=RichConsoleRecorder(console),
         steps=_daily_steps(),
@@ -762,6 +796,9 @@ def automate_cmd(
     skip_process: Annotated[
         bool, typer.Option("--skip-process", help="Download only; leave transcription for the GPU host")
     ] = False,
+    skip_recordings: Annotated[
+        bool, typer.Option("--skip-recordings/--with-recordings", help="Only sync recording metadata by default; media processing needs explicit opt-in")
+    ] = True,
     skip_summary: Annotated[
         bool, typer.Option("--skip-summary", help="Skip the local LLM daily summary")
     ] = False,
@@ -779,6 +816,7 @@ def automate_cmd(
     result = run_automate(
         settings,
         skip_process=skip_process,
+        skip_recordings=skip_recordings,
         skip_summary=skip_summary,
         skip_review=skip_review,
         skip_lecture=skip_lecture,

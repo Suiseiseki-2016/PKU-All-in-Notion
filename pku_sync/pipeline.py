@@ -18,6 +18,7 @@ import httpx
 
 from .media import DownloadResult, download_recording, extract_keyframes, write_notes
 from .models import Recording
+from .note_sources import collect_note_sources
 from .recordings import resolve_media
 from .store import safe_name
 from .transcription import transcribe
@@ -114,7 +115,7 @@ def recording_stage(job: RecordingJob) -> tuple[str, str]:
     return status, unavailable
 
 
-def download_job(client: httpx.Client, job: RecordingJob) -> DownloadResult:
+def download_job(client: httpx.Client, job: RecordingJob, progress=None) -> DownloadResult:
     """Download one recording, re-resolving its URL first.
 
     The media host signs playback URLs with a short lifetime, so a URL stored by
@@ -125,7 +126,7 @@ def download_job(client: httpx.Client, job: RecordingJob) -> DownloadResult:
     except Exception as exc:
         return DownloadResult(path=None, error=f"resolve failed: {exc}")
 
-    result = download_recording(client, job.recording, job.directory)
+    result = download_recording(client, job.recording, job.directory, progress=progress)
     if result.path is not None:
         (job.directory / "recording.json").write_text(
             json.dumps(job.recording.model_dump(), ensure_ascii=False, indent=1), "utf-8"
@@ -133,7 +134,10 @@ def download_job(client: httpx.Client, job: RecordingJob) -> DownloadResult:
     return result
 
 
-def process_job(job: RecordingJob, settings) -> ProcessResult:
+def process_job(job: RecordingJob, settings, *, include_keyframes: bool = True, progress=None,
+                direct_oss: bool = False, source_paths: list[Path] | None = None,
+                source_failures: list[dict] | None = None,
+                preserve_video: bool = False) -> ProcessResult:
     """Transcribe, extract keyframes and write notes for one downloaded video."""
     result = ProcessResult(job=job)
     if not job.video.exists():
@@ -142,32 +146,44 @@ def process_job(job: RecordingJob, settings) -> ProcessResult:
 
     transcript: dict = {}
     try:
-        transcript = transcribe(job.video, job.directory / "transcript.json", settings)
+        transcript = transcribe(job.video, job.directory / "transcript.json", settings, progress=progress, direct_oss=direct_oss)
         result.transcribed = True
     except Exception as exc:
         result.errors.append(f"transcribe: {exc}")
 
     keyframes: list[dict] = []
-    try:
-        keyframes = extract_keyframes(job.video, job.directory / "keyframes")
-        result.keyframes = len(keyframes)
-    except Exception as exc:
-        result.errors.append(f"keyframes: {exc}")
+    if include_keyframes and result.transcribed:
+        try:
+            keyframes = extract_keyframes(job.video, job.directory / "keyframes")
+            result.keyframes = len(keyframes)
+        except Exception as exc:
+            result.errors.append(f"keyframes: {exc}")
 
     if transcript:
         try:
+            notes_path = job.directory / "notes.md"
+            source_context = ([] if notes_path.exists() else collect_note_sources(
+                job.course_dir, job.recording.date, job.recording.title,
+                allowed_paths=source_paths,
+            ))
+            source_context.extend(source_failures or [])
             notes = write_notes(
                 transcript,
                 keyframes,
-                job.directory / "notes.md",
+                notes_path,
                 settings,
                 title=job.label,
+                source_context=source_context,
+                progress=progress,
+                course_directory=job.course_dir,
             )
             result.notes = notes is not None
         except Exception as exc:
             result.errors.append(f"notes: {exc}")
 
-    if settings.delete_video_after_processing and result.transcribed and not result.errors:
-        job.video.unlink(missing_ok=True)
-        result.removed_video = True
+    if (settings.delete_video_after_processing and result.transcribed and result.notes
+            and not result.errors and not (job.directory / ".keep-video").exists()):
+        if not preserve_video:
+            job.video.unlink(missing_ok=True)
+            result.removed_video = True
     return result

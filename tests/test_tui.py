@@ -117,7 +117,7 @@ def test_app_mounts_and_populates_all_three_panels(tmp_path):
                     break
             assert courses.row_count == 1
             assert "教学网" in (courses.border_title or "")
-            assert app.query_one("#ddl").row_count >= 1
+            assert "临期 DDL" in (app.query_one("#ddl").border_title or "")
             assert "实时读取 1 门课" in str(app.query_one("#status").render())
 
     asyncio.run(scenario())

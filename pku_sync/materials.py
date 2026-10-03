@@ -15,11 +15,13 @@ Blackboard's public REST API is only half usable for a student account here:
 from __future__ import annotations
 
 import re
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from .models import Announcement, Assignment, AttachmentRef, ContentItem
+from .models import Announcement, Assignment, AttachmentRef, ContentItem, SourceLink
 
 BB_API = "/learn/api/public/v1"
 LIST_CONTENT = "/webapps/blackboard/content/listContent.jsp"
@@ -186,7 +188,7 @@ def _walk_folder(
     except httpx.HTTPError:
         return
 
-    for entry in _parse_content_list(resp.text, course_id, parent_path):
+    for entry in _parse_content_list(resp.text, course_id, parent_path, content_id):
         item, child_id = entry
         items.append(item)
 
@@ -198,6 +200,7 @@ def _walk_folder(
                     content_id=item.content_id,
                     instructions=item.body_text,
                     attachments=item.attachments,
+                    source_links=item.source_links,
                     source="content-tree",
                 )
             )
@@ -217,7 +220,7 @@ def _walk_folder(
 
 
 def _parse_content_list(
-    html: str, course_id: str, parent_path: str
+    html: str, course_id: str, parent_path: str, parent_content_id: str = ""
 ) -> list[tuple[ContentItem, str]]:
     soup = BeautifulSoup(html, "html.parser")
     container = soup.find("ul", id="content_listContainer")
@@ -256,6 +259,14 @@ def _parse_content_list(
         details = li.find("div", class_=lambda value: bool(value) and "details" in value)
         details_text = _collapse(details.get_text(" ", strip=True)) if details else ""
         _apply_sizes(attachments, details_text)
+        source_links: list[SourceLink] = []
+        if details:
+            for anchor in details.find_all("a", href=True):
+                link = _safe_source_link(anchor)
+                if link and all(existing.url != link.url for existing in source_links):
+                    source_links.append(link)
+                if len(source_links) >= 20:
+                    break
 
         results.append(
             (
@@ -265,13 +276,46 @@ def _parse_content_list(
                     title=title,
                     kind=kind,
                     parent_path=parent_path,
+                    parent_content_id=parent_content_id,
                     body_text=_ATTACHED_RE.sub("", details_text).strip(),
                     attachments=attachments,
+                    source_links=source_links,
                 ),
                 child_id,
             )
         )
     return results
+
+
+def safe_source_link(label: str, url: str) -> SourceLink | None:
+    """Keep public HTTPS links and simple document routes without credentials."""
+    raw = str(url or "").strip()
+    label = _collapse(str(label or ""))
+    if not label or len(label) > 180 or len(raw) > 2048:
+        return None
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname or ""
+        if (parts.scheme.lower() != "https" or not host or parts.username
+                or parts.password or parts.query
+                or (parts.fragment and not re.fullmatch(r"/[A-Za-z0-9/_.-]{1,199}",
+                                                        parts.fragment))
+                or any(char.isspace() or ord(char) < 32 for char in raw)):
+            return None
+        if host.casefold() == "localhost" or host.casefold().endswith(".local"):
+            return None
+        try:
+            if not ip_address(host).is_global:
+                return None
+        except ValueError:
+            pass
+    except ValueError:
+        return None
+    return SourceLink(label=label, url=raw)
+
+
+def _safe_source_link(anchor: Tag) -> SourceLink | None:
+    return safe_source_link(anchor.get_text(" ", strip=True), anchor.get("href") or "")
 
 
 def _own_id(li: Tag) -> str:

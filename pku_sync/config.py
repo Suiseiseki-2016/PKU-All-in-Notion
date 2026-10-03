@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://openrouter.ai/api/v1"
     openai_api_key: str = ""
     notes_model: str = "qwen/qwen3.5-397b-a17b"
+    # A second, evidence-focused pass removes ASR noise from primary study notes.
+    notes_fact_check: bool = True
+    # Experimental strict per-sentence evidence gate. Keep opt-in until a
+    # full real lecture establishes its false-positive rate and running cost.
+    # A complete note must pass the evidence-linked sentence audit before it
+    # can become the student-facing artifact. This costs extra LLM calls but
+    # catches errors that page-citation syntax and local rules cannot detect.
+    notes_claim_audit: bool = True
+    # Natural paragraphs from verified fact IDs require the independent
+    # sentence audit above. High-risk facts and coursework keep exact wording.
+    # Keep the fact-bound paragraph composer opt-in until a complete real
+    # lecture passes factual, readability, and cost acceptance.
+    notes_structured_composition: bool = False
+    # Match ASR windows to clearly associated slide pages despite wrong terms.
+    notes_source_matching: bool = True
 
     # Backend for one-shot LLM calls (daily summary; batch content later).
     # "auto" = the OpenAI-compatible API when OPENAI_API_KEY is set, else a
@@ -50,28 +65,27 @@ class Settings(BaseSettings):
     # fallback. The default path uses the official Notion MCP server instead.
     notion_token: str = ""
 
-    # Optional self-hosted REST OAuth fallback. Normal users do not need these:
-    # Claude, Codex, or Factory owns the official Notion MCP OAuth session.
-    notion_oauth_client_id: str = ""
+    # Public OAuth integration used by the desktop panel's relay login.
+    # The client secret remains on the relay; deployments may override this ID.
+    notion_oauth_client_id: str = "3ded872b-594c-8159-b1aa-003722c832db"
     notion_oauth_client_secret: str = ""
 
     whisper_model: str = "small"
     whisper_device: str = "cuda"
     whisper_compute_type: str = "float16"
 
-    # Where `process` sends a recording: "local" runs faster-whisper on this
-    # machine (default, unchanged behavior); "cloud" is the relay
-    # transcription service — audio-only upload, deleted right after
-    # transcription. Until the relay is reachable, cloud refuses loudly.
-    transcription_backend: str = "local"
+    # Student installs use the online transcription relay. The local backend
+    # remains available only when explicitly selected for CLI diagnostics.
+    transcription_backend: str = "cloud"
 
     # Cloud transcription (relay wrapper): audio is uploaded to OUR relay
     # only, never to a third-party API; the relay holds the upstream ASR
     # key and meters minutes per platform account.
     # All AI is proxied by the platform -- users never see any key.
     # PLATFORM_TOKEN is the account session the app writes automatically
-    # at activation (devs may fill it by hand); empty values keep the
-    # cloud backend refusing loudly until the relay is deployed.
+    # at product login/register or legacy activation (devs may fill it by
+    # hand); empty values keep the cloud backend refusing loudly until
+    # the relay is deployed.
     cloud_transcribe_url: str = "https://pku.aeoluswu.info/v1/transcribe"
     platform_token: str = ""
 

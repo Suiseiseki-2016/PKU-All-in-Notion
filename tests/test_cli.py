@@ -86,3 +86,24 @@ def test_automate_runs_notion_steps_even_when_daily_fails(tmp_path, monkeypatch)
     assert calls == {"review": 1, "lecture": 1}
     log = (tmp_path / "logs" / "latest.daily.log").read_text("utf-8")
     assert "=== EXIT_CODE=3 ===" in log
+
+def test_daily_defaults_to_metadata_only(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "sync_cmd", lambda **kw: calls.append("sync"))
+    monkeypatch.setattr(cli, "download_cmd", lambda **kw: calls.append("download"))
+    monkeypatch.setattr(cli, "process_cmd", lambda **kw: calls.append("process"))
+    monkeypatch.setattr(cli, "summarize_cmd", lambda **kw: calls.append("summarize"))
+    monkeypatch.setattr("pku_sync.config.settings", SimpleNamespace(data_dir=tmp_path))
+    cli.daily_cmd()
+    assert calls == ["sync", "summarize"]
+
+
+def test_daily_explicit_media_opt_in(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "sync_cmd", lambda **kw: calls.append("sync"))
+    monkeypatch.setattr(cli, "download_cmd", lambda **kw: calls.append("download"))
+    monkeypatch.setattr(cli, "process_cmd", lambda **kw: calls.append("process"))
+    monkeypatch.setattr(cli, "summarize_cmd", lambda **kw: calls.append("summarize"))
+    monkeypatch.setattr("pku_sync.config.settings", SimpleNamespace(data_dir=tmp_path))
+    cli.daily_cmd(skip_recordings=False)
+    assert calls == ["sync", "download", "process", "summarize"]

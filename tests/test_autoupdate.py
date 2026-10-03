@@ -148,8 +148,8 @@ def test_panel_surfaces_version_notice_action_and_silent_unreachable_state(tmp_p
     shell = client.get("/app")
     assert shell.status_code == 200
     assert "Version {version}" in shell.text
-    assert "new version {version} available" in shell.text
-    assert "Apply on next start" in shell.text
+    assert "发现新版本 {version}" in shell.text
+    assert "下次启动时更新" in shell.text
     assert "Retry on next start" in shell.text
     assert '"data-version"' in client.get("/app/app.js").text
 
@@ -191,3 +191,40 @@ def test_corrupt_requested_version_is_cleared_instead_of_staying_queued(tmp_path
 
     assert service.apply_pending() == autoupdate.ApplyOutcome(status="none", version=None)
     assert not service.state_path.exists()
+
+
+def test_desktop_uses_signed_shell_updater_instead_of_python_tool_upgrade(tmp_path, monkeypatch):
+    monkeypatch.setenv("PKU_DESKTOP_APP", "1")
+    calls = []
+    settings = SimpleNamespace(data_dir=tmp_path)
+    service = autoupdate.UpdateService.from_settings(
+        settings,
+        current_version="0.1.17",
+        fetcher=lambda: calls.append("fetch") or "0.1.18",
+        upgrade_runner=lambda *args, **kwargs: calls.append("upgrade"),
+    )
+    service.state_path.parent.mkdir(parents=True, exist_ok=True)
+    service.state_path.write_text('{"status":"requested","version":"0.1.18"}', encoding="utf-8")
+
+    assert service.panel_state() == {"version": "0.1.17", "status": "desktop_managed"}
+    assert service.check() == autoupdate.UpdateCheck("0.1.17", None, "desktop_managed")
+    assert service.apply_pending() == autoupdate.ApplyOutcome("none", None)
+    try:
+        service.request_apply("0.1.18")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("desktop panel must reject the Python update route")
+    assert calls == []
+    assert service.state_path.exists()  # Pending portable-tool state is left untouched.
+
+    panel_settings = SimpleNamespace(
+        data_dir=tmp_path,
+        cloud_transcribe_url="https://relay.invalid/v1/transcribe",
+        platform_token="",
+        transcription_backend="local",
+    )
+    client = TestClient(webapi.create_app(settings=panel_settings, update_service=service))
+    assert client.get("/api/update").json() == {"version": "0.1.17", "status": "desktop_managed"}
+    assert client.post("/api/update/request", json={"version": "0.1.18"}).status_code == 400
+    assert calls == []

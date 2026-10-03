@@ -119,6 +119,21 @@ class TestContentList:
         items = [item for item, _ in _parse_content_list(CONTENT_LIST_HTML, "_101578_1", "课程作业")]
         assert items[2].kind == "作业"
 
+    def test_assignment_preserves_public_teacher_links_without_session_urls(self):
+        html = '''<ul id="content_listContainer"><li class="liItem" id="contentListItem:_1717599_1">
+        <img alt="作业"><h3>Lab1发布</h3><div class="details">
+        <a href="https://edu.n2sys.cn/#/tut_lab/lv1/README">Lab 1: 自己实现 myFTP 协议</a>
+        <a href="https://github.com/N2Sys-EDU/2026-lab1-myFTP-Template">GitHub 模板</a>
+        <a href="https://example.com/?token=secret">带令牌的链接</a>
+        <a href="https://example.com/#access_token=secret">片段中的令牌</a>
+        <a href="http://127.0.0.1/private">本机链接</a>
+        </div></li></ul>'''
+        item, _ = _parse_content_list(html, "_102156_1", "课程作业")[0]
+        assert [(link.label, link.url) for link in item.source_links] == [
+            ("Lab 1: 自己实现 myFTP 协议", "https://edu.n2sys.cn/#/tut_lab/lv1/README"),
+            ("GitHub 模板", "https://github.com/N2Sys-EDU/2026-lab1-myFTP-Template"),
+        ]
+
     def test_path_joins_the_parent_folder(self):
         items = [item for item, _ in _parse_content_list(CONTENT_LIST_HTML, "_102156_1", "教学内容")]
         assert items[1].path == "教学内容/课件"
@@ -346,7 +361,7 @@ class TestNoteWindows:
             {"start": 500, "end": 510, "text": "三"},
         ]
         windows = _windows(segments, window_seconds=480)
-        assert [w["text"] for w in windows] == ["一 二", "三"]
+        assert [w["text"] for w in windows] == ["[00:00] 一 [01:40] 二", "[08:20] 三"]
         assert windows[0]["end"] == 110
 
     def test_silent_segments_do_not_create_empty_windows(self):

@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from .config import settings
+from .network import campus_identity_proxy
 
 IAAA_BASE = "https://iaaa.pku.edu.cn"
 BB_BASE = "https://course.pku.edu.cn"
@@ -54,17 +55,21 @@ def new_client() -> httpx.Client:
     several attempts and more often from off-campus hosts. Retrying inside the
     transport means any request in a long sync recovers, not just the login.
     """
+    proxy = campus_identity_proxy()
+    mounts = ({IAAA_BASE: httpx.HTTPTransport(proxy=proxy, retries=1, verify=False)}
+              if proxy else None)
     return httpx.Client(
         base_url=BB_BASE,
         follow_redirects=True,
-        timeout=60,
-        transport=httpx.HTTPTransport(retries=5, verify=False),
+        timeout=httpx.Timeout(20.0, connect=6.0),
+        transport=httpx.HTTPTransport(retries=1, verify=False),
+        mounts=mounts,
         headers={"User-Agent": USER_AGENT},
     )
 
 
 def get_session(
-    attempts: int = 4, username: str = "", password: str = ""
+    attempts: int = 2, username: str = "", password: str = ""
 ) -> httpx.Client:
     """Authenticate with IAAA and return a client holding a Blackboard session.
 
@@ -137,11 +142,14 @@ def _login(username: str = "", password: str = "") -> httpx.Client:
         raise RuntimeError("PKU_USERNAME and PKU_PASSWORD must be set in .env")
 
     client = new_client()
-    token = iaaa_authenticate(client, "blackboard", _CAMPUS_LOGIN_REGISTERED, user, pwd)
-
-    bb_resp = client.get(_CAMPUS_LOGIN_HTTPS, params={"token": token})
-    bb_resp.raise_for_status()
-    return client
+    try:
+        token = iaaa_authenticate(client, "blackboard", _CAMPUS_LOGIN_REGISTERED, user, pwd)
+        bb_resp = client.get(_CAMPUS_LOGIN_HTTPS, params={"token": token})
+        bb_resp.raise_for_status()
+        return client
+    except Exception:
+        client.close()
+        raise
 
 
 def cookie_header(client: httpx.Client, domain_suffix: str = "pku.edu.cn") -> str:

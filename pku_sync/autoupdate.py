@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as distribution_version
@@ -81,15 +82,18 @@ class UpdateService:
         state_path: Path,
         fetcher: Callable[[], str] = fetch_release_version,
         upgrade_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        desktop_managed: bool = False,
     ):
         self.current_version = _normalized_version(current_version or installed_version()) or "0.0.0"
         self.state_path = state_path
         self._fetcher = fetcher
         self._upgrade_runner = upgrade_runner
+        self.desktop_managed = desktop_managed
         self._last_check: UpdateCheck | None = None
 
     @classmethod
     def from_settings(cls, settings, **kwargs) -> UpdateService:
+        kwargs.setdefault("desktop_managed", os.environ.get("PKU_DESKTOP_APP") == "1")
         return cls(
             state_path=Path(settings.data_dir) / "update-pending.json",
             **kwargs,
@@ -97,6 +101,8 @@ class UpdateService:
 
     def check(self) -> UpdateCheck:
         """Return availability, while an unreachable manifest remains invisible."""
+        if self.desktop_managed:
+            return UpdateCheck(self.current_version, None, "desktop_managed")
         try:
             available = _normalized_version(self._fetcher())
         except (httpx.HTTPError, ValueError, TypeError, KeyError):
@@ -113,6 +119,8 @@ class UpdateService:
 
     def request_apply(self, available_version: str) -> None:
         """Queue an explicit user-requested update for a future process start."""
+        if self.desktop_managed:
+            raise ValueError("desktop updates are managed by the signed installer")
         clean = _normalized_version(available_version)
         if clean is None:
             raise ValueError("invalid update version")
@@ -129,6 +137,8 @@ class UpdateService:
 
     def apply_pending(self) -> ApplyOutcome:
         """Run the tool upgrade only during startup, preserving a failed request."""
+        if self.desktop_managed:
+            return ApplyOutcome("none", None)
         pending = self._read_state()
         if pending.get("status") != "requested":
             return ApplyOutcome(pending.get("status", "none"), pending.get("version"))
@@ -156,6 +166,8 @@ class UpdateService:
 
     def panel_state(self, *, check: bool = False) -> dict:
         """Safe browser payload, deliberately omitting error details and commands."""
+        if self.desktop_managed:
+            return {"version": self.current_version, "status": "desktop_managed"}
         pending = self._read_state()
         if pending.get("status") in {"deferred", "requested"}:
             available = _normalized_version(pending.get("version"))

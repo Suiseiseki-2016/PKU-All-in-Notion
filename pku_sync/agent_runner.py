@@ -154,6 +154,12 @@ def command_for(
         )
     full_prompt = target + prompt + context
     if host == "factory":
+        full_prompt = (
+            "Important execution constraint: do not use Task, Loop, missions, "
+            "subagents, or any background work. Complete every step serially in "
+            "this main session and wait for each tool call to finish.\n\n"
+            + full_prompt
+        )
         # Pick the tool flag by the installed droid version: 0.114.x uses
         # --enabled-tools, 0.218.2 uses --add-tools (verified live for both;
         # see _factory_tool_flag). The prompt stays the last positional

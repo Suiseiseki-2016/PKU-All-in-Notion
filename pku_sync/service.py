@@ -111,11 +111,12 @@ def run_daily(
     settings: "Settings | None" = None,
     *,
     skip_process: bool = False,
+    skip_recordings: bool = False,
     skip_summary: bool = False,
     recorder: Recorder,
     steps: DailySteps,
 ) -> DailyResult:
-    """One unattended pass: sync, download, process, then summarize.
+    """One unattended pass; skip_recordings keeps media strictly on demand.
 
     Writes both daily log files and returns the outcome; the CALLER decides
     whether a failure re-raises (the CLI does, so the exit code also reaches
@@ -134,11 +135,12 @@ def run_daily(
     try:
         steps.sync()
         try:
-            steps.download()
+            if not skip_recordings:
+                steps.download()
         except Exception as exc:  # a failed download must not stop the chain
             if _exit_code_of(exc) is None:
                 raise
-        if not skip_process:
+        if not skip_process and not skip_recordings:
             try:
                 steps.process()
             except Exception as exc:  # transcription waits; the sync stands
@@ -178,6 +180,7 @@ def run_automate(
     settings: "Settings | None" = None,
     *,
     skip_process: bool = False,
+    skip_recordings: bool = False,
     skip_summary: bool = False,
     skip_review: bool = False,
     skip_lecture: bool = False,
@@ -199,6 +202,7 @@ def run_automate(
     daily = run_daily(
         settings,
         skip_process=skip_process,
+        skip_recordings=skip_recordings,
         skip_summary=skip_summary,
         recorder=recorder,
         steps=steps,

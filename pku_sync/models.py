@@ -41,6 +41,11 @@ class Announcement(BaseModel):
         return self.posted_at.split("T")[0] if self.posted_at else ""
 
 
+class SourceLink(BaseModel):
+    label: str
+    url: str
+
+
 class ContentItem(BaseModel):
     """A node in a course's content tree."""
 
@@ -49,8 +54,10 @@ class ContentItem(BaseModel):
     title: str
     kind: str = ""  # Blackboard's own icon label: 文件 / 内容文件夹 / 作业 / 项目 ...
     parent_path: str = ""  # e.g. "教学内容/第一讲"
+    parent_content_id: str = ""
     body_text: str = ""
     attachments: list["AttachmentRef"] = Field(default_factory=list)
+    source_links: list[SourceLink] = Field(default_factory=list)
 
     @property
     def path(self) -> str:
@@ -71,6 +78,7 @@ class Assignment(BaseModel):
     source: str = ""  # "content-tree" or "calendar"
     instructions: str = ""
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    source_links: list[SourceLink] = Field(default_factory=list)
 
 
 class Recording(BaseModel):
