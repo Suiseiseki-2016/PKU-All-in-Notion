@@ -50,6 +50,22 @@ def test_whoami_sends_auth_and_version_headers():
     assert me["name"] == "pku-course-sync"
 
 
+def test_move_page_uses_notion_move_endpoint_without_retry():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"method": request.method, "path": request.url.path,
+                     "version": request.headers.get("Notion-Version"),
+                     "payload": json_lib.loads(request.read())})
+        return httpx.Response(200, json={"object": "page", "id": DASHED})
+
+    with make_client(handler) as client:
+        assert client.move_page(PAGE_ID, "a" * 32)["id"] == DASHED
+    assert seen == [{"method": "POST", "path": f"/v1/pages/{DASHED}/move",
+                     "version": "2026-03-11",
+                     "payload": {"parent": {"type": "page_id", "page_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}}]
+
+
 def test_retries_429_honoring_retry_after(monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr(notion.time, "sleep", sleeps.append)
@@ -98,6 +114,25 @@ def test_5xx_retries_then_succeeds(monkeypatch):
 
     with make_client(handler) as client:
         assert client.get_page(PAGE_ID) == {"ok": True}
+
+
+def test_get_read_timeout_retries_but_ambiguous_page_create_does_not(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(notion.time, "sleep", sleeps.append)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.method)
+        if len(seen) == 1 or request.method == "POST":
+            raise httpx.ReadTimeout("Notion response timed out", request=request)
+        return httpx.Response(200, json={"id": DASHED})
+
+    with make_client(handler) as client:
+        assert client.get_page(PAGE_ID)["id"] == DASHED
+        with pytest.raises(httpx.ReadTimeout):
+            client.create_page(PAGE_ID, "测试页")
+    assert seen == ["GET", "GET", "POST"]
+    assert sleeps == [1.0]
 
 
 def test_client_error_raises_without_retry():
@@ -378,8 +413,7 @@ def test_upload_file_singlepart_flow(tmp_path):
     assert seen["register"] == {
         "filename": "frame_12m34s.jpg",
         "content_type": "image/jpeg",
-        "kind": "file",
-        "mode": "singlepart_upload",
+        "mode": "single_part",
     }
     assert seen["send_path"] == "/v1/file_uploads/up1/send"
     assert seen["send_headers"]["authorization"] == "Bearer secret_test"
@@ -564,3 +598,86 @@ def test_get_client_requires_token():
 
     with pytest.raises(NotionError, match="NOTION_TOKEN"):
         notion.get_client(Settings(_env_file=None, notion_token=""))
+
+
+
+def test_appending_uploaded_image_uses_supported_file_api_version():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["version"] = request.headers.get("Notion-Version")
+        seen["payload"] = json_lib.loads(request.read())
+        return httpx.Response(200, json={"results": [{"id": "created-image"}]})
+
+    with make_client(handler) as client:
+        client.append_blocks(PAGE_ID,
+                             markdown_to_blocks("![课堂画面](file-upload://abc123)"),
+                             after="a" * 32, retry=False)
+    assert seen["version"] == "2026-03-11"
+    assert seen["payload"]["children"][0]["image"]["file_upload"]["id"] == "abc123"
+    assert seen["payload"]["position"] == {"type": "after_block", "after_block": {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}
+
+
+def test_appending_uploaded_video_uses_supported_file_api_version():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["version"] = request.headers.get("Notion-Version")
+        seen["payload"] = json_lib.loads(request.read())
+        return httpx.Response(200, json={"results": [{"id": "created-video"}]})
+
+    with make_client(handler) as client:
+        client.append_blocks(
+            PAGE_ID,
+            [notion._video_block("课堂录像 01:02", "file-upload://clip123")],
+            after="a" * 32,
+            retry=False,
+        )
+    assert seen["version"] == "2026-03-11"
+    assert seen["payload"]["children"][0]["video"]["file_upload"]["id"] == "clip123"
+    assert seen["payload"]["position"]["after_block"]["id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+
+def test_markdown_table_becomes_native_notion_table_even_with_imperfect_separator():
+    blocks = markdown_to_blocks(
+        '### 分类\n| 名称 | 说明 |\n| :--- | : |\n| A | 第一行<br>第二行 |\n'
+    )
+    assert [block['type'] for block in blocks] == ['heading_3', 'table']
+    table = blocks[1]['table']
+    assert table['table_width'] == 2 and table['has_column_header'] is True
+    assert len(table['children']) == 2
+    assert table['children'][1]['table_row']['cells'][1][0]['text']['content'] == '第一行\n第二行'
+
+
+def test_markdown_deep_heading_and_nested_lists():
+    blocks = markdown_to_blocks('#### A. 分支\n- 父项\n  1. 子项\n     - 孙项\n- 同级\n')
+    assert [block['type'] for block in blocks] == ['heading_3', 'bulleted_list_item', 'bulleted_list_item']
+    assert blocks[0]['heading_3']['rich_text'][0]['text']['content'] == 'A. 分支'
+    child = blocks[1]['bulleted_list_item']['children'][0]
+    assert child['type'] == 'numbered_list_item'
+    assert child['numbered_list_item']['children'][0]['type'] == 'bulleted_list_item'
+
+
+def test_markdown_inline_italic_code_and_equation():
+    blocks = markdown_to_blocks('*提示*：使用 `AES`，满足 $a=1$。')
+    rich = blocks[0]['paragraph']['rich_text']
+    assert rich[0]['annotations']['italic'] is True
+    assert rich[2]['annotations']['code'] is True
+    assert rich[4] == {'type': 'equation', 'equation': {'expression': 'a=1'}}
+
+
+def test_markdown_nested_math_and_display_equations():
+    blocks = markdown_to_blocks(
+        '*约束：$\\gcd(a, 26) = 1$*\n'
+        '$$ Y = (X + K) \\pmod{26} $$\n'
+        '$$\nX = (Y - K) \\pmod{26}\n$$\n'
+    )
+    assert [block['type'] for block in blocks] == ['paragraph', 'equation', 'equation']
+    rich = blocks[0]['paragraph']['rich_text']
+    assert rich[0]['annotations']['italic'] is True
+    assert rich[0]['text']['content'] == '约束：'
+    assert rich[1] == {'type': 'equation', 'equation': {'expression': '\\gcd(a, 26) = 1'}}
+    assert [block['equation']['expression'] for block in blocks[1:]] == [
+        'Y = (X + K) \\pmod{26}', 'X = (Y - K) \\pmod{26}'
+    ]

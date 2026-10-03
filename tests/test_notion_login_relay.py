@@ -696,3 +696,30 @@ def test_cli_notion_login_uses_relay_flow(monkeypatch, tmp_path):
     assert captured["kwargs"]["timeout"] == 300.0
     assert callable(captured["kwargs"]["on_url"])
     assert verified == ["called"]  # post-exchange verification runs
+
+
+def test_packaged_settings_have_public_notion_client_id(monkeypatch):
+    from pku_sync.config import Settings
+
+    monkeypatch.delenv("NOTION_OAUTH_CLIENT_ID", raising=False)
+    settings = Settings(_env_file=None)
+    assert notion_login.resolve_client_id(settings) == "3ded872b-594c-8159-b1aa-003722c832db"
+    assert settings.notion_oauth_client_secret == ""
+
+def test_relay_exchange_bypasses_dead_local_proxy(monkeypatch):
+    original_client = httpx.Client
+    observed = {}
+
+    def client(**kwargs):
+        observed['trust_env'] = kwargs.get('trust_env')
+        return original_client(**kwargs)
+
+    monkeypatch.setattr(notion_login, 'dead_loopback_proxy', lambda: True)
+    monkeypatch.setattr(notion_login.httpx, 'Client', client)
+    result = notion_login.relay_exchange_code(
+        'platform-token-1', RELAY_EXCHANGE_URL, 'fresh-code',
+        'http://localhost:8765/callback',
+        transport=httpx.MockTransport(lambda request: relay_token_response()),
+    )
+    assert result['access_token'] == 'secret_relay'
+    assert observed['trust_env'] is False

@@ -49,6 +49,7 @@ import httpx
 
 from .envfile import write_env_values
 from .notion import API_BASE, NotionError
+from .network import dead_loopback_proxy
 
 DEFAULT_PORT = 8765
 CALLBACK_PATH = "/callback"
@@ -156,7 +157,7 @@ def exchange_code(
 ) -> dict:
     """One-shot authorization-code → access-token exchange (no retry)."""
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    with httpx.Client(transport=transport, timeout=30.0) as http:
+    with httpx.Client(transport=transport, timeout=30.0, trust_env=not dead_loopback_proxy()) as http:
         response = http.post(
             f"{API_BASE}/oauth/token",
             headers={"Authorization": f"Basic {basic}"},
@@ -211,7 +212,7 @@ def relay_exchange_code(
     nor any relay/provider response body.
     """
     try:
-        with httpx.Client(transport=transport, timeout=30.0) as http:
+        with httpx.Client(transport=transport, timeout=30.0, trust_env=not dead_loopback_proxy()) as http:
             response = http.post(
                 url,
                 headers={"Authorization": f"Bearer {platform_token}"},

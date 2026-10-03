@@ -32,6 +32,8 @@ from pathlib import Path
 
 import httpx
 
+from .network import dead_loopback_proxy
+
 API_HOST = "https://api.notion.com"
 API_BASE = f"{API_HOST}/v1"
 API_VERSION = "2022-06-28"
@@ -43,12 +45,14 @@ _TEXT_LIMIT = 2000  # max chars in one rich-text text object
 _SINGLEPART_LIMIT = 20 * 1024 * 1024
 
 _IMAGE_SCHEME = "file-upload://"
+_FILE_UPLOAD_API_VERSION = "2026-03-11"
 
-_HEADING_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*#*\s*$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _BULLET_RE = re.compile(r"^[-+*]\s+(.+)$")
 _NUMBERED_RE = re.compile(r"^\d+[.)]\s+(.+)$")
 _IMAGE_RE = re.compile(r"^!\[(.*?)\]\((.+?)\)$")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_INLINE_RE = re.compile(r"\*\*(.+?)\*\*|\*([^*\n]+)\*|`([^`\n]+)`|\$([^$\n]+)\$")
 _HEX32_RE = re.compile(r"([0-9a-fA-F]{32})")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 
@@ -84,6 +88,7 @@ class NotionClient:
             },
             timeout=timeout,
             transport=transport,
+            trust_env=not dead_loopback_proxy(),
         )
 
     # -- plumbing ---------------------------------------------------------
@@ -112,9 +117,19 @@ class NotionClient:
         response: httpx.Response | None = None
         attempts = _ATTEMPTS if retry else 1
         for attempt in range(1, attempts + 1):
-            response = self._http.request(
-                method, url, json=json_body, params=params, files=files, headers=headers
-            )
+            try:
+                response = self._http.request(
+                    method, url, json=json_body, params=params, files=files, headers=headers
+                )
+            except (httpx.TimeoutException, httpx.NetworkError,
+                    httpx.RemoteProtocolError):
+                # A timed-out write may already have committed in Notion.
+                # Replaying it could create a second page or block. GETs are
+                # safe to repeat and are used throughout catalog reconciliation.
+                if method.upper() != "GET" or attempt == attempts:
+                    raise
+                time.sleep(min(2 ** (attempt - 1), 4.0))
+                continue
             if response.status_code not in _RETRYABLE or attempt == attempts:
                 break
             time.sleep(_backoff(response, attempt))
@@ -169,6 +184,15 @@ class NotionClient:
             "PATCH", f"/v1/pages/{_norm_id(page_id)}", json_body={"properties": properties}
         )
 
+    def move_page(self, page_id: str, parent_page_id: str) -> dict:
+        """Move a page without recreating it or changing its children."""
+        return self._request(
+            "POST", f"/v1/pages/{_norm_id(page_id)}/move",
+            json_body={"parent": {"type": "page_id", "page_id": _norm_id(parent_page_id)}},
+            headers={"Notion-Version": _FILE_UPLOAD_API_VERSION},
+            retry=False,
+        )
+
     # -- blocks -----------------------------------------------------------
 
     def list_children(self, block_id: str) -> list[dict]:
@@ -209,17 +233,34 @@ class NotionClient:
         cursor = after
         for chunk in _chunks(blocks, _BLOCK_BATCH):
             payload: dict = {"children": chunk}
+            media_upload = any(
+                block.get("type") in {"image", "video"} and
+                (block.get(block.get("type")) or {}).get("type") == "file_upload"
+                for block in chunk
+            )
             if cursor:
-                payload["after"] = _norm_id(cursor)
+                # The file-upload API version uses position instead of after.
+                payload["position" if media_upload else "after"] = (
+                    {"type": "after_block", "after_block": {"id": _norm_id(cursor)}}
+                    if media_upload else _norm_id(cursor)
+                )
             body = self._request(
                 "PATCH", f"/v1/blocks/{_norm_id(page_id)}/children",
                 json_body=payload, retry=retry,
+                headers={"Notion-Version": _FILE_UPLOAD_API_VERSION} if media_upload else None,
             )
             rows = body.get("results") or []
             created.extend(rows)
             if rows and rows[-1].get("id"):
                 cursor = rows[-1]["id"]
         return created
+
+    def update_paragraph(self, block_id: str, text: str) -> dict:
+        """Update one app-owned status paragraph without touching child pages."""
+        return self._request(
+            "PATCH", f"/v1/blocks/{_norm_id(block_id)}",
+            json_body={"paragraph": {"rich_text": _rt(text)}},
+        )
 
     def archive_block(self, block_id: str, *, retry: bool = True) -> dict:
         """Archive one known block, never an exercise page body."""
@@ -304,7 +345,7 @@ class NotionClient:
     # -- file uploads -------------------------------------------------------
 
     def upload_file(self, path: str | Path) -> str:
-        """Upload one small file (keyframes are far below 20 MB) → file-upload://<id>.
+        """Upload one small file (images or short video clips) → file-upload://<id>.
 
         Singlepart flow: register the upload, then POST the bytes to its
         upload_url as multipart/form-data with the file in the ``file`` field.
@@ -316,7 +357,7 @@ class NotionClient:
             raise NotionError(f"文件不存在: {file}")
         if file.stat().st_size > _SINGLEPART_LIMIT:
             raise NotionError(
-                f"{file.name} 超过单次上传 20 MB 上限（keyframes 不会到这个量级）"
+                f"{file.name} 超过单次上传 20 MB 上限；请先压缩或切成短片"
             )
         content_type = _guess_type(file.name)
         created = self._request(
@@ -325,9 +366,9 @@ class NotionClient:
             json_body={
                 "filename": file.name,
                 "content_type": content_type,
-                "kind": "file",
-                "mode": "singlepart_upload",
+                "mode": "single_part",
             },
+            headers={"Notion-Version": _FILE_UPLOAD_API_VERSION},
         )
         upload_url = created.get("upload_url") or (
             f"{self._base}/v1/file_uploads/{created['id']}/send"
@@ -340,6 +381,7 @@ class NotionClient:
             if h.get("name", "").lower() != "content-type"
         }
         headers.setdefault("Authorization", f"Bearer {self._token}")
+        headers["Notion-Version"] = _FILE_UPLOAD_API_VERSION
         data = file.read_bytes()
         sent = self._request(
             "POST", upload_url, files={"file": (file.name, data, content_type)}, headers=headers
@@ -442,23 +484,70 @@ def normalize_code_language(language: str | None) -> str:
     return CODE_LANGUAGE_PLAIN_TEXT
 
 
-def markdown_to_blocks(markdown: str) -> list[dict]:
-    """The Notion-flavored markdown subset used by the writer spec → blocks.
+def _table_cells(line: str) -> list[str]:
+    """Split a Markdown row while keeping escaped pipe characters in cells."""
+    raw = line.strip().strip("|")
+    cells = re.split(r"(?<!\\)\|", raw)
+    return [cell.strip().replace(r"\|", "|") for cell in cells]
 
-    Supported: ``#``–``###`` headings, ``-``/``+``/``*`` bullets, numbered
-    items, ``>`` quotes, ``---`` dividers, fenced code, paragraphs (consecutive
-    plain lines joined), standalone images ``![caption](file-upload://<id>)``
-    or http(s), and ``**bold**`` inline. Indented (nested) bullets are not a
-    thing in the writer format and are flattened.
-    """
+
+def _table_block(lines: list[str]) -> dict | None:
+    if len(lines) < 3 or not lines[0].lstrip().startswith("|"):
+        return None
+    header = _table_cells(lines[0])
+    separator = lines[1].strip()
+    if len(header) < 2 or not re.fullmatch(r"[|:\-\s]+", separator) or "---" not in separator:
+        return None
+    rows = [header]
+    for line in lines[2:]:
+        cells = _table_cells(line)
+        if len(cells) != len(header):
+            return None
+        rows.append(cells)
+    children = []
+    for row in rows:
+        rich_cells = [
+            _rt(re.sub(r"<br\s*/?>", "\n", cell, flags=re.I))
+            for cell in row
+        ]
+        children.append({"object": "block", "type": "table_row",
+                         "table_row": {"cells": rich_cells}})
+    return {"object": "block", "type": "table", "table": {
+        "table_width": len(header), "has_column_header": True,
+        "has_row_header": False, "children": children,
+    }}
+
+
+def markdown_to_blocks(markdown: str) -> list[dict]:
+    """Convert generated lecture Markdown to native Notion blocks."""
     blocks: list[dict] = []
     lines = markdown.replace("\r\n", "\n").split("\n")
+    list_stack: list[tuple[int, dict]] = []
     i = 0
     while i < len(lines):
-        stripped = lines[i].strip()
+        raw = lines[i]
+        stripped = raw.strip()
         if not stripped:
             i += 1
             continue
+        bullet = _BULLET_RE.match(stripped)
+        number = _NUMBERED_RE.match(stripped)
+        if bullet or number:
+            kind = "bulleted_list_item" if bullet else "numbered_list_item"
+            value = (bullet or number).group(1)
+            block = {"object": "block", "type": kind, kind: {"rich_text": _rt(value)}}
+            indent = len(raw) - len(raw.lstrip(" \t"))
+            while list_stack and list_stack[-1][0] >= indent:
+                list_stack.pop()
+            if list_stack:
+                parent = list_stack[-1][1]
+                parent[parent["type"]].setdefault("children", []).append(block)
+            else:
+                blocks.append(block)
+            list_stack.append((indent, block))
+            i += 1
+            continue
+        list_stack.clear()
         if stripped.startswith("```"):
             code: list[str] = []
             language = normalize_code_language(stripped[3:])
@@ -466,20 +555,59 @@ def markdown_to_blocks(markdown: str) -> list[dict]:
             while i < len(lines) and not lines[i].strip().startswith("```"):
                 code.append(lines[i])
                 i += 1
-            i += 1  # closing fence
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "code",
-                    "code": {"rich_text": _rt("\n".join(code)), "language": language},
-                }
-            )
+            i += 1
+            blocks.append({"object": "block", "type": "code",
+                           "code": {"rich_text": _rt("\n".join(code)), "language": language}})
+            continue
+        if stripped.startswith("$$"):
+            expression = stripped[2:]
+            if expression.endswith("$$"):
+                expression = expression[:-2]
+            else:
+                parts = [expression]
+                i += 1
+                while i < len(lines) and "$$" not in lines[i]:
+                    parts.append(lines[i])
+                    i += 1
+                if i < len(lines):
+                    parts.append(lines[i].split("$$", 1)[0])
+                expression = "\n".join(parts)
+            blocks.append({"object": "block", "type": "equation",
+                           "equation": {"expression": expression.strip()}})
+            i += 1
             continue
         m = _HEADING_RE.match(stripped)
         if m:
-            key = f"heading_{len(m.group(1))}"
+            # Notion has three heading sizes; preserve deeper headings as h3.
+            key = f"heading_{min(len(m.group(1)), 3)}"
             blocks.append({"object": "block", "type": key, key: {"rich_text": _rt(m.group(2))}})
             i += 1
+            continue
+        if stripped.startswith("|"):
+            rows = []
+            j = i
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                rows.append(lines[j].strip())
+                j += 1
+            table = _table_block(rows)
+            if table:
+                blocks.append(table)
+                i = j
+                continue
+            # Even malformed model tables should read as labeled items, not
+            # literal pipes and separator rows in the student's Notion page.
+            labels = _table_cells(rows[0])
+            data = rows[2:] if len(rows) > 1 and re.fullmatch(r"[|:\-\s]+", rows[1]) else rows[1:]
+            for line in data:
+                cells = _table_cells(line)
+                value = "；".join(
+                    f"{labels[k]}：{cell}" if k < len(labels) else cell
+                    for k, cell in enumerate(cells) if cell
+                )
+                if value:
+                    blocks.append({"object": "block", "type": "bulleted_list_item",
+                                   "bulleted_list_item": {"rich_text": _rt(value)}})
+            i = j
             continue
         m = _IMAGE_RE.match(stripped)
         if m:
@@ -490,36 +618,9 @@ def markdown_to_blocks(markdown: str) -> list[dict]:
             blocks.append({"object": "block", "type": "divider", "divider": {}})
             i += 1
             continue
-        m = _BULLET_RE.match(stripped)
-        if m:
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": _rt(m.group(1))},
-                }
-            )
-            i += 1
-            continue
-        m = _NUMBERED_RE.match(stripped)
-        if m:
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "numbered_list_item",
-                    "numbered_list_item": {"rich_text": _rt(m.group(1))},
-                }
-            )
-            i += 1
-            continue
         if stripped.startswith(">"):
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "quote",
-                    "quote": {"rich_text": _rt(stripped.lstrip("> ").strip())},
-                }
-            )
+            blocks.append({"object": "block", "type": "quote",
+                           "quote": {"rich_text": _rt(stripped.lstrip("> ").strip())}})
             i += 1
             continue
         paragraph = [stripped]
@@ -530,13 +631,8 @@ def markdown_to_blocks(markdown: str) -> list[dict]:
                 break
             paragraph.append(nxt)
             i += 1
-        blocks.append(
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": _rt("\n".join(paragraph))},
-            }
-        )
+        blocks.append({"object": "block", "type": "paragraph",
+                       "paragraph": {"rich_text": _rt("\n".join(paragraph))}})
     return blocks
 
 
@@ -559,27 +655,56 @@ def _image_block(caption: str, ref: str) -> dict:
     return {"object": "block", "type": "image", "image": image}
 
 
+def _video_block(caption: str, ref: str) -> dict:
+    """Build a Notion video block from an uploaded file or public URL."""
+    ref = ref.strip()
+    if ref.startswith(_IMAGE_SCHEME):
+        video: dict = {
+            "type": "file_upload",
+            "file_upload": {"id": ref[len(_IMAGE_SCHEME) :]},
+        }
+    elif ref.startswith(("http://", "https://")):
+        video = {"type": "external", "external": {"url": ref}}
+    else:
+        raise NotionError(
+            f"录像引用 {ref!r} 不是 file-upload://… 或 http(s) 链接："
+            "本地录像请先上传后再引用"
+        )
+    if caption:
+        video["caption"] = _rt(caption)
+    return {"object": "block", "type": "video", "video": video}
+
+
 def _rt(text: str) -> list[dict]:
-    """Text → rich text array: **bold** segments split out, chunks ≤ 2000 chars."""
+    """Convert common inline Markdown to Notion rich text without raw markers."""
     out: list[dict] = []
-    for part, bold in _bold_segments(text):
-        for chunk in _chunks_text(part):
+
+    def add(value: str, styles: dict | None = None) -> None:
+        for chunk in _chunks_text(value):
             piece: dict = {"type": "text", "text": {"content": chunk}}
-            if bold:
-                piece["annotations"] = {"bold": True}
+            if styles:
+                piece["annotations"] = styles
             out.append(piece)
+
+    def parse(value: str, styles: dict | None = None) -> None:
+        cursor = 0
+        for match in _INLINE_RE.finditer(value):
+            if match.start() > cursor:
+                add(value[cursor:match.start()], styles)
+            if match.group(1) is not None:
+                parse(match.group(1), {**(styles or {}), "bold": True})
+            elif match.group(2) is not None:
+                parse(match.group(2), {**(styles or {}), "italic": True})
+            elif match.group(3) is not None:
+                add(match.group(3), {**(styles or {}), "code": True})
+            else:
+                out.append({"type": "equation", "equation": {"expression": match.group(4)}})
+            cursor = match.end()
+        if cursor < len(value):
+            add(value[cursor:], styles)
+
+    parse(text)
     return out
-
-
-def _bold_segments(text: str):
-    pos = 0
-    for m in _BOLD_RE.finditer(text):
-        if m.start() > pos:
-            yield text[pos : m.start()], False
-        yield m.group(1), True
-        pos = m.end()
-    if pos < len(text):
-        yield text[pos:], False
 
 
 def _chunks_text(text: str) -> list[str]:
@@ -594,7 +719,9 @@ def _starts_special(line: str) -> bool:
         or _BULLET_RE.match(line)
         or _NUMBERED_RE.match(line)
         or _IMAGE_RE.match(line)
+        or line.startswith("|")
         or line.startswith(("```", ">"))
+        or line.startswith("$$")
         or line in ("---", "***", "___")
     )
 
