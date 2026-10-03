@@ -1,0 +1,17 @@
+[package]
+name = "pku-sync-sidecar"
+version = "0.1.8"
+description = "Thin launcher for bundled pku-sync (Tauri externalBin)"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "pku-sync-sidecar"
+path = "src/main.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Tauri signs copied payloads immediately after placing them in the app bundle.
+# Desktop/iCloud workspaces can add com.apple.provenance at copy time, after
+# build-macos.sh's pre-bundle cleanup. Remove metadata from the exact signing
+# target, then delegate every original argument to the system codesign.
+target="${!#}"
+if [[ -e "$target" ]]; then
+  /usr/bin/xattr -cr "$target"
+fi
+exec /usr/bin/codesign "$@"
