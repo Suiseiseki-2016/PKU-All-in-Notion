@@ -1,9 +1,9 @@
 # PKU Course Sync Lecture Notes
 
 ## Current Status
-**Blocker**: None. The real reprocessing run is published, the regression is green, and the entire working tree is committed as 10 module batches on local `main`.
-**Last action**: 2026-10-03 - Committed the accumulated working tree as 10 module batches (a03f4f9..cd289d3, 347 files, ~48k insertions) after full verification; nothing pushed yet.
-**Next action**: Human review of the `unverified` / 回看-marked sections in the new note; push the batched commits when ready.
+**Blocker**: None. The real reprocessing run is published, the regression is green, and the entire working tree is committed and pushed to GitHub.
+**Last action**: 2026-10-03 - Pushed all session commits (module batches plus the project-log update, up to 218196a) to origin/main; local and remote are in sync.
+**Next action**: Human review of the `unverified` / 回看-marked sections in the new note.
 
 ## Decision Log
 | Date | Decision | Reasoning | Outcome |
