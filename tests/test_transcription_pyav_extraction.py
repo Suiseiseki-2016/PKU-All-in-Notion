@@ -162,7 +162,8 @@ def test_missing_recording_reports_actionable_copy(tmp_path, monkeypatch):
     message = str(raised.value)
     assert "Traceback" not in message and "\n" not in message
     assert "无需安装 ffmpeg" in message
-    assert "TRANSCRIPTION_BACKEND=local" in message
+    assert "重新下载该录像" in message
+    assert "TRANSCRIPTION_BACKEND=local" not in message
     # The old advice (install the binary) must never be shown again.
     assert "install ffmpeg" not in message and "请安装 ffmpeg" not in message
 
@@ -256,3 +257,79 @@ def test_cloud_backend_uploads_the_in_process_extracted_audio(tmp_path, monkeypa
     assert json.loads(target.read_text("utf-8")) == payload
     # The temporary audio never outlives the upload.
     assert not uploaded["path"].exists()
+
+
+def test_long_audio_splits_without_losing_samples(tmp_path):
+    clip = make_fixture_clip(tmp_path / "video.mp4", seconds=3.2)
+    audio = transcription._extract_audio(clip, tmp_path / "audio.m4a")
+    parts = transcription._split_audio(audio, tmp_path, 1)
+    assert len(parts) >= 3
+    assert [offset for _, offset in parts] == sorted(offset for _, offset in parts)
+    total = sum(describe_audio(path)["samples"] for path, _ in parts)
+    original = describe_audio(audio)["samples"]
+    assert abs(total - original) < 16000 * 0.2
+    assert all(describe_audio(path)["video_streams"] == 0 for path, _ in parts)
+
+
+def test_long_audio_direct_parts_match_two_pass_samples(tmp_path):
+    clip = make_fixture_clip(tmp_path / "video.mp4", seconds=3.2)
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    audio = transcription._extract_audio(clip, old_dir / "audio.m4a")
+    old_parts = transcription._split_audio(audio, old_dir, 1)
+    progress = []
+    new_parts = transcription._extract_audio_parts(clip, tmp_path / "new", 1, progress=lambda *args: progress.append(args))
+
+    assert len(new_parts) == len(old_parts)
+    assert [offset for _, offset in new_parts] == sorted(offset for _, offset in new_parts)
+    assert all(describe_audio(path)["video_streams"] == 0 for path, _ in new_parts)
+    old_samples = sum(describe_audio(path)["samples"] for path, _ in old_parts)
+    new_samples = sum(describe_audio(path)["samples"] for path, _ in new_parts)
+    assert abs(new_samples - old_samples) < 16000 * 0.2
+    assert progress[0][2] == "audio_extract"
+    assert progress[-1][0] == progress[-1][1]
+
+
+def test_long_cloud_recording_uses_one_pass_extraction(tmp_path, monkeypatch):
+    clip = make_fixture_clip(tmp_path / "video.mp4", seconds=3.2)
+    monkeypatch.setattr(transcription, "_CHUNK_SECONDS", 1)
+    monkeypatch.setattr(transcription, "_extract_audio", lambda *args: pytest.fail("two-pass extraction"))
+    monkeypatch.setattr(transcription, "_upload", lambda url, key, path: {
+        "language": "zh", "segments": [{"start": 0.0, "end": 0.5, "text": path.name}],
+    })
+    target = tmp_path / "transcript.json"
+    payload = transcription.transcribe(clip, target, cloud_settings())
+    assert len(payload["segments"]) >= 3
+    assert target.exists()
+
+
+def test_part_failure_reuses_completed_parts_and_merges_timestamps(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"source")
+    parts = []
+    for index in range(3):
+        path = tmp_path / f"part-{index}.m4a"
+        path.write_bytes(bytes([index]))
+        parts.append((path, index * 10.0))
+    calls = []
+    fail = {1}
+
+    def upload(url, token, path):
+        index = int(path.stem[-1])
+        calls.append(index)
+        if index in fail:
+            raise RuntimeError("temporary upstream failure")
+        return {"language": "zh", "segments": [{"start": 1.0, "end": 2.0, "text": str(index)}],
+                "seconds_charged": 10, "reused": False}
+
+    monkeypatch.setattr(transcription, "_upload", upload)
+    target = tmp_path / "transcript.json"
+    with pytest.raises(RuntimeError, match="第 2/3 段"):
+        transcription._transcribe_parts(parts, "https://relay.example", "session", video, target)
+    assert sorted(calls) == [0, 1, 2]
+    fail.clear()
+    calls.clear()
+    payload = transcription._transcribe_parts(parts, "https://relay.example", "session", video, target)
+    assert calls == [1]
+    assert [segment["start"] for segment in payload["segments"]] == [1, 11, 21]
+    assert payload["seconds_charged"] == 30

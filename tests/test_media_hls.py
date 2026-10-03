@@ -178,16 +178,36 @@ def test_download_hls_segments_skips_existing_target(tmp_path):
     assert result.skipped and result.path == target
 
 
-def test_download_hls_segments_master_falls_back(tmp_path):
+def test_download_hls_master_chooses_playable_variant(tmp_path, monkeypatch):
+    master = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720
+hd.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+fhd.m3u8
+"""
+    media_playlist = "#EXTM3U\n#EXTINF:4,\nseg.ts\n"
+    visited = []
     class Client:
         cookies = SimpleNamespace(jar=[])
-
         def get(self, url, headers=None, follow_redirects=None):
-            return SimpleNamespace(
-                status_code=200,
-                text="#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=8\nv.m3u8\n",
-                url="https://h/x.m3u8",
-            )
-
-    result = media._download_hls_segments(Client(), "https://h/x.m3u8", tmp_path / "video.mp4")
-    assert result.error and "master playlist" in result.error
+            visited.append(url)
+            if url.endswith("x.m3u8"):
+                return SimpleNamespace(status_code=200, text=master, url=url)
+            if url.endswith("hd.m3u8"):
+                return SimpleNamespace(status_code=200, text=media_playlist, url=url)
+            if url.endswith("seg.ts"):
+                return SimpleNamespace(status_code=200, content=b"segment")
+            raise AssertionError("unexpected variant: " + url)
+    def fake_ffmpeg(argv, **kwargs):
+        Path(argv[-1]).write_bytes(Path(argv[argv.index("-i") + 1]).read_bytes())
+        return SimpleNamespace(returncode=0, stderr="")
+    monkeypatch.setattr(media.shutil, "which", lambda name: "ffmpeg")
+    monkeypatch.setattr(media.subprocess, "run", fake_ffmpeg)
+    seen = []
+    result = media._download_hls_segments(Client(), "https://h/x.m3u8", tmp_path / "video.mp4",
+                                          progress=lambda *args: seen.append(args))
+    assert result.path and result.path.read_bytes() == b"segment"
+    assert visited[:2] == ["https://h/x.m3u8", "https://h/hd.m3u8"]
+    assert any(done == total == 1 and unit == "segments" for done, total, unit, _ in seen)

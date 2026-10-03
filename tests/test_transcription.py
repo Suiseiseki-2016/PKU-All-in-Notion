@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from pku_sync import transcription
+from pku_sync.config import Settings
 
 
 def make_settings(backend: str, **extra) -> SimpleNamespace:
@@ -19,6 +20,11 @@ def make_settings(backend: str, **extra) -> SimpleNamespace:
     }
     defaults.update(extra)
     return SimpleNamespace(**defaults)
+
+
+def test_default_backend_uses_online_service(monkeypatch):
+    monkeypatch.delenv("TRANSCRIPTION_BACKEND", raising=False)
+    assert Settings(_env_file=None).transcription_backend == "cloud"
 
 
 def test_local_backend_dispatches_to_media_transcribe(monkeypatch, tmp_path):
@@ -46,15 +52,22 @@ def test_backend_name_is_normalized(monkeypatch, tmp_path):
     assert seen == [1]
 
 
-def test_empty_backend_falls_back_to_local(monkeypatch, tmp_path):
+def test_empty_backend_falls_back_to_cloud(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr(
-        "pku_sync.media.transcribe", lambda video, target, cfg: seen.append(1) or {}
-    )
+    monkeypatch.setattr(transcription, "transcribe_cloud", lambda *args, **kwargs: seen.append(1) or {})
     transcription.transcribe(
         tmp_path / "v.mp4", tmp_path / "t.json", make_settings("")
     )
     assert seen == [1]
+
+
+def test_desktop_rejects_stale_local_setting_before_cache_or_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("PKU_DESKTOP_APP", "1")
+    monkeypatch.setattr("pku_sync.media.transcribe", lambda *args: pytest.fail("local model ran"))
+    target = tmp_path / "t.json"
+    target.write_text('{"segments": []}', "utf-8")
+    with pytest.raises(RuntimeError, match="仅支持云端转写"):
+        transcription.transcribe(tmp_path / "v.mp4", target, make_settings("local"))
 
 
 def test_cloud_requires_relay_url(tmp_path):
@@ -91,6 +104,7 @@ def test_cloud_uploads_audio_only_and_writes_target(tmp_path, monkeypatch):
         return {"language": "zh", "segments": [{"start": 0.0, "text": "第一讲"}]}
 
     monkeypatch.setattr(transcription, "_extract_audio", fake_extract)
+    monkeypatch.setattr(transcription, "_split_audio", lambda audio, directory, seconds: [(audio, 0.0)])
     monkeypatch.setattr(transcription, "_upload", fake_upload)
     result = transcription.transcribe(tmp_path / "v.mp4", tmp_path / "t.json", cfg)
 
@@ -102,6 +116,37 @@ def test_cloud_uploads_audio_only_and_writes_target(tmp_path, monkeypatch):
     assert calls["upload"][:2] == ("https://relay.example/v1/transcribe", "m-key")
     written = json.loads((tmp_path / "t.json").read_text("utf-8"))
     assert written == result
+
+
+def test_cloud_records_wall_clock_elapsed(tmp_path, monkeypatch):
+    cfg = make_settings(
+        "cloud",
+        cloud_transcribe_url="https://relay.example/v1/transcribe",
+        platform_token="m-key",
+    )
+    clock = iter((10.0, 17.25))
+    monkeypatch.setattr(transcription.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(transcription, "_audio_duration", lambda video: 0.0)
+    def fake_extract(video, out):
+        out.write_bytes(b"audio")
+        return out
+
+    monkeypatch.setattr(transcription, "_extract_audio", fake_extract)
+    monkeypatch.setattr(
+        transcription,
+        "_split_audio",
+        lambda audio, directory, seconds: [(audio, 0.0)],
+    )
+    monkeypatch.setattr(
+        transcription,
+        "_upload",
+        lambda url, token, audio: {"segments": [{"start": 0, "text": "课堂"}]},
+    )
+
+    result = transcription.transcribe(tmp_path / "v.mp4", tmp_path / "t.json", cfg)
+
+    assert result["elapsed"] == 7.2
+    assert json.loads((tmp_path / "t.json").read_text("utf-8"))["elapsed"] == 7.2
 
 
 def test_cloud_missing_ffmpeg_is_loud(tmp_path, monkeypatch):
@@ -139,6 +184,9 @@ def test_upload_retries_once_on_transport_error(tmp_path, monkeypatch):
 
         def post(self, *args, **kwargs):
             calls["n"] += 1
+            # A fresh file is opened for each attempt. A failed upload may
+            # consume the stream, so retrying the same handle sends nothing.
+            assert kwargs["files"]["audio"][1].read() == b"fake-audio"
             if calls["n"] == 1:
                 raise httpx.TransportError("connection killed mid-upload")
             return httpx.Response(
@@ -184,3 +232,37 @@ def test_upload_never_retries_http_answers(tmp_path, monkeypatch):
             "https://relay.example/v1/transcribe", "m-key", audio
         )
     assert calls["n"] == 1
+
+
+def test_direct_oss_upload_uses_short_authorization_and_audio_only(tmp_path, monkeypatch):
+    import httpx
+    audio = tmp_path / "part.m4a"
+    audio.write_bytes(b"audio-only")
+    requests = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def post(self, url, **kwargs):
+            requests.append(("post", url, kwargs))
+            if url.endswith("/direct/init"):
+                assert kwargs["json"] == {"size_bytes": audio.stat().st_size}
+                return httpx.Response(200, json={"upload_url": "https://private.oss-cn-beijing.aliyuncs.com/part?signature=short",
+                                                 "upload_id": "a" * 32})
+            assert kwargs["json"] == {"upload_id": "a" * 32}
+            return httpx.Response(200, json={"segments": [{"start": 0, "text": "课堂"}]})
+        def put(self, url, **kwargs):
+            requests.append(("put", url, kwargs))
+            assert kwargs["content"].read() == b"audio-only"
+            assert kwargs["headers"]["Content-Length"] == str(audio.stat().st_size)
+            return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    result = transcription._upload_direct("https://pku.aeoluswu.info/v1/transcribe", "session", audio)
+    assert result["segments"][0]["text"] == "课堂"
+    assert [item[0] for item in requests] == ["post", "put", "post"]
+    assert "session" not in requests[1][2]["headers"].values()
