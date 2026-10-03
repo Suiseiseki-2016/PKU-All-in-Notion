@@ -1,54 +1,34 @@
-﻿; PKU All in Notion - Windows installer script (Inno Setup 6, wave 1)
+﻿; PKU All in Notion - Windows installer (Inno Setup 6)
 ;
-; Per library/packaging-design.md (user-approved 2026-09-18): the installer is
-; an Inno Setup .exe WRAPPING the uv bootstrap - it does not bundle Python or
-; the application runtime. bootstrap.ps1 installs the official standalone uv,
-; provisions uv-managed Python 3.11 (python-build-standalone, no system Python
-; required), and installs the app as a uv tool BY PACKAGE NAME from the public
-; PEP 503 package index at https://pku.aeoluswu.info/packages/simple/ (an
-; ADDITIVE static /packages/ location on the relay host - never routed
-; through the relay application),
-; so the uv receipt retains that index and a literal
-; `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path) can
-; resolve a newer published wheel. The bundled release wheel is kept ONLY as
-; an explicit --find-links fallback for an unreachable/not-yet-published
-; index; the fallback still installs by name, never as a wheel-path receipt.
+; Wave 2 (desktop product path): one setup.exe installs the Tauri shell +
+; bundled relocatable Python runtime (sidecar). Start Menu / Desktop shortcuts
+; launch the Tauri exe (desktop window), not PowerShell + browser.
 ;
-; Build (release engineer, Windows host with Inno Setup 6 installed):
-;   1. uv build                                   (repo root; wheel -> dist\)
-;   2. ISCC.exe installer\windows\pku-all-in-notion.iss
-;      (override the version: ISCC.exe /DMyAppVersion=x.y.z ...)
-;   3. dist\PKU-All-in-Notion-Setup-x.y.z.exe is the unsigned release
-;      artifact. The SmartScreen prompt it triggers is captured honestly in
-;      the pilot evidence (see validation\m5-packaging-pilot\).
+; Per-user data stays in %USERPROFILE%\PKU-All-in-Notion (.env / data / logs);
+; the install dir never holds credentials.
 ;
-; Design invariants:
-;   - Per-user install (PrivilegesRequired=lowest): no admin prompt on
-;     student machines, everything lands in the user profile.
-;   - The install dir holds ONLY the bootstrap assets; .env, DATA_DIR and
-;     panel logs always live in %USERPROFILE%\PKU-All-in-Notion (created by
-;     bootstrap.ps1 / launch-panel.ps1), so an update or uninstall can
-;     never clobber credentials or data.
-;   - The bootstrap runs as a REQUIRED install step; a nonzero exit aborts
-;     the installation honestly (no silent broken installs).
-;   - Uninstall removes the uv tool (best effort) and the install dir, but
-;     NEVER deletes the per-user app dir; it says so explicitly.
+; Build (Windows release host):
+;   1. cd desktop && npm install && npm run build
+;      (stages sidecar + runtime, produces NSIS under src-tauri\target\release\bundle\)
+;   2. powershell -File desktop\scripts\stage-inno-payload.ps1
+;   3. ISCC.exe installer\windows\pku-all-in-notion.iss
+;      Optional: ISCC.exe /DMyAppVersion=x.y.z ...
+;
+; Preferred end-user artifact can also be Tauri's own NSIS output:
+;   desktop\src-tauri\target\release\bundle\nsis\*-setup.exe
+; This Inno script packages the same payload for a Chinese-language wizard and
+; explicit uninstall messaging about the retained app data directory.
+;
+; Legacy uv-tool bootstrap (pilot wave 1) lives in bootstrap.ps1 / launch-panel.ps1
+; and is no longer invoked by this script.
 
 #define MyAppName "PKU All in Notion"
-#define MyAppVersion "0.1.1"
+#define MyAppVersion "0.1.20"
 #define MyAppPublisher "PKU All in Notion"
-; Public PEP 503 package index (the user-authorized ADDITIVE static
-; /packages/ location on pku.aeoluswu.info, the relay host - deployed per
-; installer/release/RUNBOOK.md). Passed to bootstrap.ps1 so the normal
-; install is BY NAME from this index and the uv receipt retains it for
-; literal `uv tool upgrade pku-course-sync`.
-#define PackageIndex "https://pku.aeoluswu.info/packages/simple/"
-; TUNA PyPI mirror (China-network fast path) for DEPENDENCIES. The value is
-; passed to bootstrap.ps1 for this install and persisted as the user-level
-; UV_DEFAULT_INDEX so later `uv tool upgrade` runs resolve dependencies
-; through the same mirror; pku-course-sync itself always resolves from the
-; public package index recorded in the uv receipt.
-#define PyPIMirror "https://pypi.tuna.tsinghua.edu.cn/simple"
+; Exe name as produced by Tauri (productName). Override with /DMyAppExeName=...
+#ifndef MyAppExeName
+  #define MyAppExeName "PKU All in Notion.exe"
+#endif
 
 [Setup]
 AppId={{1F2A4B6C-9D3E-4C5B-8A7F-2E9D0C1B4A6E}
@@ -56,114 +36,64 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 VersionInfoVersion={#MyAppVersion}
-; Per-user install: {localappdata}\Programs, no UAC prompt, no admin.
+; Per-user install: {localappdata}\Programs, no UAC prompt.
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DisableProgramGroupPage=yes
-; Broadcast the HKCU Environment change written by [Registry] (mirror task).
-ChangesEnvironment=yes
 OutputDir=..\..\dist
 OutputBaseFilename=PKU-All-in-Notion-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
-; Support evidence without a terminal: the installer log lands in %TEMP%.
 SetupLogging=yes
+; Uninstall does not remove %USERPROFILE%\PKU-All-in-Notion
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
-; Ships with Inno Setup 6. If your Inno install lacks this file, fetch the
-; official translation from https://jrsoftware.org or fall back to
-; Default.isl (remove this line) - the installer still works.
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加任务:"
-Name: "tunamirror"; Description: "使用清华 TUNA PyPI 镜像下载依赖（推荐国内网络；将写入用户环境变量 UV_DEFAULT_INDEX，卸载时移除）(&M)"; GroupDescription: "网络:"
 
 [Files]
-; The bundled release wheel: the OFFLINE FALLBACK asset only (bootstrap.ps1
-; passes its directory to `uv tool install --find-links pku-course-sync`
-; when the public package index is unreachable). The normal path installs
-; by name from the public index.
-Source: "..\..\dist\pku_course_sync-{#MyAppVersion}-py3-none-any.whl"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bootstrap.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "launch-panel.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
+; Payload staged by desktop/scripts/stage-inno-payload.ps1 from a Tauri release
+; build (app exe + pku-sync.exe sidecar + resources\runtime\...).
+Source: "payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-[Registry]
-; Persistent user-level mirror for uv (also used by the in-app autoupdate's
-; `uv tool upgrade`); removed at uninstall.
-Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "UV_DEFAULT_INDEX"; ValueData: "{#PyPIMirror}"; Tasks: tunamirror; Flags: uninsdeletevalue
+[UninstallDelete]
+; Python may create bytecode after first launch; user data is outside {app}.
+Type: filesandordirs; Name: "{app}\resources\runtime"
 
 [Icons]
-; The shortcuts start the panel via the launcher, which pins CWD to the
-; per-user app dir, auto-opens the browser at the selected port and appends
-; every startup line (selected port included) to panel.log in the app dir.
-; Wave 1 uses the PowerShell icon; a branded icon is post-pilot polish.
-Name: "{autoprograms}\{#MyAppName}\{#MyAppName} 面板"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\launch-panel.ps1"""; WorkingDir: "{app}"
-Name: "{autodesktop}\{#MyAppName} 面板"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\launch-panel.ps1"""; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
-  AppDir, WheelName, BootstrapParams, MirrorSuffix: string;
+function InitializeSetup(): Boolean;
 begin
-  if CurStep = ssPostInstall then
+  if not FileExists(ExpandConstant('{#SourcePath}\payload\{#MyAppExeName}')) then
   begin
-    AppDir := ExpandConstant('{app}');
-    WheelName := 'pku_course_sync-{#MyAppVersion}-py3-none-any.whl';
-    // bootstrap.ps1 installs BY NAME from the public package index
-    // (-Index); the bundled wheel is passed explicitly so the offline
-    // --find-links fallback resolves exactly the intended file.
-    BootstrapParams := '-NoProfile -ExecutionPolicy Bypass -File "' + AppDir + '\bootstrap.ps1"' +
-      ' -Index "{#PackageIndex}"' +
-      ' -Wheel "' + AppDir + '\' + WheelName + '"';
-    if IsTaskSelected('tunamirror') then
-      MirrorSuffix := ' -Mirror "{#PyPIMirror}"'
-    else
-      MirrorSuffix := '';
-    WizardForm.StatusLabel.Caption :=
-      '正在安装运行环境（uv、Python 3.11、应用本体；下载可能需要几分钟）…';
-    // SW_SHOW: the console window displays uv's live download progress.
-    // A nonzero exit code ABORTS the install - a broken install must never
-    // be reported as success (honesty invariant).
-    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-        BootstrapParams + MirrorSuffix, AppDir, SW_SHOW, ewWaitUntilTerminated,
-        ResultCode) then
-    begin
-      RaiseException(
-        '运行环境安装程序无法启动（powershell.exe）。' + #13#10 +
-        '请重试安装；若仍失败，请把日志发给支持：' + GetEnv('USERPROFILE') +
-        '\PKU-All-in-Notion\install.log');
-    end;
-    if ResultCode <> 0 then
-    begin
-      RaiseException(
-        '运行环境安装失败（退出码 ' + IntToStr(ResultCode) + '）。' + #13#10 +
-        '请重试安装；若仍失败，请把日志发给支持：' + GetEnv('USERPROFILE') +
-        '\PKU-All-in-Notion\install.log');
-    end;
-  end;
+    MsgBox(
+      '缺少 installer\windows\payload\ 下的 Tauri 应用文件。' + #13#10 + #13#10 +
+      '请先在 Windows 上执行：' + #13#10 +
+      '  cd desktop && npm run build' + #13#10 +
+      '  powershell -File desktop\scripts\stage-inno-payload.ps1' + #13#10 +
+      '然后再编译本安装脚本。',
+      mbError, MB_OK);
+    Result := False;
+  end
+  else
+    Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  ResultCode: Integer;
-  UvPath, AppDataDir: string;
+  AppDataDir: string;
 begin
-  if CurUninstallStep = usUninstall then
-  begin
-    // Best effort: remove the uv tool. uv itself and the provisioned Python
-    // stay (they are user-level, shared tooling).
-    UvPath := GetEnv('USERPROFILE') + '\.local\bin\uv.exe';
-    if FileExists(UvPath) then
-    begin
-      Exec(UvPath, 'tool uninstall pku-course-sync', GetEnv('USERPROFILE'),
-        SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end;
-  end;
   if CurUninstallStep = usPostUninstall then
   begin
     AppDataDir := GetEnv('USERPROFILE') + '\PKU-All-in-Notion';

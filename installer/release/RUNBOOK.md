@@ -239,9 +239,11 @@ artifacts (no secrets, no user data — see the security notes).
 9. Publish the GitHub release with tag `vX.Y.Z` matching the wheel version —
    the client's notify-only update check reads this manifest
    (`api.github.com/repos/Suiseiseki-2016/PKU-All-in-Notion/releases/latest`).
-10. (Windows wave 1) compile the Inno installer per
-    `installer/windows/README.md`; it installs by name from the public index
-    and bundles the same wheel only as the offline fallback.
+10. (Windows desktop product path) build the Tauri app + sidecar per
+    `desktop/README.md` (`cd desktop && npm run build`), then optionally wrap
+    with Inno per `installer/windows/README.md`. Shortcuts launch the Tauri
+    exe. The legacy uv-tool + browser pilot chain (`bootstrap.ps1`) remains in
+    tree but is no longer used by the current `.iss`.
 
 ## Security notes
 

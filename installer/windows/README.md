@@ -1,112 +1,67 @@
-# Windows installer (wave 1)
+# Windows installer (desktop product path)
 
-Inno Setup package for the PKU All in Notion student client, per the
-user-approved packaging design (`library/packaging-design.md`, mission M5):
+One **setup.exe** installs the Tauri desktop shell plus a bundled relocatable
+Python runtime (`pku-sync` sidecar). Start Menu / Desktop shortcuts launch the
+**Tauri exe** (system WebView window → student `/app`). Users do not install
+Python/uv and do not open a browser to use the panel.
 
-- the `.exe` **wraps the uv bootstrap** (`bootstrap.ps1`): installs the
-  official standalone uv when missing, provisions uv-managed Python 3.11
-  (python-build-standalone — a fresh machine needs **no system Python**),
-  and installs the app as a **uv tool BY PACKAGE NAME** from the public
-  PEP 503 package index `https://pku.aeoluswu.info/packages/simple/`
-  (an additive static `/packages/` location on the relay host — never
-  routed through the relay application). The uv receipt retains that
-  index, so a later literal
-  `uv tool upgrade pku-course-sync` (the in-app autoupdate apply path)
-  resolves a newer published wheel;
-- the bundled release wheel is kept ONLY as an explicit **offline fallback**:
-  when the public index is unreachable (or not yet deployed — its current
-  state, see `..\release\RUNBOOK.md`), bootstrap retries the same
-  by-name install with `--find-links <bundle dir>`. The fallback never
-  creates a wheel-path receipt (which would pin upgrades to one file);
-- per-user install (`PrivilegesRequired=lowest`, `{localappdata}\Programs`) —
-  no admin prompt, nothing outside the user profile;
-- Start Menu / Desktop shortcuts start the panel via `launch-panel.ps1`,
-  which pins CWD to the per-user app dir (`%USERPROFILE%\PKU-All-in-Notion`),
-  lets the panel auto-open the browser at the selected port
-  (8791/8792/8793, loopback only), and appends every startup line —
-  including the selected port — to `panel.log` in the app dir;
-- a PyPI mirror (TUNA) is supported through uv's own env vars: the
-  `tunamirror` task passes `-Mirror` to `bootstrap.ps1` for the install and
-  persists `UV_DEFAULT_INDEX` at the user level (HKCU, removed at uninstall)
-  so dependency downloads (and later upgrades' dependency resolution) go
-  through it. The app package itself always resolves from the public index
-  recorded in the uv receipt.
+Per-user data stays in `%USERPROFILE%\PKU-All-in-Notion` (`.env`, data, logs).
+The install directory under `%LOCALAPPDATA%\Programs\PKU All in Notion` holds
+only the app + runtime.
+
+## Artifacts
+
+| Artifact | How |
+| --- | --- |
+| Tauri NSIS (preferred fast path) | `cd desktop && npm run build` → `src-tauri\target\release\bundle\nsis\*-setup.exe` |
+| Inno Setup (Chinese wizard + explicit data-dir uninstall note) | After Tauri build: `stage-inno-payload.ps1` then `ISCC.exe pku-all-in-notion.iss` → `dist\PKU-All-in-Notion-Setup-<ver>.exe` |
+
+Both ship the same binaries: app exe, `pku-sync.exe` sidecar, `resources\runtime\`.
 
 ## Layout
 
 | File | Role |
-|---|---|
+| --- | --- |
 | `pku-all-in-notion.iss` | Inno Setup 6 script (compile with `ISCC.exe`) |
-| `bootstrap.ps1` | uv bootstrap — runs as a **required** install step; nonzero exit aborts the install |
-| `launch-panel.ps1` | panel launcher — shortcut target; CWD pinned to the app dir |
+| `payload\` | Staged Tauri release tree (gitignored; created by stage script) |
+| `bootstrap.ps1` / `launch-panel.ps1` | **Legacy pilot** (uv tool + browser). Not used by the current `.iss`. |
 
-`bootstrap.ps1` also runs standalone:
-`powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 [-Index <simple-index-url>] [-Wheel <wheel-or-dir>] [-Mirror <url>] [-PythonVersion 3.11] [-AppDir <dir>]`.
-Exit codes: 0 ok; 2 fallback wheel missing when needed (public index failed
-and no bundled wheel); 3 uv install failed; 4 Python provisioning failed;
-5 tool install failed (bad index/mirror URL, or both the public index and
-the offline fallback failed); 6 shim missing. It writes a transcript to
-`<AppDir>\install.log` (default app dir:
-`%USERPROFILE%\PKU-All-in-Notion`).
-
-The public index the installer defaults to (`-Index`) is deployed by the
-user from the checked-in upload tree and runbook in `..\release\`
-(`RUNBOOK.md`, `site/`, `make_simple_index.py`).
-
-## Build (release engineer)
+## Build (release engineer, Windows)
 
 ```powershell
-# 1. wheel into dist\ (version from pyproject.toml)
+# 0. Optional: wheel for a pinned install into the sidecar runtime
 uv build
 
-# 2. compile the installer
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\windows\pku-all-in-notion.iss
-# or:  ISCC.exe /DMyAppVersion=x.y.z installer\windows\pku-all-in-notion.iss
+# 1. Stage sidecar + runtime, build Tauri (NSIS)
+cd desktop
+npm install
+npm run build
+
+# 2a. Ship Tauri NSIS directly, or…
+# 2b. Wrap with Inno:
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\desktop\scripts\stage-inno-payload.ps1
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" ..\installer\windows\pku-all-in-notion.iss
 ```
 
-Output: `dist\PKU-All-in-Notion-Setup-<version>.exe` — **unsigned**; the
-SmartScreen prompt it triggers is captured honestly in the pilot evidence
-and documented for students (design decision, wave 1; signing is post-pilot).
+Unsigned builds will hit SmartScreen until code signing is wired (post-pilot).
 
-**Known build-tool gap (recorded 2026-09-22):** `ISCC.exe` is not installed
-on the development host. Every non-compile leg is verified locally (wheel
-build, bootstrap, launcher, mirror); compiling the `.exe` requires Inno
-Setup 6 on the build machine.
+## WebView2
 
-## China-network notes (measured on the mission host)
+Tauri NSIS can bootstrap Evergreen WebView2. The Inno-wrapped payload assumes
+WebView2 is available (most Windows 10/11 machines) or that the user installs
+it when prompted.
 
-- The PyPI mirror (`UV_DEFAULT_INDEX`) accelerates the dependency download
-  (the heaviest part of the install: faster-whisper/opencv/PyAV/onnxruntime
-  stack ≈ 0.5–1 GB). Expected duration is recorded in the feature evidence
-  pack under the mission's `validation\m5-packaging-pilot\` directory.
-- `uv` itself and the Python 3.11 interpreter are downloaded from GitHub
-  releases (astral-sh/uv, python-build-standalone), **not** PyPI, so the
-  mirror does not apply to those two steps. `UV_PYTHON_INSTALL_MIRROR` can
-  redirect interpreter downloads if ever needed (not set by this installer,
-  out of the approved wave-1 scope).
+## Update / uninstall
 
-## Update and uninstall semantics
+- Re-run a newer setup.exe to replace the install dir; the per-user app dir is
+  never touched.
+- Uninstall removes the program files only; the uninstaller states that
+  `%USERPROFILE%\PKU-All-in-Notion` is retained.
+- In-app `uv tool upgrade` autoupdate from the pilot path does **not** apply to
+  the sidecar bundle; product auto-update is a follow-up (Tauri updater /
+  reinstall).
 
-- Index-backed installs (the normal path) upgrade two ways: (1) the in-app
-  autoupdate — the panel notifies from the GitHub Releases manifest and, on
-  the user's explicit request, applies a literal `uv tool upgrade
-  pku-course-sync` at the next start, which resolves the newer wheel from
-  the receipt-retained public index; (2) re-running a newer installer
-  (`uv tool install --force` moves to the newest published version). The
-  per-user app dir (`.env`, data, logs) is never touched by either path.
-- Installs made through the offline fallback (index not reachable) hold a
-  name-based `--find-links` receipt: a literal `uv tool upgrade` is a safe
-  no-op there. After the public index is deployed, one explicit
-  `uv tool upgrade pku-course-sync --index https://pku.aeoluswu.info/packages/simple/`
-  both upgrades and rewrites the receipt to the index-backed form
-  (verified locally against a simple-index fixture).
-- Uninstall removes the uv tool (best effort) and the install dir, never
-  the per-user app dir; the uninstaller says so explicitly. The persisted
-  `UV_DEFAULT_INDEX` value is removed with it.
+## macOS
 
-## Deliberately out of scope (wave 1)
-
-- Branded shortcut icon (shortcuts currently show the PowerShell icon).
-- Signed/notarized installers, frozen binaries, native launcher binaries.
-- A launcher-level single-instance guard (single-instance usage is
-  documented in the pilot guide instead).
+DMG / notarization is documented as follow-up in `desktop/README.md`. Same
+Tauri shell; different bundle + signing.
