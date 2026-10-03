@@ -1,6 +1,6 @@
 [package]
 name = "pku-desktop"
-version = "0.1.21"
+version = "0.1.22"
 description = "PKU All in Notion desktop shell"
 authors = ["PKU All in Notion"]
 edition = "2021"

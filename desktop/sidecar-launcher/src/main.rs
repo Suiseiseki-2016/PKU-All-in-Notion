@@ -100,6 +100,10 @@ fn run() -> ExitCode {
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.arg("-m").arg("pku_sync").args(&forwarded);
         cmd.env("PYTHONUTF8", "1");
+        // The runtime lives inside the signed app bundle. Never let Python
+        // add __pycache__ files that would invalidate the bundle seal after
+        // first launch.
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         let path_key = if cfg!(windows) { "Path" } else { "PATH" };
         let mut prefix = OsString::from(python.parent().unwrap_or(exe_dir).as_os_str());
         if let Some(existing) = env::var_os(path_key) {

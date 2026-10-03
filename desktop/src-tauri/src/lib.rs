@@ -483,7 +483,8 @@ fn start_panel(app: AppHandle) {
         .current_dir(&app_dir)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err))
-        .env("PYTHONUTF8", "1");
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     // The desktop shell owns installation and signed updates. The bundled
     // panel must not offer the separate `uv tool upgrade` path.
     cmd.env("PKU_DESKTOP_APP", "1");
