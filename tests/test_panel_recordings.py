@@ -156,6 +156,31 @@ def test_catalog_transport_failure_names_the_failed_step(tmp_path, kind, stage, 
     assert expected in result["error"]
     assert "private transport error" not in result["error"]
     assert "转写会保留" not in result["error"]
+    assert len(result["failure_id"]) == 8
+
+
+@pytest.mark.parametrize(("stage", "expected"), [
+    ("准备 Notion 课程与讲次页", "写入 Notion 时中断"),
+    ("下载录像", "读取教学网或录像时中断"),
+    ("转写并生成笔记", "音频处理或转写时中断"),
+    ("重新生成课堂笔记", "生成课堂笔记时中断"),
+    ("提取课堂画面", "提取课堂画面时中断"),
+    ("准备中", "任务在“准备中”阶段中断"),
+])
+def test_unexpected_process_failure_names_stage_and_keeps_details_private(
+        tmp_path, stage, expected):
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager._work = recordings_api.Work(kind="process", stage=stage)
+
+    def failed():
+        raise RuntimeError("private token and transport details")
+
+    manager._run(failed)
+    result = manager.state()
+    assert result["state"] == "failed"
+    assert expected in result["error"]
+    assert "private token" not in result["error"]
+    assert len(result["failure_id"]) == 8
 
 
 def test_list_never_exposes_campus_media_url_or_secret(tmp_path):
@@ -432,6 +457,46 @@ def test_stale_catalog_without_campus_accounts_still_reports_the_gate(tmp_path, 
     assert manager.state() == {"state": "idle"}
 
 
+def test_publish_existing_skips_campus_refresh_and_credentials(tmp_path, monkeypatch):
+    key, directory = setup_index(tmp_path)
+    directory.mkdir()
+    (directory / "transcript.json").write_text('{"segments": []}', "utf-8")
+    (directory / "notes.md").write_text("# 已有笔记", "utf-8")
+    (directory / "keyframes").mkdir()
+    (directory / "keyframes" / "index.json").write_text(
+        '{"keyframes": [{"file": "frame.jpg", "timestamp": 0}]}', "utf-8")
+    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
+        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    }), "utf-8")
+    no_campus = SimpleNamespace(**{
+        **vars(settings(tmp_path)), "pku_username": "", "pku_password": ""
+    })
+    from pku_sync.panel import notion_home
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *_: "lecture-1")
+    manager = recordings_api.RecordingWorkManager(no_campus, Directory())
+    monkeypatch.setattr(
+        manager,
+        "_refresh_stale_catalog",
+        lambda *_: pytest.fail("campus catalog was refreshed"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_process",
+        lambda _job, _lecture, **kwargs: (
+            "https://notion.so/note" if kwargs["reuse_existing"]
+            else pytest.fail("reuse_existing was not forwarded")
+        ),
+    )
+
+    started = manager.start_campus_process(
+        key, "course-1", reuse_existing=True
+    )
+    assert started["state"] in {"running", "done"}
+    done = wait_done(manager)
+    assert done["state"] == "done"
+    assert done["result_url"] == "https://notion.so/note"
+
+
 def test_failed_catalog_refresh_stops_with_a_clear_reason(tmp_path, monkeypatch):
     key, directory = setup_index(tmp_path)
     metadata_path = directory.parents[1] / "course.json"
@@ -524,6 +589,34 @@ def test_recording_error_identifies_failed_stage(tmp_path, monkeypatch, transcri
     assert state["state"] == "failed"
     assert expected in state["error"]
     assert "转写" in state["error"]
+
+
+def test_publish_existing_results_never_redownloads_video_for_optional_clips(
+        tmp_path, monkeypatch):
+    key, directory = setup_index(tmp_path)
+    directory.mkdir()
+    (directory / "transcript.json").write_text(json.dumps({
+        "segments": [{"start": 0, "end": 10, "text": "课堂内容"}]
+    }), "utf-8")
+    (directory / "notes.md").write_text(
+        "# 第一讲\n\n## 课堂内容\n\n课堂内容。\n\n*已整理至录像 00:10。*", "utf-8")
+    (directory / "keyframes").mkdir()
+    (directory / "keyframes" / "index.json").write_text(
+        json.dumps({"keyframes": [{"timestamp": 1, "file": "frame.jpg"}]}), "utf-8")
+    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
+        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    }), "utf-8")
+
+    monkeypatch.setattr("pku_sync.panel.note_videos.needs_video_clips", lambda *_: True)
+    monkeypatch.setattr(recordings_api, "download_job",
+                        lambda *_args, **_kwargs: pytest.fail("video was redownloaded"))
+    monkeypatch.setattr(recordings_api, "publish_notes", lambda *_args, **_kwargs: "https://notion.so/note")
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    job = recordings_api.find_job(tmp_path, key)
+
+    result = manager._process(job, "lecture-page", reuse_existing=True)
+    assert result == "https://notion.so/note"
+    assert not job.video.exists()
 
 
 def test_cloud_notes_use_relay_without_local_ai_key(tmp_path, monkeypatch):

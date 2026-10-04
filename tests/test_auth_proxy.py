@@ -1,6 +1,8 @@
 """Campus login honors only the desktop's explicit identity-proxy override."""
 from __future__ import annotations
 
+import httpx
+
 from pku_sync import auth, network
 
 
@@ -78,3 +80,20 @@ def test_dead_desktop_proxy_override_falls_back_to_direct(monkeypatch):
         raise OSError("closed")
     monkeypatch.setattr(network.socket, "create_connection", connect)
     assert network.campus_identity_proxy() is None
+
+
+def test_login_transport_failure_exhausts_proxy_then_uses_direct(monkeypatch):
+    calls = []
+
+    def login(username, password, *, force_direct=False):
+        calls.append(force_direct)
+        if not force_direct:
+            request = httpx.Request("GET", auth.IAAA_BASE)
+            raise httpx.ReadTimeout("proxy timed out", request=request)
+        return "direct-session"
+
+    monkeypatch.setattr(auth, "_login", login)
+    monkeypatch.setattr(auth, "campus_identity_proxy", lambda: "http://127.0.0.1:7897")
+    monkeypatch.setattr(auth.time, "sleep", lambda _seconds: None)
+    assert auth.get_session(attempts=2, username="student", password="secret") == "direct-session"
+    assert calls == [False, False, True]

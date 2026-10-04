@@ -48,14 +48,14 @@ def _encrypt_password(password: str, public_key_pem: str) -> str:
     return base64.b64encode(key.encrypt(password.encode("utf-8"), padding.PKCS1v15())).decode()
 
 
-def new_client() -> httpx.Client:
+def new_client(*, force_direct: bool = False) -> httpx.Client:
     """An httpx client tuned for the campus network.
 
     course.pku.edu.cn aborts a TLS handshake every so often, roughly once in
     several attempts and more often from off-campus hosts. Retrying inside the
     transport means any request in a long sync recovers, not just the login.
     """
-    proxy = campus_identity_proxy()
+    proxy = None if force_direct else campus_identity_proxy()
     mounts = ({IAAA_BASE: httpx.HTTPTransport(proxy=proxy, retries=1, verify=False)}
               if proxy else None)
     return httpx.Client(
@@ -87,6 +87,11 @@ def get_session(
         except httpx.TransportError as exc:
             last_error = exc
             time.sleep(2 * (attempt + 1))
+    if campus_identity_proxy() is not None:
+        try:
+            return _login(username, password, force_direct=True)
+        except httpx.TransportError as exc:
+            last_error = exc
     raise RuntimeError(f"IAAA login failed after {attempts} attempts: {last_error}")
 
 
@@ -135,13 +140,15 @@ def iaaa_authenticate(
     return payload["token"]
 
 
-def _login(username: str = "", password: str = "") -> httpx.Client:
+def _login(
+    username: str = "", password: str = "", *, force_direct: bool = False
+) -> httpx.Client:
     user = username or settings.pku_username
     pwd = password or settings.pku_password
     if not user or not pwd:
         raise RuntimeError("PKU_USERNAME and PKU_PASSWORD must be set in .env")
 
-    client = new_client()
+    client = new_client(force_direct=True) if force_direct else new_client()
     try:
         token = iaaa_authenticate(client, "blackboard", _CAMPUS_LOGIN_REGISTERED, user, pwd)
         bb_resp = client.get(_CAMPUS_LOGIN_HTTPS, params={"token": token})

@@ -77,15 +77,20 @@ class NotionClient:
         base_url: str = API_HOST,
         timeout: float = 60.0,
         transport: httpx.BaseTransport | None = None,
+        direct_transport: httpx.BaseTransport | None = None,
     ):
         self._token = token
         self._base = base_url.rstrip("/")
+        self._timeout = timeout
+        self._direct_transport = direct_transport
+        self._allow_direct_fallback = transport is None or direct_transport is not None
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": API_VERSION,
+        }
         self._http = httpx.Client(
             base_url=self._base,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Notion-Version": API_VERSION,
-            },
+            headers=self._headers,
             timeout=timeout,
             transport=transport,
             trust_env=not dead_loopback_proxy(),
@@ -95,6 +100,24 @@ class NotionClient:
 
     def close(self) -> None:
         self._http.close()
+
+    def _direct_read(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None,
+        headers: dict | None,
+    ) -> httpx.Response:
+        """Retry one safe read without a flaky inherited desktop proxy."""
+        with httpx.Client(
+            base_url=self._base,
+            headers=self._headers,
+            timeout=self._timeout,
+            transport=self._direct_transport,
+            trust_env=False,
+        ) as client:
+            return client.request(method, url, params=params, headers=headers)
 
     def __enter__(self) -> "NotionClient":
         return self
@@ -126,8 +149,15 @@ class NotionClient:
                 # A timed-out write may already have committed in Notion.
                 # Replaying it could create a second page or block. GETs are
                 # safe to repeat and are used throughout catalog reconciliation.
-                if method.upper() != "GET" or attempt == attempts:
+                if method.upper() != "GET":
                     raise
+                if attempt == attempts:
+                    if not self._allow_direct_fallback:
+                        raise
+                    response = self._direct_read(
+                        method, url, params=params, headers=headers
+                    )
+                    break
                 time.sleep(min(2 ** (attempt - 1), 4.0))
                 continue
             if response.status_code not in _RETRYABLE or attempt == attempts:

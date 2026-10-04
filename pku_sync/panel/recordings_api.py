@@ -41,6 +41,7 @@ class OrganizeRequest(BaseModel):
 class CampusProcessRequest(BaseModel):
     direct_oss: bool = False
     regenerate: bool = False
+    reuse_existing: bool = False
 
 
 class CourseSourceRequest(BaseModel):
@@ -90,9 +91,26 @@ class Work:
     summary_existing: int = 0
     result_urls: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    failure_id: str = ""
 
     def as_dict(self) -> dict:
         return vars(self).copy()
+
+
+def _unexpected_process_failure(stage: str) -> str:
+    """Name the failed product step without exposing exception details."""
+    stage = stage.strip() or "准备任务"
+    if "Notion" in stage or "发布" in stage:
+        return "写入 Notion 时中断；本机已有转写和笔记会保留，请检查 Notion 连接后重试。"
+    if any(name in stage for name in ("教学网", "目录", "下载录像", "获取录像", "连接")):
+        return "读取教学网或录像时中断；已下载的本地文件会保留，请检查网络后重试。"
+    if any(name in stage for name in ("转写", "音轨", "音频")):
+        return "音频处理或转写时中断；已完成的本地结果会保留，请检查平台登录与额度后重试。"
+    if any(name in stage for name in ("笔记", "AI")):
+        return "生成课堂笔记时中断；本地转写会保留，请检查平台额度后重试。"
+    if any(name in stage for name in ("课堂画面", "关键帧", "补图")):
+        return "提取课堂画面时中断；文字转写和笔记会保留，请重试补充课堂画面。"
+    return f"任务在“{stage}”阶段中断；已生成的本地文件会保留，请稍后重试。"
 
 
 def recording_id(job: RecordingJob) -> str:
@@ -734,7 +752,15 @@ class RecordingWorkManager:
                     self._work.stage = "目录更新已取消"
                     self._work.error = ""
                 return
-            logger.exception("on-demand recording job failed")
+            failure_id = uuid.uuid4().hex[:8].upper()
+            failed_stage = self._work.stage if self._work else "准备任务"
+            failed_kind = self._work.kind if self._work else "unknown"
+            logger.exception(
+                "on-demand recording job failed failure_id=%s kind=%s stage=%s",
+                failure_id,
+                failed_kind,
+                failed_stage,
+            )
             if isinstance(exc, ValueError):
                 message = str(exc)
             elif self._work and self._work.kind == "sync":
@@ -746,10 +772,11 @@ class RecordingWorkManager:
             elif self._work and self._work.kind == "summary":
                 message = ("课程总结没有生成；讲次页不受影响，请检查 Notion 连接后重试。")
             else:
-                message = "处理没有完成；本地已生成的转写会保留，可稍后重试。"
+                message = _unexpected_process_failure(failed_stage)
             with self._lock:
                 self._work.state = "failed"
                 self._work.error = message
+                self._work.failure_id = failure_id
         else:
             with self._lock:
                 self._work.state = "done"
@@ -965,7 +992,7 @@ class RecordingWorkManager:
         return self._process(job, lecture_id, direct_oss=direct_oss, regenerate=regenerate)
 
     def start_campus_process(self, key: str, course_id: str, direct_oss: bool = False,
-                             regenerate: bool = False) -> dict:
+                             regenerate: bool = False, reuse_existing: bool = False) -> dict:
         job = find_job(Path(self.settings.data_dir), key)
         if job is None or job.recording.course_id != course_id:
             raise ValueError("这条录像不属于当前教学网课程。")
@@ -977,23 +1004,40 @@ class RecordingWorkManager:
         root = Path(self.settings.data_dir)
         if not saved_home(root):
             raise ValueError("请先选择 Notion 父页面并创建学习主页。")
-        # Without campus credentials nothing can be re-read, so the stale
-        # snapshot is reported right away instead of starting a doomed task.
-        if not (getattr(self.settings, "pku_username", "")
+        if reuse_existing:
+            required = (
+                job.directory / "transcript.json",
+                job.directory / "notes.md",
+                job.directory / "keyframes" / "index.json",
+            )
+            if not all(path.is_file() for path in required):
+                raise ValueError("本机已有结果不完整；请使用「整理这节录像」补齐转写、笔记和课堂画面。")
+        # Publishing complete local artifacts is intentionally independent of
+        # campus availability. The immutable recording metadata already on
+        # disk is sufficient to create the Notion target and publish the note.
+        if not reuse_existing and not (
+                getattr(self.settings, "pku_username", "")
                 and getattr(self.settings, "pku_password", "")):
             issues = assignment_catalog_publish_issues(job)
             if issues:
                 raise ValueError("；".join(issues)
                                  + " 请先在「我的课程」保存教学网账号，应用会自动重新读取目录。")
         def run() -> str:
-            self._refresh_stale_catalog(job)
+            if not reuse_existing:
+                self._refresh_stale_catalog(job)
             self._stage("准备 Notion 课程与讲次页")
             lecture_id = ensure_recording_target(root, self.settings.notion_token, job)
-            return self._process(job, lecture_id, direct_oss=direct_oss, regenerate=regenerate)
+            return self._process(
+                job,
+                lecture_id,
+                direct_oss=direct_oss,
+                regenerate=regenerate,
+                reuse_existing=reuse_existing,
+            )
         return self._start("process", key, run)
 
     def _process(self, job: RecordingJob, lecture_id: str, direct_oss: bool = False,
-                 regenerate: bool = False) -> str:
+                 regenerate: bool = False, reuse_existing: bool = False) -> str:
         from ..auth import get_session
         from ..lecture_source_download import prepare_lesson_sources
         from ..media import note_coverage_gap_seconds, write_notes
@@ -1126,7 +1170,7 @@ class RecordingWorkManager:
             if not frame_rows:
                 raise ValueError("录像未能提取课堂画面；文字笔记已保留，请稍后重试。")
         from .note_videos import needs_video_clips
-        if not job.video.exists() and needs_video_clips(notes_path):
+        if not reuse_existing and not job.video.exists() and needs_video_clips(notes_path):
             if self.settings.pku_username and self.settings.pku_password:
                 self._stage("获取录像以生成回看片段")
                 client = get_session(username=self.settings.pku_username,
@@ -1533,7 +1577,8 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         try:
             return manager.start_campus_process(
                 key, course_id, direct_oss=body.direct_oss if body else False,
-                regenerate=body.regenerate if body else False)
+                regenerate=body.regenerate if body else False,
+                reuse_existing=body.reuse_existing if body else False)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

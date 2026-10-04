@@ -23,7 +23,7 @@
 ; and is no longer invoked by this script.
 
 #define MyAppName "PKU All in Notion"
-#define MyAppVersion "0.1.22"
+#define MyAppVersion "0.1.23"
 #define MyAppPublisher "PKU All in Notion"
 ; Exe name as produced by Tauri (productName). Override with /DMyAppExeName=...
 #ifndef MyAppExeName

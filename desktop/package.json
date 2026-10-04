@@ -1,6 +1,6 @@
 {
   "name": "pku-all-in-notion-desktop",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "private": true,
   "scripts": {
     "tauri": "tauri",

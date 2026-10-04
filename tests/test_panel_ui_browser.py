@@ -543,7 +543,25 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
 
             from pku_sync.panel.recordings_api import collect_jobs, recording_id
             job = collect_jobs(tmp_path)[0]
-            (job.directory).mkdir(exist_ok=True)
+            job.directory.mkdir(exist_ok=True)
+            (job.directory / "transcript.json").write_text(json.dumps({
+                "segments": [{"start": 0, "end": 10, "text": "课堂内容。"}]
+            }, ensure_ascii=False), "utf-8")
+            (job.directory / "notes.md").write_text("# 已有课堂笔记", "utf-8")
+            (job.directory / "keyframes").mkdir()
+            (job.directory / "keyframes" / "index.json").write_text(
+                json.dumps({"keyframes": []}), "utf-8")
+            page.reload()
+            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
+            publish = page.get_by_role("button", name="发布已有笔记")
+            publish.wait_for()
+            page.once("dialog", lambda dialog: dialog.accept())
+            publish.click()
+            assert len(started) == 2
+            assert started[1][1]["reuse_existing"] is True
+            assert started[1][1]["direct_oss"] is False
+            assert not job.video.exists()
+
             (job.directory / "video.mp4").write_bytes(b"cached-video-for-review")
             (job.directory / "transcript.json").write_text(json.dumps({
                 "segments": [{"start": 2425.0, "end": 2437.0,
@@ -845,6 +863,19 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
                 '[data-action="recording-open-result"][data-url="https://www.notion.so/summary-page"]'
             ).count() == 1
 
+            # Unexpected failures expose a support reference without leaking internals.
+            page.evaluate("""() => {
+                const s = window.__candidateTest.state;
+                s.recordings.task = {
+                    state:'failed', kind:'process', stage:'将课堂画面和笔记发布到 Notion',
+                    error:'写入 Notion 时中断；本机已有转写和笔记会保留，请检查 Notion 连接后重试。',
+                    failure_id:'A1B2C3D4'
+                };
+                window.__candidateTest.render();
+            }""")
+            assert "写入 Notion 时中断" in box.inner_text()
+            assert "故障编号：A1B2C3D4" in box.inner_text()
+
             # The course page keeps a permanent way to generate or reopen it.
             assert page.locator('[data-action="campus-course-summary"]').count() == 1
             assert page.get_by_role("button", name="生成全部课程总结").count() == 1
@@ -897,4 +928,3 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
             assert page.evaluate("window.scrollY") == 280
         finally:
             browser.close()
-

@@ -877,6 +877,7 @@
       var details = lesson.duration_seconds ? ' · 约 ' + Math.ceil(lesson.duration_seconds / 60) +
         ' 分钟，预计转写用量约 ' + Math.ceil(lesson.duration_seconds / 60) + ' 分钟' : ' · 时长未提供，可先读取时长';
       if (lesson.video_size) details += ' · 本地文件 ' + formatTransfer(lesson.video_size);
+      var publishExisting = Boolean(lesson.publish_ready && !lesson.video_available);
       var blocked = lesson.unavailable_reason || (state.recordings.task.state === "running" ? "请等待当前任务完成。" : state.campus.demoConnection ? "演示模式不会实际整理，请在正式程序中连接 Notion。" : !state.connection.connected ? "请先连接 Notion。" : !state.campus.home ? "请先创建 Notion 学习主页。" : "");
       var review = state.termReview.courseId === course.id && state.termReview.recordingId === lesson.id ? termReviewPanel(lesson) : "";
       return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(index + 1) + ' 节 · 录像优先</span><h3>' + esc(lesson.title) +
@@ -890,7 +891,7 @@
               small: true, quiet: true, disabled: Boolean(blocked),
               attrs: { "data-recording": lesson.id }
             }) + (blocked ? '<small class="action-reason">' + esc(blocked) + '</small>' : '')
-          : button("整理这节录像", "campus-process", { small: true, primary: true,
+          : button(publishExisting ? "发布已有笔记" : "整理这节录像", "campus-process", { small: true, primary: true,
               disabled: Boolean(blocked),
               attrs: { "data-recording": lesson.id } }) + (blocked ? '<small class="action-reason">' + esc(blocked) + '</small>' : '')) +
         (lesson.video_available
@@ -1104,13 +1105,16 @@
     });
     var sourceWarning = hasMatchedSlides ? "" :
       "当前没有明确关联的课件，笔记可能主要依据自动转写；建议先在下方把对应课件关联到这节录像，再整理。";
+    var reuseExisting = Boolean(lesson.publish_ready && !lesson.video_available && !regenerate);
     var confirmation = regenerate
       ? "确认重新整理「" + lesson.title + "」？将使用本机已有转写和明确匹配的课件，重新生成笔记并发布一个新版 Notion 页面。旧笔记和旧页面会保留；AI 笔记会再次消耗额度。完成后请对照来源校对术语、数字和老师要求。"
-      : "确认整理「" + lesson.title + "」？将下载录像、转写并将笔记写入对应 Notion 讲次。若有明确对应的教学网课件，会提取所选文字片段并与转写一同发送到 PKU All in Notion AI 笔记服务。转写与 AI 笔记会消耗额度；完成后请对照来源校对术语和数字。";
+      : reuseExisting
+        ? "确认发布「" + lesson.title + "」的已有笔记？将复用本机转写、笔记和课堂画面，不重新下载录像，也不重复消耗转写或 AI 笔记额度。"
+        : "确认整理「" + lesson.title + "」？将下载录像、转写并将笔记写入对应 Notion 讲次。若有明确对应的教学网课件，会提取所选文字片段并与转写一同发送到 PKU All in Notion AI 笔记服务。转写与 AI 笔记会消耗额度；完成后请对照来源校对术语和数字。";
     if (!window.confirm(sourceWarning + confirmation +
-        (directOss && !regenerate ? "本次音频会经短时授权直传阿里云 OSS。" : ""))) return;
+        (directOss && !regenerate && !reuseExisting ? "本次音频会经短时授权直传阿里云 OSS。" : ""))) return;
     return requestJson("/api/campus/courses/" + encodeURIComponent(course.id) + "/recordings/" + encodeURIComponent(recordingId) + "/process",
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direct_oss: directOss, regenerate: Boolean(regenerate) }) }).then(function (result) {
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direct_oss: reuseExisting ? false : directOss, regenerate: Boolean(regenerate), reuse_existing: reuseExisting }) }).then(function (result) {
         if (!result.ok || !result.body) return showToast((result.body && result.body.detail) || "整理没有开始。");
         state.recordings.task = result.body;
         state.recordings.directOss = false;
@@ -2171,13 +2175,16 @@
     var warnings = (task.warnings || []).length
       ? '<small class="recording-warning">' + esc((task.warnings || []).slice(0, 2).join("；")) +
         ((task.warnings || []).length > 2 ? "…" : "") + '</small>' : "";
+    var failure = task.state === "failed" && task.failure_id
+      ? '<small class="recording-warning">故障编号：' + esc(task.failure_id) + ' · 再次失败时请附上此编号</small>'
+      : "";
     return '<div class="recording-task" role="status" aria-live="polite"><div class="recording-task-text">' + esc(message) +
       (task.state === "running" && task.kind === "sync" ? button("取消目录更新", "recording-cancel-sync", { small: true, quiet: true }) : "") +
       (task.state === "done" && task.lecture_url ? button("打开这节课", "recording-open-result", { small: true, attrs: { "data-url": task.lecture_url } }) : "") +
       (task.state === "done" && task.result_url ? (task.kind === "download"
         ? '<a class="btn btn-small btn-quiet" href="' + esc(task.result_url) + '" download>保存录像到电脑</a>'
         : button(task.kind === "summary" ? "打开课程总结" : "查看笔记", "recording-open-result", { small: true, quiet: true, attrs: { "data-url": task.result_url } })) : "") +
-      warnings +
+      warnings + failure +
       '</div>' + progress + '</div>';
   }
 

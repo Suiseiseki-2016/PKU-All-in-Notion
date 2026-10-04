@@ -135,6 +135,49 @@ def test_get_read_timeout_retries_but_ambiguous_page_create_does_not(monkeypatch
     assert sleeps == [1.0]
 
 
+def test_get_exhausts_proxy_then_retries_once_direct(monkeypatch):
+    monkeypatch.setattr(notion.time, "sleep", lambda _seconds: None)
+    proxy_calls = []
+    direct_calls = []
+
+    def proxy(request: httpx.Request) -> httpx.Response:
+        proxy_calls.append(request.method)
+        raise httpx.ReadTimeout("proxy timed out", request=request)
+
+    def direct(request: httpx.Request) -> httpx.Response:
+        direct_calls.append(request.method)
+        return httpx.Response(200, json={"id": DASHED})
+
+    with NotionClient(
+        "secret_test",
+        transport=httpx.MockTransport(proxy),
+        direct_transport=httpx.MockTransport(direct),
+    ) as client:
+        assert client.get_page(PAGE_ID)["id"] == DASHED
+    assert proxy_calls == ["GET", "GET", "GET"]
+    assert direct_calls == ["GET"]
+
+
+def test_ambiguous_write_never_switches_transport():
+    direct_calls = []
+
+    def proxy(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("proxy timed out", request=request)
+
+    def direct(request: httpx.Request) -> httpx.Response:
+        direct_calls.append(request.method)
+        return httpx.Response(200, json={"id": DASHED})
+
+    with NotionClient(
+        "secret_test",
+        transport=httpx.MockTransport(proxy),
+        direct_transport=httpx.MockTransport(direct),
+    ) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            client.create_page(PAGE_ID, "测试页")
+    assert direct_calls == []
+
+
 def test_client_error_raises_without_retry():
     calls = {"n": 0}
 

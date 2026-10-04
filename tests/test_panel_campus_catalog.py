@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from pku_sync.models import Recording
+from pku_sync.pipeline import collect_jobs
 from pku_sync.panel.campus_catalog import (campus_course, campus_courses,
                                            teacher_deadline_quote)
 from pku_sync.panel import notion_home
@@ -154,6 +155,20 @@ def test_campus_catalog_prioritizes_recordings_and_never_returns_media_secrets(t
     assert detail["lessons"][0]["materials"][0]["title"] == "第1讲课件"
     assert detail["unassigned_materials"][0]["match_state"] == "needs_review"
     assert "secret" not in json.dumps(detail)
+
+
+def test_campus_catalog_marks_complete_local_results_ready_to_publish(tmp_path):
+    _campus(tmp_path)
+    job = collect_jobs(tmp_path, "campus-1")[0]
+    job.directory.mkdir(parents=True)
+    (job.directory / "transcript.json").write_text('{"segments": []}', "utf-8")
+    (job.directory / "notes.md").write_text("# 已有笔记", "utf-8")
+    (job.directory / "keyframes").mkdir()
+    (job.directory / "keyframes" / "index.json").write_text('{"keyframes": []}', "utf-8")
+
+    lesson = campus_course(tmp_path, "campus-1")["lessons"][0]
+    assert lesson["publish_ready"] is True
+    assert lesson["video_available"] is False
 
 
 def test_notion_dashboard_exposes_source_age_after_the_page_becomes_stale(tmp_path):

@@ -145,6 +145,8 @@ def campus_course(root: Path, course_id: str) -> dict:
             "stage": stage,
             "video_available": job.video.exists(),
             "transcript_available": (job.directory / "transcript.json").is_file(),
+            "notes_available": (job.directory / "notes.md").is_file(),
+            "keyframes_available": (job.directory / "keyframes" / "index.json").is_file(),
             "transcript_reviewed_pending": review_pending(job),
             "duration_seconds": (
                 _read_json(job.directory / "duration.json", {}).get("duration_seconds")
@@ -155,6 +157,11 @@ def campus_course(root: Path, course_id: str) -> dict:
             "unavailable_reason": unavailable,
             "materials": [],
         }
+        row["publish_ready"] = bool(
+            row["transcript_available"]
+            and row["notes_available"]
+            and row["keyframes_available"]
+        )
         publication = _read_json(job.directory / "notion-publication.json", {})
         if (isinstance(publication, dict)
                 and publication.get("recording_id") == row["id"]
