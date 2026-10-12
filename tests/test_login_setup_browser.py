@@ -24,6 +24,7 @@ def ui():
         if route.request.method == "POST":
             posted.append((path, route.request.post_data_json))
             held.append(route)
+            route.request.frame.evaluate("count => {window.__testPostsCaptured = count;}", len(posted))
             return
         bodies = {"/api/platform/quota": {"active": signed_in[0], "email": "fixture@example.com", "email_verified": True},
                   "/api/campus/courses": {"courses": [], "campus_configured": False},
@@ -60,6 +61,7 @@ def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     page.locator("#auth-password").press("Enter")
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_have_text("正在登录…")
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_disabled()
+    page.wait_for_function("window.__testPostsCaptured === 1")
     assert posted == [("/api/auth/login", {"email": "fixture@example.com", "password": "fixture-password"})]
     page.evaluate("document.getElementById('auth-form').requestSubmit()")
     assert len(posted) == 1
@@ -70,6 +72,7 @@ def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     assert page.locator("#auth-password").input_value() == "fixture-password"
     page.locator("#auth-password").press("Enter")
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_disabled()
+    page.wait_for_function("window.__testPostsCaptured === 2")
     held.pop().abort()
     playwright.expect(page.locator("#auth-help")).to_have_text(PANEL_COPY["auth"]["network_failed"])
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_enabled()
@@ -96,6 +99,7 @@ def test_campus_enter_validates_before_saved_and_retains_failed_inputs(ui):
     button = page.locator('[data-action="recording-save-credentials"]')
     playwright.expect(button).to_have_text("正在验证…")
     playwright.expect(button).to_be_disabled()
+    page.wait_for_function("window.__testPostsCaptured === 1")
     page.evaluate("document.getElementById('recording-credentials-form').requestSubmit()")
     assert len(posted) == 1
     held.pop().fulfill(status=401, body=json.dumps({"detail": "请检查账号和密码"}), content_type="application/json")
@@ -105,6 +109,7 @@ def test_campus_enter_validates_before_saved_and_retains_failed_inputs(ui):
     page.locator("#recording-password").fill("correct")
     button.click()
     playwright.expect(button).to_be_disabled()
+    page.wait_for_function("window.__testPostsCaptured === 2")
     held.pop().fulfill(body='{"configured":true,"verified":true}', content_type="application/json")
     playwright.expect(page.locator("#recording-credentials-form")).to_have_count(0)
     assert page.evaluate("window.__uiTest.state.campus.configured") is True
@@ -118,12 +123,14 @@ def test_home_setup_destination_pending_and_ready_layout(ui, tmp_path):
     page.locator(".home-setup").screenshot(path=str(tmp_path / "home-setup.png"))
     page.locator('[data-action="campus-create-workspace"]').click()
     playwright.expect(page.locator('[data-action="campus-create-workspace"]')).to_have_text("正在创建并验证…")
+    page.wait_for_function("window.__testPostsCaptured === 1")
     assert posted[-1] == ("/api/campus/notion/workspace", {"parent_page_id": "parent-b"})
     held.pop().fulfill(status=503, body=json.dumps({"detail": "Notion 暂时无法连接"}), content_type="application/json")
     playwright.expect(page.locator(".home-setup-error")).to_have_text("Notion 暂时无法连接")
     assert page.locator("#home-parent").input_value() == "parent-b"
     page.locator('[data-action="campus-create-workspace"]').click()
     playwright.expect(page.locator('[data-action="campus-create-workspace"]')).to_be_disabled()
+    page.wait_for_function("window.__testPostsCaptured === 2")
     held.pop().fulfill(body=json.dumps({"id": "home", "parent_id": "parent-b", "active": True, "schema": 2, "url": "https://www.notion.so/fixture"}), content_type="application/json")
     playwright.expect(page.locator(".home-ready-badge")).to_have_text("✓ 学习主页已就绪")
     for width in (1100, 800, 390):
