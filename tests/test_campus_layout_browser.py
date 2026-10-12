@@ -369,7 +369,7 @@ def usage_guidance_renderer():
     script=script[:script.index('  window.setInterval(refreshAccount, 8000);')]+(
         'window.__usageGuidance={state:state,render:render};})();')
     with sync_playwright() as driver:
-        browser=driver.chromium.launch(executable_path='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless=True)
+        browser=driver.chromium.launch(**browser_launch_options(),headless=True)
         try:
             page=browser.new_page(viewport={'width':1100,'height':760})
             posts=[]
