@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from browser_support import browser_launch_options
 from playwright.sync_api import sync_playwright
 from pku_sync.panel.student_ui import PANEL_COPY
 
@@ -50,7 +51,7 @@ def test_save_link_receives_catalog_task_and_exposes_actual_failure(accepted_sta
             return
         route.fulfill(status=200, body=json.dumps(body), content_type='application/json')
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=EDGE, headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route('http://panel.test/**', serve)

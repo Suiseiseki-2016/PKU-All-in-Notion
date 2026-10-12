@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 
 import pytest
+from browser_support import browser_launch_options
 
 from pku_sync.panel.student_ui import PANEL_COPY
 
@@ -27,7 +28,7 @@ def test_account_controls_survive_refresh_and_quiz_offers_a_next_step():
         else:
             route.fulfill(status=404, body='{}', content_type='application/json')
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={'width': 1100, 'height': 760})
             page.route('**/*', serve)
@@ -152,7 +153,7 @@ def test_portal_first_layout_and_account_settings():
             route.fulfill(status=404, body="{}", content_type="application/json")
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.route("**/*", serve)

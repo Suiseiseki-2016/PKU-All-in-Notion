@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+from browser_support import browser_launch_options
 from playwright.sync_api import sync_playwright
 from pku_sync.panel.student_ui import PANEL_COPY
 
@@ -12,7 +13,7 @@ def panel():
     script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
         'window.__draft = {state: state, render: render};})();')
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         page = browser.new_page()
         try:
             page.set_content('<div id="app"></div><div id="toast"></div>')
@@ -73,7 +74,7 @@ def test_account_settings_reads_current_workspace_after_directory_update(panel):
         workspace: {id:'b'.repeat(32),parent_id:'a'.repeat(32),active:true,url:'https://www.notion.so/'+'b'.repeat(32)},
         legacy_home: {id:'c'.repeat(32),url:'https://www.notion.so/'+'c'.repeat(32)}
     }), {status:200,headers:{'Content-Type':'application/json'}}))''')
-    link = panel.locator('.workspace-controls [data-action="campus-open-summary"]').filter(has_text='打开新版主页')
+    link = panel.locator('.home-setup-ready [data-action="campus-open-home"]')
     link.wait_for(state='visible')
     assert link.get_attribute('data-url') == 'https://www.notion.so/' + 'b' * 32
     assert panel.locator('.campus-settings').get_attribute('open') is not None

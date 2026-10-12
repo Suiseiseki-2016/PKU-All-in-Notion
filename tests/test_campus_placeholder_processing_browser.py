@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+from browser_support import browser_launch_options
 from playwright.sync_api import sync_playwright
 
 from pku_sync.panel.student_ui import PANEL_COPY
@@ -19,7 +20,7 @@ def test_projected_lecture_does_not_replace_first_processing_with_regeneration(t
     script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
         'window.__layout = {state: state, render: render};})();')
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route('**/*', lambda route: route.fulfill(body='<div id="app"></div><div id="toast"></div>', content_type='text/html'))

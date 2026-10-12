@@ -1,6 +1,7 @@
 """Developer renderer check: slow parent reads cannot occupy course browsing."""
 import json
 from pathlib import Path
+from browser_support import browser_launch_options
 
 from playwright.sync_api import sync_playwright
 from pku_sync.panel.student_ui import PANEL_COPY
@@ -17,7 +18,7 @@ def test_course_navigation_does_not_read_full_notion_tree_and_settings_coalesces
     course = {'id': '_101508_1', 'title': 'E2E课程', 'lessons': [], 'unassigned_materials': [],
               'all_materials': [], 'assignments': [], 'announcements': [], 'announcement_tasks': [], 'summary': {}}
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             def serve(route):

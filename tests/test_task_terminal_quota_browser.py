@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from browser_support import browser_launch_options
 from playwright.sync_api import sync_playwright
 from pku_sync.panel.student_ui import PANEL_COPY
 
@@ -15,7 +16,7 @@ def renderer():
     script = script[:script.index("  window.setInterval(refreshAccount, 8000);")] + (
         "window.__quotaTest={state:state,render:render,poll:pollRecordingTask,logout:logoutAccount,redeem:redeem};})();")
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE),headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(),headless=True)
         page = browser.new_page()
         controls = {"terminal":"failed","quota_mode":"success","held":None,
                     "redeem_mode":"success","held_redeem":None,"redeem_posts":[]}

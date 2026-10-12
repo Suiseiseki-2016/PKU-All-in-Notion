@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 import pytest
+from browser_support import browser_launch_options
 from pku_sync.panel.student_ui import student_page
 
 playwright = pytest.importorskip('playwright.sync_api')
@@ -19,7 +20,7 @@ def ui():
              'home_sync':{'status':'pulled'}}
     posts=[]
     with playwright.sync_playwright() as p:
-        browser=p.chromium.launch(executable_path=str(EDGE),headless=True)
+        browser=p.chromium.launch(**browser_launch_options(),headless=True)
         page=browser.new_page()
         def serve(route):
             path=urlsplit(route.request.url).path

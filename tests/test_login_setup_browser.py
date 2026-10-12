@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from browser_support import browser_launch_options
 from pku_sync.panel.student_ui import PANEL_COPY, student_page
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -37,7 +38,7 @@ def ui():
         else:
             route.fulfill(status=200, body=json.dumps(bodies.get(path, {})), content_type="application/json")
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         page = browser.new_page(viewport={"width": 1100, "height": 760})
         page.route("http://panel.test/**", serve)
         page.goto("http://panel.test/app")

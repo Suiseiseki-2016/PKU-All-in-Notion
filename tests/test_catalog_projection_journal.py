@@ -1,5 +1,6 @@
 """Durable permit diagnostics; real native recovery remains a separate gate."""
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -9,6 +10,7 @@ from pku_sync import catalog_snapshots as catalog
 from test_account_catalog import settings, snapshot
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows file handle sharing contract')
 def test_windows_observer_handle_cannot_break_atomic_durable_journal_replace(tmp_path, monkeypatch):
     import ctypes
     from ctypes import wintypes

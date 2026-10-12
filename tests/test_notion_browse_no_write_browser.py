@@ -1,6 +1,7 @@
 """Development browser regression; not an installed native E2E verdict."""
 import json
 from pathlib import Path
+from browser_support import browser_launch_options
 
 from playwright.sync_api import sync_playwright
 from pku_sync.panel.student_ui import PANEL_COPY
@@ -23,7 +24,7 @@ def test_reading_connected_notion_parents_does_not_start_directory_write():
             value = {'state': 'done'}
         route.fulfill(body=json.dumps(value), content_type='application/json')
     with sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route('**/*', serve)

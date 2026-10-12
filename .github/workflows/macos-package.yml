@@ -19,6 +19,7 @@ jobs:
           test "$(uname -m)" = arm64
           uv sync --locked --all-extras
           uv run python -m compileall -q pku_sync
+          uv run playwright install chromium
           uv run pytest --basetemp=.pytest-basetemp -q
           uv build --wheel
           cd desktop

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+from browser_support import browser_launch_options
 from fastapi.testclient import TestClient
 
 from pku_sync.panel.connection import ConnectionService, CONNECTED_COPY, CONNECT_FAILED_COPY
@@ -88,7 +89,7 @@ def test_registration_verification_and_notion_connection_in_edge():
         )
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
@@ -178,7 +179,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
             route.fulfill(status=404, body="{}", content_type="application/json")
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
@@ -287,7 +288,7 @@ def test_notion_preview_opens_browser_and_returns_to_old_library():
         )
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
@@ -319,7 +320,7 @@ def test_sidebar_stays_put_while_right_content_scrolls():
         "</div>"
     )
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.set_content(markup)
@@ -401,7 +402,7 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
         )
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
@@ -447,6 +448,10 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
     from pku_sync.models import Recording
     from pku_sync.panel.connection import build_fake_connection_service
     from pku_sync.panel import notion_home
+    from pku_sync import platform as account_platform
+
+    monkeypatch.setattr(account_platform, '_fetch_account_profile',
+                        lambda _settings: {'status':'ready','revision':0,'profile':{}})
 
     monkeypatch.setattr(notion_home, "available_parents", lambda _token: [{
         "id": "oauth-template", "title": "已授权父页面", "url": "https://www.notion.so/oauth-template"
@@ -521,7 +526,7 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
                       content_type=response.headers.get("content-type", "text/plain"))
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
@@ -674,7 +679,7 @@ def test_materials_only_course_and_demo_notice_in_edge(tmp_path):
                       content_type=response.headers.get("content-type", "text/plain"))
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1100, "height": 760})
             page.route("http://panel.test/**", serve)
@@ -776,7 +781,7 @@ def test_handbook_requirements_visible_when_formal_assignment_index_is_empty(tmp
                       content_type=response.headers.get("content-type", "text/plain"))
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1100, "height": 1700})
             page.route("http://panel.test/**", serve)
@@ -840,7 +845,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
             route.fulfill(status=404, body="{}", content_type="application/json")
 
     with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(executable_path=str(EDGE), headless=True)
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
