@@ -29,7 +29,7 @@ jobs:
         run: |
           APP='/private/tmp/pku-all-in-notion-target/release/bundle/macos/PKU All in Notion.app'
           PY="$APP/Contents/Resources/resources/runtime/bin/python"
-          "$PY" -I desktop/scripts/verify-bundled-source.py "$APP/Contents/Resources/resources/runtime"
+          "$PY" -B -I desktop/scripts/verify-bundled-source.py "$APP/Contents/Resources/resources/runtime"
           codesign --verify --deep --strict "$APP"
           mkdir -p macos-candidate
           VERSION=$(node -p "require('./desktop/package.json').version")
