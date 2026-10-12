@@ -20,6 +20,7 @@ they are discovered rather than configured.
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import httpx
@@ -58,6 +59,11 @@ def list_recordings(client: httpx.Client, course_id: str) -> list[Recording]:
         },
     )
     resp.raise_for_status()
+    if (sum(label in resp.text for label in _HEADERS) < 2
+            and not re.search(r"暂无(?:录像|录播|视频)|没有(?:录像|录播|视频)", resp.text)):
+        raise ValueError("教学网录像目录未返回完整页面，禁止作为空目录同步。")
+    if re.search(r"(?:下一页|nextPage|paging_next)", resp.text, re.I):
+        raise ValueError("教学网录像目录仍有分页，快照不完整。")
     return _parse_video_list(resp.text, course_id)
 
 
@@ -114,6 +120,20 @@ def resolve_media(client: httpx.Client, recording: Recording) -> Recording:
     Returns the same object so callers can use it inline. Fields stay empty when
     the platform has not finished publishing the session.
     """
+    # CAS addresses are single-use. A timed-out exchange must restart at the
+    # Blackboard player page to obtain a fresh address, rather than replay the
+    # same signed request. Only read timeouts receive one additional attempt;
+    # rejected credentials, HTTP errors and a second timeout remain failures.
+    try:
+        return _resolve_media_once(client, recording)
+    except httpx.ReadTimeout:
+        logging.getLogger(__name__).warning(
+            "recording metadata read timeout; renewing player chain once course_id=%s",
+            recording.course_id)
+        return _resolve_media_once(client, recording)
+
+
+def _resolve_media_once(client: httpx.Client, recording: Recording) -> Recording:
     if not recording.play_url:
         return recording
 

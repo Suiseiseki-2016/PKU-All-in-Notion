@@ -136,12 +136,14 @@ def test_fetch_live_snapshot_reads_each_selected_course_and_closes_client():
     assert snapshot.fetched_at == datetime(2026, 9, 16, 9, 30)
     assert [(row.course, row.assignments, row.recordings) for row in snapshot.courses] == [
         ("计算机网络", 1, 1),
-        ("认知心理学", 1, 1),
+        # No native content identity: calendar fact stays separate from the task.
+        ("认知心理学", 2, 1),
     ]
     assert snapshot.courses[1].nearest_due == "2026-09-20 12:00+08:00"
     assert [(row.course, row.title, row.due_at) for row in snapshot.deadlines] == [
         ("认知心理学", "作业一", "2026-09-20T12:00:00+08:00"),
         ("计算机网络", "作业一", "未公布"),
+        ("认知心理学", "作业一", "未公布"),
     ]
 
 

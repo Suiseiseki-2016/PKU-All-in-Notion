@@ -51,3 +51,73 @@ def campus_identity_proxy() -> str | None:
         except OSError:
             return None
     return url
+
+
+def campus_media_proxy() -> str | None:
+    """Optional explicit route for resources/player metadata, never for IAAA.
+
+    Keep the normal direct route unless the user supplied a valid live proxy.
+    This is a network route; it cannot change a job result or its acceptance.
+    """
+    candidate = os.environ.get("PKU_CAMPUS_MEDIA_PROXY", "")
+    if not candidate or candidate.casefold() == "direct":
+        return None
+    url = candidate if "://" in candidate else "http://" + candidate
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if (parts.scheme not in {"http", "https"} or not parts.hostname or not port
+            or parts.username or parts.password or parts.query or parts.fragment
+            or parts.path not in {"", "/"}):
+        return None
+    if parts.hostname in {"localhost", "127.0.0.1", "::1"}:
+        try:
+            with socket.create_connection((parts.hostname, port), timeout=0.2):
+                pass
+        except OSError:
+            return None
+    return url
+
+
+def campus_identity_fallback_proxy() -> str | None:
+    """A live Windows user proxy, only after direct IAAA transport fails.
+
+    Direct remains the first route, including hosts in the Windows bypass list.
+    This recovery uses only the user's enabled local proxy after that route
+    fails. Explicit direct/proxy choices are preserved. Never inherit shell
+    proxies or route course/media traffic through this fallback.
+    """
+    if os.name != "nt" or os.environ.get("PKU_CAMPUS_IDENTITY_PROXY", ""):
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+            enabled = winreg.QueryValueEx(key, "ProxyEnable")[0]
+            server = winreg.QueryValueEx(key, "ProxyServer")[0]
+    except OSError:
+        return None
+    if type(enabled) is not int or enabled != 1 or not isinstance(server, str):
+        return None
+    protocols = dict(part.split("=", 1) for part in server.split(";") if "=" in part)
+    candidate = protocols.get("https", "") if protocols else server
+    if not candidate:
+        return None
+    url = candidate if "://" in candidate else "http://" + candidate
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if (parts.scheme not in {"http", "https"} or parts.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or not port or parts.username or parts.password or parts.query or parts.fragment
+            or parts.path not in {"", "/"}):
+        return None
+    try:
+        with socket.create_connection((parts.hostname, port), timeout=0.2):
+            pass
+    except OSError:
+        return None
+    return url

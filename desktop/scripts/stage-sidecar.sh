@@ -100,12 +100,14 @@ if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
   # uv 0.6's relocatable venv still leaves an absolute `bin/python` symlink
   # and omits libpython/stdlib on macOS. Ship the complete managed interpreter
   # instead; its Mach-O loader path is already @executable_path/../lib.
-  PYTHON_HOMES=("$PYTHON_INSTALL"/cpython-3.11*-macos-*)
-  if [[ ${#PYTHON_HOMES[@]} -ne 1 || ! -d "${PYTHON_HOMES[0]}" ]]; then
-    echo "expected one managed macOS Python under $PYTHON_INSTALL" >&2
-    exit 1
-  fi
-  /usr/bin/ditto --noextattr --noqtn "${PYTHON_HOMES[0]}" "$RUNTIME"
+  PYTHON_BIN="$(uv python find 3.11 --managed-python)"
+  PYTHON_HOME="$(cd "$(dirname "$PYTHON_BIN")/.." && pwd -P)"
+  PYTHON_INSTALL="$(cd "$PYTHON_INSTALL" && pwd -P)"
+  case "$PYTHON_HOME" in
+    "$PYTHON_INSTALL"/*) ;;
+    *) echo "managed Python resolved outside $PYTHON_INSTALL: $PYTHON_HOME" >&2; exit 1 ;;
+  esac
+  /usr/bin/ditto --noextattr --noqtn "$PYTHON_HOME" "$RUNTIME"
 else
   uv venv "$RUNTIME" --python 3.11 --relocatable --clear --link-mode copy
 fi

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-reviewed-draft"
+description = "Enables the save_reviewed_draft command without any pre-configured scope."
+commands.allow = ["save_reviewed_draft"]
+
+[[permission]]
+identifier = "deny-save-reviewed-draft"
+description = "Denies the save_reviewed_draft command without any pre-configured scope."
+commands.deny = ["save_reviewed_draft"]

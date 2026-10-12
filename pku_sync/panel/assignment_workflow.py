@@ -4,19 +4,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from ..auth import get_session
 from ..notion import NotionClient, NotionError
 from ..store import safe_name
-from ..submit import AlreadySubmitted, SubmitError, fetch_form, submit_file
+from ..submit import AlreadySubmitted, SubmitError, SubmissionFileChanged, fetch_form, submit_file, submit_text, inspect_submission
 from .campus_catalog import campus_course
 
 _MAX_FILE = 20 * 1024 * 1024
@@ -33,6 +35,10 @@ class ConfirmSubmission(BaseModel):
     draft_id: str
     sha256: str
     confirmed: bool
+
+
+class ConfirmRequirements(BaseModel):
+    confirmed: bool = False
 
 
 def _page_id(value: str) -> str:
@@ -130,7 +136,127 @@ def _save_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def add_assignment_routes(app: FastAPI, manager) -> None:
+def _account(settings):
+    username = str(getattr(settings, 'pku_username', '') or '').strip()
+    return hashlib.sha256(username.encode('utf-8')).hexdigest() if username else ''
+
+
+def _assert_account(metadata, settings):
+    if not metadata.get('portal_account_sha256') or metadata['portal_account_sha256'] != _account(settings):
+        raise PreparationError('教学网账号已变化或旧草稿未绑定账号，请重新准备并预览。')
+
+
+def _requirements(assignment):
+    fields = {key: assignment.get(key, '') for key in
+              ('content_id', 'source_id', 'title', 'source', 'instructions', 'due_at',
+               'files', 'source_links')}
+    return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def verified_draft_download(settings, draft_id, *, expected_sha256=None, course_id=None, content_id=None):
+    root = Path(settings.data_dir)
+    folder = _draft_dir(root, draft_id).resolve()
+    if not folder.is_relative_to((root / 'submission-drafts').resolve()):
+        raise PreparationError('草稿位置已变化，请重新准备并预览。')
+    metadata = json.loads((folder / 'draft.json').read_text('utf-8'))
+    if not isinstance(metadata, dict):
+        raise PreparationError('草稿记录无效，请重新准备并预览。')
+    _assert_account(metadata, settings)
+    if metadata.get('draft_id') != draft_id:
+        raise PreparationError('草稿身份与预览不一致，请重新准备。')
+    if ((course_id is not None and metadata.get('course_id') != course_id)
+            or (content_id is not None and metadata.get('content_id') != content_id)):
+        raise PreparationError('草稿目标与当前作业不一致，请重新准备并预览。')
+    recorded = metadata.get('sha256')
+    if not isinstance(recorded, str) or not re.fullmatch('[0-9a-f]{64}', recorded):
+        raise PreparationError('草稿完整性记录无效，请重新准备并预览。')
+    if expected_sha256 is not None and expected_sha256 != recorded:
+        raise PreparationError('草稿记录与预览时不同，请重新准备。')
+    name = metadata.get('archive_name')
+    if not isinstance(name, str) or Path(name).name != name:
+        raise PreparationError('草稿文件名或位置已变化，请重新准备并预览。')
+    archive = (folder / name).resolve()
+    if not archive.is_relative_to(folder):
+        raise PreparationError('草稿文件位置已变化，请重新准备并预览。')
+    # Serve the exact immutable bytes we hashed, never a later FileResponse
+    # path read that could race a changed file after this validation.
+    with archive.open('rb') as handle:
+        payload = handle.read(_MAX_TOTAL + 1024 * 1024 + 1)
+    if len(payload) > _MAX_TOTAL + 1024 * 1024 or hashlib.sha256(payload).hexdigest() != recorded:
+        raise PreparationError('草稿文件与预览时不同，请重新准备并核对。')
+    if metadata.get('state') == 'prepared':
+        assignment = _assignment(root, metadata['course_id'], metadata['content_id'])
+        if metadata.get('requirements_sha256') != _requirements(assignment):
+            raise PreparationError('正式作业要求或截止时间已变化，请重新准备并预览。')
+    elif metadata.get('state') not in {'verification_pending', 'receipt_verified', 'submitted'}:
+        raise PreparationError('草稿状态尚未核验，请重新准备并预览。')
+    return metadata, archive, payload
+
+
+def _verified_saved_receipt(metadata):
+    receipt = metadata.get('receipt')
+    if not isinstance(receipt, dict) or metadata.get('state') != 'submitted':
+        return False
+    html = receipt.get('review_history_html')
+    return (receipt.get('portal_verified') is True
+            and receipt.get('course_id') == metadata.get('course_id')
+            and receipt.get('content_id') == metadata.get('content_id')
+            and bool(receipt.get('verified_at')) and isinstance(html, str) and bool(html)
+            and hashlib.sha256(html.encode('utf-8')).hexdigest() == receipt.get('review_history_sha256'))
+
+
+@contextmanager
+def _submission_lock(root, course_id, content_id, owner):
+    folder = root / '.submission-locks'
+    folder.mkdir(exist_ok=True)
+    key = hashlib.sha256(json.dumps([owner, course_id, content_id]).encode('utf-8')).hexdigest()
+    conn = sqlite3.connect(folder / (key + '.sqlite3'), timeout=0)
+    try:
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=409, detail='该草稿正在提交，请等待并核对回执，勿重复发送。') from exc
+        yield
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def add_assignment_routes(app: FastAPI, manager, *, fence_factory=None) -> None:
+    if fence_factory is None:
+        from .submission_permit import SubmissionPermit
+        fence_factory = SubmissionPermit
+    @app.post('/api/campus/courses/{course_id}/assignments/{content_id}/requirements')
+    def identify_requirements(course_id: str, content_id: str, body: ConfirmRequirements):
+        from .assignment_requirements import analyze
+        from ..platform import PlatformError
+        try:
+            return analyze(manager.settings, course_id, content_id, confirmed=body.confirmed)
+        except PreparationError as exc:
+            raise HTTPException(409, detail=str(exc)) from exc
+        except PlatformError as exc:
+            raise HTTPException(getattr(exc, 'status_code', 503), detail=str(exc)) from exc
+    @app.get('/api/campus/courses/{course_id}/assignments/{content_id}/status')
+    def official_status(course_id: str, content_id: str):
+        try:
+            _assignment(Path(manager.settings.data_dir), course_id, content_id)
+            account = _account(manager.settings)
+            username, password = manager.settings.pku_username, manager.settings.pku_password
+            if not account or not password:
+                raise PreparationError('请先保存教学网账号，再读取正式作业提交状态。')
+            client = get_session(username=username, password=password)
+            try:
+                result = inspect_submission(client, course_id, content_id)
+            finally:
+                client.close()
+            if _account(manager.settings) != account:
+                raise PreparationError('读取期间教学网账号已变化，请在当前账号重新核对。')
+            return result
+        except PreparationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail='教学网提交状态未确认，请到教学网查看原页面；本地回执不会代替当前状态。') from exc
+
     @app.get("/api/campus/courses/{course_id}/assignments/{content_id}/source")
     def assignment_source(course_id: str, content_id: str):
         from urllib.parse import quote
@@ -150,6 +276,9 @@ def add_assignment_routes(app: FastAPI, manager) -> None:
                       attachments: list[UploadFile] = File(default=[])) -> dict:
         root = Path(manager.settings.data_dir)
         try:
+            account = _account(manager.settings)
+            if not account:
+                raise PreparationError('请先保存教学网账号，再准备正式作业草稿。')
             assignment = _assignment(root, course_id, content_id)
             archive_name = archive_name.strip()
             if submission_mode not in {"zip", "single_file"}:
@@ -233,7 +362,10 @@ def add_assignment_routes(app: FastAPI, manager) -> None:
                                             for name, data in files.items()],
                 "notion_title": notion_title, "warnings": warnings,
                 "state": "prepared",
+                'portal_account_sha256': account,
+                'requirements_sha256': _requirements(assignment),
             }
+            _assert_account(metadata, manager.settings)
             _save_json(folder / "draft.json", metadata)
             return {**metadata, "download_url": f"/api/campus/submission-drafts/{draft_id}/file"}
         except PreparationError as exc:
@@ -251,16 +383,98 @@ def add_assignment_routes(app: FastAPI, manager) -> None:
                 await upload.close()
 
     @app.get("/api/campus/submission-drafts/{draft_id}/file")
-    def download_draft(draft_id: str):
+    def download_draft(draft_id: str, sha256: str | None = None):
+        try:
+            metadata, archive, payload = verified_draft_download(manager.settings, draft_id, expected_sha256=sha256)
+            response = FileResponse(archive, filename=metadata['archive_name'])
+            headers = dict(response.headers)
+            headers.pop('accept-ranges', None)
+            return Response(payload, media_type=response.media_type, headers=headers)
+        except PreparationError as exc:
+            status = 403 if '账号' in str(exc) else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=404, detail="找不到这份本地提交草稿。") from exc
+
+    @app.get('/api/campus/submission-drafts/{draft_id}/check')
+    def check_draft(draft_id: str, sha256: str, course_id: str, content_id: str):
+        try:
+            metadata, _, _ = verified_draft_download(manager.settings, draft_id,
+                expected_sha256=sha256, course_id=course_id, content_id=content_id)
+            return {'valid': True, 'draft_id': draft_id, 'sha256': metadata['sha256']}
+        except PreparationError as exc:
+            status = 403 if '账号' in str(exc) else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=404, detail='草稿无法读取，请重新准备并预览。') from exc
+
+    @app.get('/api/campus/submission-drafts/{draft_id}/receipt')
+    def saved_receipt(draft_id: str):
         try:
             folder = _draft_dir(Path(manager.settings.data_dir), draft_id)
-            metadata = json.loads((folder / "draft.json").read_text("utf-8"))
-            archive = folder / metadata["archive_name"]
-            if not archive.is_file():
-                raise PreparationError("草稿文件不存在。")
-            return FileResponse(archive, filename=metadata["archive_name"])
-        except (PreparationError, OSError, ValueError, KeyError) as exc:
-            raise HTTPException(status_code=404, detail="找不到这份本地提交草稿。") from exc
+            metadata = json.loads((folder / 'draft.json').read_text('utf-8'))
+            _assert_account(metadata, manager.settings)
+            if not _verified_saved_receipt(metadata):
+                raise HTTPException(status_code=409, detail='尚无完整教学网回执，请到教学网核对提交历史。')
+            return JSONResponse({'draft_id': draft_id, 'archive_name': metadata['archive_name'],
+                                 'sha256': metadata['sha256'], 'receipt': metadata['receipt']},
+                headers={'Content-Disposition': f'attachment; filename="receipt-{draft_id}.json"',
+                         'Cache-Control': 'no-store'})
+        except PreparationError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (OSError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=404, detail='回执记录不存在。') from exc
+
+    @app.get('/api/campus/courses/{course_id}/submission-receipts')
+    def receipt_history(course_id: str):
+        root = Path(manager.settings.data_dir)
+        owner = _account(manager.settings)
+        items, pending = [], []
+        if not owner:
+            return {'items': items, 'pending': pending}
+        for path in (root / 'submission-drafts').glob('*/draft.json'):
+            if not re.fullmatch(r'[0-9a-f]{32}', path.parent.name):
+                continue
+            try:
+                metadata = json.loads(path.read_text('utf-8'))
+                if metadata.get('portal_account_sha256') != owner or metadata.get('course_id') != course_id:
+                    continue
+                draft_id = path.parent.name
+                summary = {'draft_id': draft_id, 'content_id': metadata['content_id'],
+                    'assignment_title': metadata['assignment_title'], 'archive_name': metadata['archive_name'],
+                    'state': metadata.get('state'),
+                    'recovery_url': f'/api/campus/submission-drafts/{draft_id}/recover'}
+                verified = _verified_saved_receipt({**metadata, 'state': 'submitted'})
+                identity = metadata.get('submission_fence')
+                if verified and metadata.get('state') in ('submitted', 'receipt_verified'):
+                    items.append({**summary, 'verified_at': metadata['receipt']['verified_at'],
+                        'download_url': f'/api/campus/submission-drafts/{draft_id}/receipt' if metadata['state'] == 'submitted' else ''})
+                elif (metadata.get('state') == 'verification_pending' or
+                      (metadata.get('state') == 'prepared' and isinstance(identity, dict) and identity
+                       and identity.get('state') != 'aborted')):
+                    pending.append(summary)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return {'items': sorted(items, key=lambda row: row['verified_at'], reverse=True), 'pending': pending}
+
+    @app.post('/api/campus/submission-drafts/{draft_id}/recover')
+    def recover_submission(draft_id: str):
+        root = Path(manager.settings.data_dir)
+        try:
+            folder = _draft_dir(root, draft_id)
+            metadata = json.loads((folder / 'draft.json').read_text('utf-8'))
+            _assert_account(metadata, manager.settings)
+            with _submission_lock(root, metadata['course_id'], metadata['content_id'], _account(manager.settings)):
+                metadata = json.loads((folder / 'draft.json').read_text('utf-8'))
+                _assert_account(metadata, manager.settings)
+                result = fence_factory(manager.settings, metadata, {},
+                    lambda: _save_json(folder / 'draft.json', metadata)).reconcile()
+                _assert_account(metadata, manager.settings)
+                return result
+        except PreparationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=404, detail='原提交记录未能验证，已保留现有文件。') from exc
 
     @app.post("/api/campus/courses/{course_id}/assignments/{content_id}/submit")
     def submit(course_id: str, content_id: str, body: ConfirmSubmission) -> dict:
@@ -268,34 +482,118 @@ def add_assignment_routes(app: FastAPI, manager) -> None:
             raise HTTPException(status_code=400, detail="请先检查文件、目标和截止时间。")
         root = Path(manager.settings.data_dir)
         try:
-            assignment = _assignment(root, course_id, content_id)
             folder = _draft_dir(root, body.draft_id)
-            metadata = json.loads((folder / "draft.json").read_text("utf-8"))
-            if (metadata["course_id"] != course_id or metadata["content_id"] != content_id
-                    or metadata.get("state") != "prepared"):
-                raise PreparationError("草稿与这项作业不匹配，或已提交。")
-            archive = folder / metadata["archive_name"]
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            if digest != body.sha256 or digest != metadata["sha256"]:
-                raise PreparationError("待提交文件与预览时不同，请重新准备。")
-            if not manager.settings.pku_username or not manager.settings.pku_password:
-                raise PreparationError("请先保存教学网账号。")
-            client = get_session(username=manager.settings.pku_username,
-                                 password=manager.settings.pku_password)
-            try:
-                form = fetch_form(client, course_id, content_id, action="newAttempt")
-                receipt = submit_file(client, form, archive)
-            finally:
-                client.close()
-            metadata["state"] = "submitted"
-            metadata["receipt"] = receipt
-            metadata["assignment_title"] = assignment["title"]
-            _save_json(folder / "draft.json", metadata)
-            return {"state": "submitted", "receipt": receipt,
-                    "message": "教学网已接受提交请求；若回执为空，请到教学网核对提交历史。"}
+            if not folder.is_dir():
+                raise PreparationError('草稿不存在，请重新准备。')
+        except PreparationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _submit_locked(course_id, content_id, body)
+
+    def _submit_locked(course_id: str, content_id: str, body: ConfirmSubmission) -> dict:
+        root = Path(manager.settings.data_dir)
+        try:
+            return execute_submission(manager.settings, course_id, content_id, body, fence_factory=fence_factory)
         except AlreadySubmitted as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except HTTPException:
+            raise
         except (PreparationError, SubmitError, OSError, ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail="提交状态暂时无法确认，请先到教学网核对历史，避免重复提交。") from exc
+
+def execute_submission(settings, course_id, content_id, body, *, fence_factory=None):
+    if not body.confirmed:
+        raise PreparationError('请先检查文件、目标和截止时间。')
+    if fence_factory is None:
+        from .submission_permit import SubmissionPermit
+        fence_factory = SubmissionPermit
+    root = Path(settings.data_dir)
+    with _submission_lock(root, course_id, content_id, _account(settings)):
+        return _execute_submission_locked(settings, course_id, content_id, body, fence_factory)
+
+
+def _execute_submission_locked(settings, course_id, content_id, body, fence_factory):
+    root = Path(settings.data_dir)
+    assignment = _assignment(root, course_id, content_id)
+    folder = _draft_dir(root, body.draft_id)
+    metadata = json.loads((folder / "draft.json").read_text("utf-8"))
+    _assert_account(metadata, settings)
+    if metadata.get('state') == 'receipt_verified':
+        if (metadata['course_id'] != course_id or metadata['content_id'] != content_id
+                or metadata['sha256'] != body.sha256):
+            raise PreparationError('回执恢复与这份草稿不匹配。')
+        with fence_factory(settings, metadata, assignment,
+                           lambda: _save_json(folder / 'draft.json', metadata)) as fence:
+            if fence.recovered_receipt is None:
+                raise PreparationError('服务端尚未确认这次回执，禁止重复提交。')
+        metadata['state'] = 'submitted'
+        _save_json(folder / 'draft.json', metadata)
+        return _submission_result(metadata, body.draft_id)
+    for history in (root / 'submission-drafts').glob('*/draft.json'):
+        previous = json.loads(history.read_text('utf-8'))
+        if (previous.get('portal_account_sha256') == metadata['portal_account_sha256']
+                and previous.get('course_id') == course_id and previous.get('content_id') == content_id
+                and previous.get('state') == 'verification_pending'):
+            raise PreparationError('已有提交请求尚未确认，请先到教学网核对历史，禁止新建草稿重复发送。')
+    if metadata.get('requirements_sha256') != _requirements(assignment):
+        raise PreparationError('正式作业要求或截止时间已变化，请重新准备并预览。')
+    if (metadata["course_id"] != course_id or metadata["content_id"] != content_id
+            or metadata.get("state") != "prepared"):
+        raise PreparationError("草稿与这项作业不匹配，或已提交。")
+    archive = folder / metadata["archive_name"]
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if digest != body.sha256 or digest != metadata["sha256"]:
+        raise PreparationError("待提交文件与预览时不同，请重新准备。")
+    if not settings.pku_username or not settings.pku_password:
+        raise PreparationError("请先保存教学网账号。")
+    from ..catalog_snapshots import activate_account, assert_portal_readable
+    activate_account(settings)
+    assert_portal_readable(root, course_id)
+    with fence_factory(settings, metadata, assignment,
+                       lambda: _save_json(folder / 'draft.json', metadata)) as fence:
+        client = get_session(username=settings.pku_username,
+                             password=settings.pku_password)
+        try:
+            form = fetch_form(client, course_id, content_id,
+                              action=None if metadata.get('submission_mode') == 'text' else 'newAttempt')
+            _assert_account(metadata, settings)
+            if metadata['requirements_sha256'] != _requirements(_assignment(root, course_id, content_id)):
+                raise PreparationError('读取教学网期间作业要求发生变化，请重新预览。')
+            metadata["state"] = "verification_pending"
+            _save_json(folder / "draft.json", metadata)
+            def before_post():
+                fence.arm()
+                _assert_account(metadata, settings)
+                if metadata['requirements_sha256'] != _requirements(_assignment(root, course_id, content_id)):
+                    raise PreparationError('确认共享许可期间作业要求发生变化，未发送，请重新预览。')
+            try:
+                if metadata.get('submission_mode') == 'text':
+                    answer = archive.read_bytes().decode('utf-8')
+                    receipt = submit_text(client, form, answer, expected_sha256=metadata['sha256'], before_post=before_post)
+                else:
+                    receipt = submit_file(client, form, archive, expected_sha256=metadata['sha256'], before_post=before_post)
+            except SubmissionFileChanged:
+                metadata['state'] = 'prepared'
+                _save_json(folder / 'draft.json', metadata)
+                raise
+            if (not receipt.get("portal_verified") or receipt.get("course_id") != course_id
+                    or receipt.get("content_id") != content_id):
+                raise SubmitError("教学网提交历史未确认这项目标，请先核对历史。")
+            metadata.update(state='receipt_verified', receipt=receipt, assignment_title=assignment['title'])
+            _save_json(folder / 'draft.json', metadata)
+            fence.complete(receipt)
+        finally:
+            client.close()
+    metadata["state"] = "submitted"
+    metadata["receipt"] = receipt
+    metadata["assignment_title"] = assignment["title"]
+    _save_json(folder / "draft.json", metadata)
+    return _submission_result(metadata, body.draft_id)
+
+
+
+def _submission_result(metadata, draft_id):
+    return {'state': 'submitted', 'receipt': metadata['receipt'],
+            'receipt_download_url': f'/api/campus/submission-drafts/{draft_id}/receipt',
+            'message': '教学网提交历史已验证，正式回执已保存在本地。'}

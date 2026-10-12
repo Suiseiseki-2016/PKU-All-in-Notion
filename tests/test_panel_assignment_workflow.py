@@ -23,7 +23,17 @@ class NoopRunner:
     def last(self): return None
 
 
-def _client(tmp_path, monkeypatch):
+class FakeSubmissionPermit:
+    """Explicit injection for existing panel fixtures; no account HTTP calls."""
+    def __init__(self, settings, metadata, assignment, save):
+        self.recovered_receipt = metadata.get('receipt') if metadata.get('state') == 'receipt_verified' else None
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+    def arm(self): pass
+    def complete(self, receipt): pass
+
+
+def _client(tmp_path, monkeypatch, fence_factory=FakeSubmissionPermit):
     folder = tmp_path / "course"
     (folder / "recordings").mkdir(parents=True)
     (folder / "materials").mkdir()
@@ -60,7 +70,8 @@ def _client(tmp_path, monkeypatch):
     directory = build_fake_directory()
     app = create_app(settings=settings, runner=NoopRunner(), directory_service=directory,
                      connection_service=build_fake_connection_service(),
-                     platform_service=FakePlatformBridge(activated=True))
+                     platform_service=FakePlatformBridge(activated=True),
+                     submission_fence_factory=fence_factory)
     return TestClient(app)
 
 
@@ -90,8 +101,9 @@ def test_prepare_from_notion_and_submit_only_after_exact_confirmation(tmp_path, 
     monkeypatch.setattr(assignment_workflow, "get_session", lambda **kwargs: Campus())
     monkeypatch.setattr(assignment_workflow, "fetch_form", lambda *args, **kwargs: calls.append("form") or object())
     monkeypatch.setattr(assignment_workflow, "submit_file",
-                        lambda campus, form, archive: calls.append(archive.name) or
-                        {"destinationUrl": "/webapps/assignment/review"})
+                        lambda campus, form, archive, **kw: calls.append(archive.name) or
+                        {"destinationUrl": "/webapps/assignment/review", "portal_verified": True,
+                         "course_id": "_103987_1", "content_id": "_1714169_1"})
     request = {"draft_id": draft["draft_id"], "sha256": draft["sha256"], "confirmed": False}
     assert client.post(base + "/submit", json=request).status_code == 400
     assert calls == []
@@ -103,9 +115,264 @@ def test_prepare_from_notion_and_submit_only_after_exact_confirmation(tmp_path, 
     sent = client.post(base + "/submit", json=request)
     assert sent.status_code == 200
     assert sent.json()["state"] == "submitted"
+    persisted = json.loads((tmp_path / "submission-drafts" / draft["draft_id"] / "draft.json").read_text("utf-8"))
+    assert persisted["receipt"] == sent.json()["receipt"]
     assert calls == ["form", "学号姓名第1次作业.zip", "close"]
     assert client.post(base + "/submit", json=request).status_code == 400
     assert calls == ["form", "学号姓名第1次作业.zip", "close"]
+
+
+def _file_draft(client):
+    base = '/api/campus/courses/_103987_1/assignments/_1714169_1'
+    draft = client.post(base + '/prepare', data={'submission_mode': 'single_file'},
+                        files=[('attachments', ('answer.pdf', b'answer bytes', 'application/pdf'))]).json()
+    return base, draft, {'draft_id': draft['draft_id'], 'sha256': draft['sha256'], 'confirmed': True}
+
+
+def test_changed_preview_file_cannot_be_downloaded(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _, draft, _ = _file_draft(client)
+    path = tmp_path / 'submission-drafts' / draft['draft_id'] / draft['archive_name']
+    path.write_bytes(b'changed after preview')
+    response = client.get(draft['download_url'])
+    assert response.status_code == 409
+    assert '预览' in response.json()['detail']
+    assert path.read_bytes() == b'changed after preview'
+
+
+def test_changed_deadline_blocks_download_until_new_preview(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _, draft, _ = _file_draft(client)
+    index = tmp_path / 'course/assignments/index.json'
+    rows = json.loads(index.read_text('utf-8'))
+    rows[0]['due_at'] = '2026-10-12 20:00'
+    index.write_text(json.dumps(rows), 'utf-8')
+    response = client.get(draft['download_url'])
+    assert response.status_code == 409
+    assert '截止' in response.json()['detail']
+
+
+def test_download_preflight_checks_exact_preview_and_target(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _, draft, _ = _file_draft(client)
+    check = draft['download_url'].removesuffix('/file') + '/check'
+    params = {'sha256': draft['sha256'], 'course_id': '_103987_1', 'content_id': '_1714169_1'}
+    verified = client.get(check, params=params)
+    assert verified.status_code == 200
+    assert verified.json() == {'valid': True, 'draft_id': draft['draft_id'], 'sha256': draft['sha256']}
+    for field, wrong in [('sha256', '0' * 64), ('course_id', '_999_1'), ('content_id', '_999_1')]:
+        assert client.get(check, params={**params, field: wrong}).status_code == 409
+    assert client.get(draft['download_url'], params={'sha256': '0' * 64}).status_code == 409
+
+
+def test_download_returns_the_bytes_verified_before_later_disk_change(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _, draft, _ = _file_draft(client)
+    path = tmp_path / 'submission-drafts' / draft['draft_id'] / draft['archive_name']
+    original = path.read_bytes()
+    verify = assignment_workflow.verified_draft_download
+    def change_after_validation(*args, **kwargs):
+        result = verify(*args, **kwargs)
+        path.write_bytes(b'changed between verification and streaming')
+        return result
+    monkeypatch.setattr(assignment_workflow, 'verified_draft_download', change_after_validation)
+    response = client.get(draft['download_url'])
+    assert response.status_code == 200
+    assert response.content == original
+    assert hashlib.sha256(response.content).hexdigest() == draft['sha256']
+    assert path.read_bytes() != original
+
+
+def test_switching_portal_account_invalidates_prepared_submission(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, draft, request = _file_draft(client)
+    calls = []
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: calls.append('login'))
+    client.app.state.recording_manager.settings.pku_username = 'another-student'
+    response = client.post(base + '/submit', json=request)
+    assert response.status_code == 400 and '账号' in response.json()['detail']
+    assert calls == []
+    assert client.get(draft['download_url']).status_code == 403
+
+
+def test_changed_official_requirements_require_new_preview(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, _, request = _file_draft(client)
+    index = tmp_path / 'course/assignments/index.json'
+    rows = json.loads(index.read_text('utf-8'))
+    rows[0]['instructions'] = '新增必须提交的文件'
+    index.write_text(json.dumps(rows), 'utf-8')
+    calls = []
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: calls.append('login'))
+    response = client.post(base + '/submit', json=request)
+    assert response.status_code == 400 and '要求' in response.json()['detail']
+    assert calls == []
+
+
+def test_simultaneous_requests_for_one_draft_can_post_only_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    client = _client(tmp_path, monkeypatch)
+    base, _, request = _file_draft(client)
+    entered, release = Event(), Event()
+    forms, posts = [], []
+    class Campus:
+        def close(self): pass
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    def form(*args, **kwargs):
+        forms.append('form')
+        if len(forms) == 1:
+            entered.set()
+            assert release.wait(5)
+        return object()
+    monkeypatch.setattr(assignment_workflow, 'fetch_form', form)
+    monkeypatch.setattr(assignment_workflow, 'submit_file', lambda *a, **kw: posts.append('POST') or {
+        'portal_verified': True, 'course_id': '_103987_1', 'content_id': '_1714169_1'})
+    with ThreadPoolExecutor(2) as pool:
+        pending = pool.submit(client.post, base + '/submit', json=request)
+        try:
+            assert entered.wait(3)
+            repeated = client.post(base + '/submit', json=request)
+            assert repeated.status_code == 409
+            assert posts == []
+        finally:
+            release.set()
+        assert pending.result(timeout=5).status_code == 200
+    assert forms == ['form'] and posts == ['POST']
+
+
+def test_new_draft_cannot_resend_an_unknown_submission(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, _, request = _file_draft(client)
+    class Campus:
+        def close(self): pass
+    posts = []
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    monkeypatch.setattr(assignment_workflow, 'fetch_form', lambda *a, **kw: object())
+    monkeypatch.setattr(assignment_workflow, 'submit_file', lambda *a, **kw: posts.append('POST') or {})
+    assert client.post(base + '/submit', json=request).status_code == 400
+    _, _, another = _file_draft(client)
+    response = client.post(base + '/submit', json=another)
+    assert response.status_code == 400 and '尚未确认' in response.json()['detail']
+    assert posts == ['POST']
+
+
+def test_verified_receipt_survives_page_reload_and_is_account_scoped(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, draft, request = _file_draft(client)
+    class Campus:
+        def close(self): pass
+    html = '<html>Submission History: answer.pdf</html>'
+    receipt = {'portal_verified': True, 'course_id': '_103987_1', 'content_id': '_1714169_1',
+               'verified_at': '2026-10-04T08:00:00Z', 'review_history_html': html,
+               'review_history_sha256': hashlib.sha256(html.encode()).hexdigest()}
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    monkeypatch.setattr(assignment_workflow, 'fetch_form', lambda *a, **kw: object())
+    monkeypatch.setattr(assignment_workflow, 'submit_file', lambda *a, **kw: receipt)
+    submitted = client.post(base + '/submit', json=request).json()
+    history = client.get('/api/campus/courses/_103987_1/submission-receipts').json()['items']
+    assert len(history) == 1 and history[0]['draft_id'] == draft['draft_id']
+    downloaded = client.get(submitted['receipt_download_url'])
+    assert downloaded.status_code == 200 and downloaded.json()['receipt'] == receipt
+    assert downloaded.headers['cache-control'] == 'no-store'
+    assert 'attachment' in downloaded.headers['content-disposition']
+    client.app.state.recording_manager.settings.pku_username = 'another-student'
+    assert client.get(submitted['receipt_download_url']).status_code == 403
+    assert client.get('/api/campus/courses/_103987_1/submission-receipts').json()['items'] == []
+    client.app.state.recording_manager.settings.pku_username = 'student'
+    metadata_path = tmp_path / 'submission-drafts' / draft['draft_id'] / 'draft.json'
+    metadata = json.loads(metadata_path.read_text('utf-8'))
+    metadata['receipt']['review_history_html'] = 'changed cached HTML'
+    metadata_path.write_text(json.dumps(metadata), 'utf-8')
+    assert client.get(submitted['receipt_download_url']).status_code == 409
+    assert client.get('/api/campus/courses/_103987_1/submission-receipts').json()['items'] == []
+
+
+def test_account_change_during_form_read_prevents_portal_post(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, _, request = _file_draft(client)
+    class Campus:
+        def close(self): pass
+    posts = []
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    def form(*a, **kw):
+        client.app.state.recording_manager.settings.pku_username = 'another-student'
+        return object()
+    monkeypatch.setattr(assignment_workflow, 'fetch_form', form)
+    monkeypatch.setattr(assignment_workflow, 'submit_file', lambda *a, **kw: posts.append('POST'))
+    assert client.post(base + '/submit', json=request).status_code == 400
+    assert posts == []
+
+
+def test_file_change_during_form_read_never_posts_or_leaves_unknown_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, draft, request = _file_draft(client)
+    class Campus:
+        def close(self): pass
+        def post(self, *args, **kwargs):
+            raise AssertionError('changed bytes must never reach teaching portal')
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    def form(*args, **kwargs):
+        (tmp_path / 'submission-drafts' / draft['draft_id'] / 'answer.pdf').write_bytes(b'changed during form read')
+        return object()
+    monkeypatch.setattr(assignment_workflow, 'fetch_form', form)
+    response = client.post(base + '/submit', json=request)
+    assert response.status_code == 400 and '未发送' in response.json()['detail']
+    metadata = json.loads((tmp_path / 'submission-drafts' / draft['draft_id'] / 'draft.json').read_text('utf-8'))
+    assert metadata['state'] == 'prepared'
+
+
+def test_official_status_is_live_read_only_and_does_not_resolve_pending_draft(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    client = _client(tmp_path, monkeypatch)
+    base, draft, _ = _file_draft(client)
+    metadata_path = tmp_path / 'submission-drafts' / draft['draft_id'] / 'draft.json'
+    metadata = json.loads(metadata_path.read_text('utf-8'))
+    metadata['state'] = 'verification_pending'
+    metadata_path.write_text(json.dumps(metadata), 'utf-8')
+    before = metadata_path.read_bytes()
+    calls = []
+    class Campus:
+        def get(self, path, params):
+            calls.append('GET')
+            return SimpleNamespace(status_code=200, text='<h1>Review Submission History</h1>',
+                url='https://course.pku.edu.cn' + path + '?course_id=_103987_1&content_id=_1714169_1')
+        def post(self, *a, **kw): raise AssertionError('status query must not submit')
+        def close(self): calls.append('close')
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: Campus())
+    response = client.get(base + '/status')
+    assert response.status_code == 200 and response.json()['state'] == 'review_history'
+    assert calls == ['GET', 'close'] and metadata_path.read_bytes() == before
+    assert client.get(base.replace('_1714169_1', '_999999_1') + '/status').status_code == 409
+    assert calls == ['GET', 'close']
+
+
+def test_status_read_failure_never_uses_local_receipt(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base, _, _ = _file_draft(client)
+    monkeypatch.setattr(assignment_workflow, 'get_session', lambda **kw: (_ for _ in ()).throw(OSError('offline')))
+    response = client.get(base + '/status')
+    assert response.status_code == 502 and '本地回执不会代替' in response.json()['detail']
+
+
+def test_unconfirmed_upload_keeps_draft_pending_and_cannot_resend(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    base = "/api/campus/courses/_103987_1/assignments/_1714169_1"
+    draft = client.post(base + "/prepare", data={"submission_mode": "single_file"},
+                        files=[("attachments", ("答案.pdf", b"answer", "application/pdf"))]).json()
+    calls = []
+    class Campus:
+        def close(self): pass
+    monkeypatch.setattr(assignment_workflow, "get_session", lambda **kwargs: Campus())
+    monkeypatch.setattr(assignment_workflow, "fetch_form", lambda *args, **kwargs: object())
+    monkeypatch.setattr(assignment_workflow, "submit_file", lambda *args, **kw: calls.append("POST") or {})
+    request = {"draft_id": draft["draft_id"], "sha256": draft["sha256"], "confirmed": True}
+    result = client.post(base + "/submit", json=request)
+    assert result.status_code == 400 and "提交历史" in result.json()["detail"]
+    metadata = json.loads((tmp_path / "submission-drafts" / draft["draft_id"] / "draft.json").read_text("utf-8"))
+    assert metadata["state"] == "verification_pending" and "receipt" not in metadata
+    assert client.post(base + "/submit", json=request).status_code == 400
+    assert calls == ["POST"]
 
 
 def test_zip_draft_warns_when_teacher_gives_rar_example(tmp_path, monkeypatch):
@@ -200,8 +467,9 @@ def test_single_file_draft_preserves_original_and_requires_exact_confirmation(tm
     monkeypatch.setattr(assignment_workflow, "get_session", lambda **kwargs: Campus())
     monkeypatch.setattr(assignment_workflow, "fetch_form", lambda *args, **kwargs: calls.append("form") or object())
     monkeypatch.setattr(assignment_workflow, "submit_file",
-                        lambda campus, form, file: calls.append((file.name, file.read_bytes())) or
-                        {"destinationUrl": "/webapps/assignment/review"})
+                        lambda campus, form, file, **kw: calls.append((file.name, file.read_bytes())) or
+                        {"destinationUrl": "/webapps/assignment/review", "portal_verified": True,
+                         "course_id": "_103987_1", "content_id": "_1714169_1"})
     request = {"draft_id": draft["draft_id"], "sha256": draft["sha256"], "confirmed": False}
     assert client.post(base + "/submit", json=request).status_code == 400
     request["confirmed"] = True

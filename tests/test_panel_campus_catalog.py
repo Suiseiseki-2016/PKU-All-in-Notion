@@ -6,12 +6,23 @@ from itertools import count
 from types import SimpleNamespace
 
 import pytest
+from contextlib import nullcontext
 
 from pku_sync.models import Recording
 from pku_sync.pipeline import collect_jobs
 from pku_sync.panel.campus_catalog import (campus_course, campus_courses,
                                            teacher_deadline_quote)
 from pku_sync.panel import notion_home
+
+
+@pytest.fixture(autouse=True)
+def verified_account_projection(monkeypatch):
+    # These existing tests exercise Notion layout with a fake client. The
+    # account-service gate is independently covered by test_account_catalog.
+    def authority(*args, tracked_mutations=False):
+        assert tracked_mutations is True
+        return nullcontext()
+    monkeypatch.setattr(notion_home, "_catalog_authority", authority)
 
 
 def test_teacher_written_lab_deadline_is_a_clue_not_a_system_timestamp():
@@ -169,6 +180,42 @@ def test_campus_catalog_marks_complete_local_results_ready_to_publish(tmp_path):
     lesson = campus_course(tmp_path, "campus-1")["lessons"][0]
     assert lesson["publish_ready"] is True
     assert lesson["video_available"] is False
+
+
+def test_campus_sections_distinguish_unread_empty_and_failed_cached(tmp_path):
+    folder = _campus(tmp_path)
+    detail = campus_course(tmp_path, 'campus-1')
+    assert detail['section_states']['recordings']['state'] == 'available'
+    assert detail['section_states']['announcements']['state'] == 'not_synced'
+    assert detail['section_states']['assignments']['state'] == 'not_synced'
+    (folder / 'announcements').mkdir()
+    (folder / 'announcements/index.json').write_text('[]', 'utf8')
+    metadata = json.loads((folder / 'course.json').read_text('utf8'))
+    metadata['announcements_status'] = 'available'
+    (folder / 'course.json').write_text(json.dumps(metadata), 'utf8')
+    assert campus_course(tmp_path, 'campus-1')['section_states']['announcements']['state'] == 'empty'
+    (folder / 'announcements/index.json').write_text('[{"title":"保留通知"}]', 'utf8')
+    metadata['announcements_status'] = 'error'
+    (folder / 'course.json').write_text(json.dumps(metadata), 'utf8')
+    state = campus_course(tmp_path, 'campus-1')['section_states']['announcements']
+    assert state['state'] == 'cached'
+    assert '失败' in state['message'] and state['count'] == 1
+
+
+def test_recordings_failed_current_account_read_never_labels_cached_index_fresh(tmp_path):
+    from pku_sync.catalog_snapshots import cache_path
+    _campus(tmp_path)
+    (tmp_path / 'portal-read-status.json').write_text(json.dumps({
+        'complete':False, 'reason':'partial',
+        'account_namespace':cache_path(tmp_path, 'campus-1').parent.name,
+        'courses':{'campus-1':{'complete':False,'reason':'recordings_unavailable'}},
+    }), 'utf8')
+    course = campus_course(tmp_path, 'campus-1')
+    assert course['read_only'] is True
+    assert len(course['lessons']) == 1
+    assert course['section_states']['recordings']['state'] == 'cached'
+    assert '失败' in course['section_states']['recordings']['message']
+    assert '已读取' not in course['section_states']['recordings']['message']
 
 
 def test_notion_dashboard_exposes_source_age_after_the_page_becomes_stale(tmp_path):

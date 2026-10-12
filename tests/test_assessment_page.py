@@ -6,6 +6,7 @@ page rather than being rewritten into the note.
 """
 
 import pytest
+from copy import deepcopy
 
 from pku_sync.notion import markdown_to_blocks
 from pku_sync.panel import assessment_page, notion_home
@@ -29,17 +30,33 @@ class FakeNotion:
         page = {"id": f"page-{self._next}", "title": title}
         self.pages.setdefault(parent_id, []).append(page)
         self.created.append((parent_id, title))
+        if children:
+            self.append_blocks(page['id'], children, retry=retry)
         return page
 
     def list_children(self, page_id):
-        return self.blocks.get(page_id, [])
+        return deepcopy(self.blocks.get(page_id, []))
 
     def replace_page_content(self, page_id, blocks):
         self.replaced.append(page_id)
         self.blocks[page_id] = blocks
 
-    def append_blocks(self, page_id, blocks, retry=True):
-        self.blocks.setdefault(page_id, []).extend(blocks)
+    def append_blocks(self, page_id, blocks, retry=True, after=None):
+        rows = self.blocks.setdefault(page_id, [])
+        added = []
+        for block in blocks:
+            self._next += 1
+            added.append({**deepcopy(block), "id": f"block-{self._next}"})
+        index = next((i + 1 for i, row in enumerate(rows) if row["id"] == after), len(rows))
+        rows[index:index] = added
+        return deepcopy(added)
+
+    def archive_block(self, block_id, **kwargs):
+        for rows in self.blocks.values():
+            for i, row in enumerate(rows):
+                if row["id"] == block_id:
+                    return rows.pop(i)
+        raise AssertionError(block_id)
 
 
 def _course() -> dict:

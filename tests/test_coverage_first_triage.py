@@ -11,126 +11,93 @@ from pku_sync.claim_audit import chapter_assertions
 from pku_sync.note_quality import note_factual_conflicts, strip_conflicting_paragraphs
 
 
-def _answer(system, user):
-    batch = json.loads(user)["claims"]
-    return json.dumps({"schema_version": 1, "verdicts": [
-        {"id": row["id"], "status": "supported", "reason": "课堂原话",
-         "evidence": [{"id": "B0001", "quote": "明文是加密前的信息"}]}
-        for row in batch
-    ]}, ensure_ascii=False)
+def _model_envelope(note, *, complete=True, uncertainties=None):
+    return json.dumps({"note": note, "complete": complete,
+                       "uncertainties": uncertainties or []}, ensure_ascii=False)
 
 
-def test_audit_uncertain_claim_keeps_sentence_with_pending_flag(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 12,
-                                 "text": "老师说明明文是加密前的信息。"}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize", lambda *a, **k: "明文是加密前的信息。")
-
-    def uncertain(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        parsed["verdicts"][0].update(status="uncertain", evidence=[], reason="转写含混")
-        return json.dumps(parsed, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", uncertain)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    # A plain sentence the audit could not settle stays as written: the note
-    # does not mark its own ordinary prose, and nothing is quarantined.
-    assert "明文是加密前的信息" in note
-    assert "待核对（未能完全核实）" not in note
-    assert "（回看 " not in note
-
-
-def test_audit_uncertain_coursework_stays_with_relisten_marker(
-        tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 16,
-                                 "text": "老师要求下周三之前提交第一次作业。"}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: "下周三之前提交第一次作业。")
-
-    def uncertain(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        parsed["verdicts"][0].update(status="uncertain", evidence=[], reason="转写含混")
-        return json.dumps(parsed, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", uncertain)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    # Coursework the audit could not settle stays visible; the marker points
-    # at the recording instead of a verification section.
-    assert "提交第一次作业" in note
-    assert "（回看 " in note
-    assert "已移出正文" not in note
-    assert "待核对（未能完全核实）" not in note
-
-
-def test_audit_batch_system_failure_still_blocks_chapter(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 12,
-                                 "text": "老师说明明文是加密前的信息。"}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize", lambda *a, **k: "明文是加密前的信息。")
-    monkeypatch.setattr(media, "_recovery_llm",
-                        lambda *_args, **_kwargs: "这不是 JSON")
-    with pytest.raises(RuntimeError, match="逐条事实审计未完成"):
-        media.write_notes(transcript, [], target, settings, "课程")
-    assert not target.exists()
-
-
-def test_invented_quote_review_flags_claim_without_failing_chapter(
-        tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 12,
-                                 "text": "老师说明明文是加密前的信息。"}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize", lambda *a, **k: "明文是加密前的信息。")
-
-    def invented(_llm, _model, prompt, system, _settings):
+def _organized_candidate(tmp_path, monkeypatch, transcript, notes, *, organized=None,
+                         sources=None, replay_notices=None):
+    from pku_sync import note_editor, transcript_notes
+    cfg = SimpleNamespace(platform_token="offline", openai_api_key="",
+                          notes_model="offline", pku_username="test-account")
+    previous = tmp_path / "previous-notes.md"
+    original = b"student-original-notes\n"
+    previous.write_bytes(original)
+    output = organized if organized is not None else notes
+    if replay_notices:
+        output += "\n\n" + "\n".join(replay_notices)
+    calls = []
+    def ask(llm, model, prompt, system, settings):
         payload = json.loads(prompt)
-        if "snippets" in payload or "support_bundles" in payload:
-            return json.dumps({"schema_version": 1, "verdicts": [
-                {"id": "C001", "status": "supported", "reason": "杜撰",
-                 "evidence_ids": ["G000000000000000"]}]}, ensure_ascii=False)
-        return json.dumps({"schema_version": 1, "verdicts": [
-            {"id": "C001", "status": "supported", "reason": "杜撰",
-             "evidence": [{"id": "B0001", "quote": "杜撰的引文"}]}
-        ]}, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", invented)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    # The auditor's failure to quote must not cost the chapter its content.
-    assert "明文是加密前的信息" in note
-    assert "待核对（未能完全核实）" not in note
-
-
-def test_rac_ambiguity_keeps_chapter_with_relisten_notice(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=False)
-    transcript = {"segments": [{"start": 0, "end": 20,
-                                 "text": "这里介绍RAC算法和公钥。"}]}
+        calls.append(payload)
+        assert payload["transcript"] == transcript["segments"]
+        assert "courseware" not in payload and "draft" not in payload
+        assert system == transcript_notes.SYSTEM
+        return output
+    monkeypatch.setattr(media, "_recovery_llm", ask)
+    for name in ("_summarize", "_normalize_window_summary", "_ledger_sentence_guard",
+                 "_filter_unsupported_claims", "_repair_factual_conflicts"):
+        monkeypatch.setattr(media, name, lambda *a, **k: pytest.fail("retired prose rule called"))
+    with pytest.raises(RuntimeError, match="原文件保留"):
+        media.write_notes(transcript, [], previous, cfg, "课程")
+    assert calls == [] and previous.read_bytes() == original
     target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize", lambda *a, **k: "这里介绍RAC算法。")
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    # The spoken term stays as transcribed; the acronym becomes one compact
-    # re-listen note at the end of the chapter instead of blocking it.
-    assert "RAC算法" in note
-    assert "转写把公钥算法术语记为 RAC" in note
-    assert "请回听这段原音" in note
-    assert "待核对（未能完全核实）" not in note
+    assert media.write_notes(transcript, [], target, cfg, "课程", source_context=sources) == target
+    assert len(calls) == 1 and previous.read_bytes() == original
+    assert target.read_text("utf-8") == "# 课程\n\n" + output + "\n"
+    assert note_editor.review_record_issues(target, transcript, sources or []) == []
+    report = json.loads(note_editor.report_path(target).read_text("utf-8"))
+    assert report["content_complete"] is None and report["uncertainties"] == []
+    assert report["sources_sha256"] == note_editor.fingerprint(sources or [])
+    return target.read_text("utf-8"), report
+
+
+def test_contextual_uncertain_claim_remains_visible_without_local_wording_verdict(tmp_path, monkeypatch):
+    statement = "明文是加密前的信息，老师的补充条件需回看。"
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 12, "text": "老师说明明文是加密前的信息。"}]},
+        statement, replay_notices=["补充条件在转写中含混。"])
+    assert statement in body and "补充条件在转写中含混。" in body
+
+
+def test_contextual_uncertain_coursework_is_disclosed_without_required_timestamp_format(tmp_path, monkeypatch):
+    statement = "老师要求提交第一次作业，具体截止日期需要回看。"
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 16, "text": "老师要求下周三之前提交第一次作业。"}]},
+        "提交第一次作业。", organized=statement,
+        replay_notices=["下周三指哪一天尚需确认。"])
+    assert statement in body and "下周三指哪一天尚需确认。" in body
+
+
+def test_plain_prose_preserves_response_without_json_recovery_or_rebilling(tmp_path, monkeypatch):
+    from pku_sync import note_editor, transcript_notes
+    cfg = SimpleNamespace(platform_token="offline", openai_api_key="", notes_model="offline")
+    calls = []
+    raw = "这不是 JSON"
+    monkeypatch.setattr(media, "_recovery_llm", lambda *a: calls.append(1) or raw)
+    target = tmp_path / "notes.md"
+    transcript = {"segments": [{"start": 0, "end": 12, "text": "课堂原文"}]}
+    for _ in range(2):
+        media.write_notes(transcript, [], target, cfg, "课程")
+    assert calls == [1] and target.read_text("utf-8") == "# 课程\n\n" + raw + "\n"
+    saved = list((tmp_path / ".notes-parts" / transcript_notes.POLICY).glob("*.json"))
+    assert len(saved) == 1 and json.loads(saved[0].read_text("utf-8"))["response"] == raw
+    assert note_editor.review_record_issues(target, transcript) == []
+
+
+def test_organizer_preserves_provider_text_without_invented_quote(tmp_path, monkeypatch):
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 12, "text": "老师说明明文是加密前的信息。"}]},
+        "老师说‘密钥保密就一定安全’。", organized="老师说明明文是加密前的信息。")
+    assert "明文是加密前的信息" in body and "密钥保密就一定安全" not in body
+
+
+def test_contextual_rac_ambiguity_does_not_trigger_keyword_rejection(tmp_path, monkeypatch):
+    body, report = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 20, "text": "这里介绍RAC算法和公钥。"}]},
+        "这里介绍RAC算法。", replay_notices=["RAC 是否识别正确，需回看原音。"])
+    assert "RAC算法" in body and report["content_complete"] is None
 
 
 def test_annotate_audited_sentences_keeps_headings_bold_and_citations():
@@ -203,34 +170,14 @@ def test_strip_conflicting_paragraphs_removes_only_the_conflict():
     assert note_factual_conflicts(cleaned, sources) == []
 
 
-def test_unrepairable_hard_conflict_moves_out_of_body(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=False)
-    source = {"title": "ch02-古典密码.pdf", "locator": "第 5 页",
-              "status": "readable",
+def test_organizer_preserves_classification_response_and_separate_reference(tmp_path, monkeypatch):
+    source = {"title": "ch02-古典密码.pdf", "locator": "第 5 页", "status": "readable",
               "text": "密码学分为密码编码学和密码分析学两个分支。"}
-    transcript = {"segments": [{"start": 0, "end": 40,
-                                "text": "今天开始讲古典密码的基本概念。"}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: ("古典密码是本课的起点。\n\n"
-                                         "对称加密体制包含编码和分析两个研究方向。\n\n"
-                                         "明文是加密前的信息。"))
-    # The repair model fails to fix the classification error, which used to
-    # cost the whole chapter.
-    monkeypatch.setattr(media, "_repair_factual_conflicts",
-                        lambda *a, **k: a[3])
-    assert media.write_notes(transcript, [], target, settings, "课程",
-                             source_context=[source]) == target
-    note = target.read_text("utf-8")
-    # The conflicting paragraph leaves the body; one compact line tells the
-    # reader where the recording covers it.
-    assert "正文已按课件更正，原话可回看" in note
-    assert "把密码学的编码与分析两分支误归到对称密码" in note
-    assert "对称加密体制" not in note
-    assert "明文是加密前的信息" in note
-    assert "待核对（未能完全核实）" not in note
+    corrected = "密码学包括密码编码学和密码分析学两个分支。"
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 40, "text": "今天开始讲古典密码的基本概念。"}]},
+        "对称加密体制包含编码和分析两个研究方向。", organized=corrected, sources=[source])
+    assert corrected in body and "对称加密体制包含" not in body
 
 
 def test_rewrite_guard_falls_back_to_verified_original(tmp_path, monkeypatch):
@@ -379,32 +326,15 @@ def test_spoken_term_review_defers_to_visible_pointer(tmp_path, monkeypatch):
     assert json.loads(cache.read_text("utf-8"))["audio_review_deferred"] == 1
 
 
-def test_recovery_gap_becomes_one_compact_chapter_note(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=False)
+def test_disclosed_recovery_gap_preserves_readable_note_without_complete_certification(tmp_path, monkeypatch):
     speech = "".join(_SPOKEN_FACTS) * 10
-    transcript = {"segments": [{"start": 0.0, "end": 400.0, "text": speech}]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: "凯撒密码是移位密码。")
-
-    def fake_recover(*_args, **kwargs):
-        kwargs["recovery_gaps"].append({
-            "start": 240.0, "text": "主题 G02 的课堂原话。",
-            "label": "主题 G02 未能整理出可核验的笔记句子"})
-        kwargs["cache_path"].write_text(
-            json.dumps({"schema_version": media._RECOVERY_LEDGER_SCHEMA}),
-            "utf-8")
-        return "凯撒密码把字母按固定位数平移，课堂用字母表核对加密与解密结果。" * 10
-
-    monkeypatch.setattr(media, "_recover_chapter_with_ledger", fake_recover)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    # One line at the end of the chapter, not a verification section.
-    assert "待核对（未能完全核实）" not in note
-    assert "> 04:00 起的一段讲述未完整还原，建议回听该段" in note
-    assert "凯撒密码把字母按固定位数平移" in note
+    body, report = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0.0, "end": 400.0, "text": speech}]},
+        "凯撒密码把字母按固定位数平移，课堂用字母表核对加密与解密结果。",
+        replay_notices=["后半段例题尚未完整还原，请回看原录像。"])
+    assert "凯撒密码把字母按固定位数平移" in body
+    assert "后半段例题尚未完整还原" in body
+    assert report["status"] == "organized" and report["content_complete"] is None
 
 
 def test_recovery_group_pointers_without_blocks_name_the_topic():
@@ -786,16 +716,18 @@ def test_body_title_line_beats_the_draft_fallback_title():
     assert normalized.count("扩展欧几里得算法与逆元计算") == 1
 
 
-def test_emptied_provenance_tag_and_slide_bullets_are_tidied():
+def test_source_time_citations_and_slide_bullets_are_preserved():
     summary = ("维吉尼亚密码演示\n"
                "\n"
                "推测密钥长度 $d=6$（转写：97:00-99:00）。\n"
                "*   **单表加密**：频率分布与原文一致（课件：ch02.pdf，第 124 页）。\n"
                "* 均匀分布：IC 为 1/26。\n")
     normalized = media._normalize_window_summary(summary)
-    # The generated range is removed by design; an empty tag must not remain.
-    assert "（转写：" not in normalized and "转写：" not in normalized
-    assert "推测密钥长度 $d=6$。" in normalized
+    # A source locator must survive normalization for later evidence checks;
+    # deleting it would conceal an invalid or missing source instead of fixing it.
+    assert normalized.count("（转写：97:00-99:00）") == 1
+    assert "推测密钥长度 $d=6$（转写：97:00-99:00）。" in normalized
+    assert "（转写：）" not in normalized
     # One bullet marker, matching the rest of the note.
     assert normalized.count("- **单表加密**") == 1
     assert normalized.count("- 均匀分布") == 1
@@ -805,32 +737,20 @@ def test_emptied_provenance_tag_and_slide_bullets_are_tidied():
     assert "（转写：41:52）" in kept
 
 
-def test_note_keeps_chapter_heading_when_audit_calls_title_unverified(
-        tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 12,
-                                 "text": "老师说明明文是加密前的信息。"}]}
-    target = tmp_path / "notes.md"
+def test_contextual_title_is_not_treated_as_an_unsupported_fact(tmp_path, monkeypatch):
     title = "古典密码与现代密码的演变及攻击模型"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: f"{title}\n\n明文是加密前的信息。")
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 12, "text": "老师说明明文是加密前的信息。"}]},
+        f"### {title}\n\n明文是加密前的信息。")
+    assert f"### {title}" in body and "明文是加密前的信息。" in body
 
-    def title_unsupported(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        parsed["verdicts"][0].update(status="unsupported", evidence=[],
-                                     reason="标题不是可在课堂印证的断言")
-        return json.dumps(parsed, ensure_ascii=False)
 
-    monkeypatch.setattr(media, "_recovery_llm", title_unsupported)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    assert f"### {title}" in note
-    assert "明文是加密前的信息。" in note
-    # The title is structure, so it is never marked for re-listening.
-    assert [line for line in note.splitlines()
-            if line.startswith("> ") and title in line] == []
+@pytest.mark.parametrize("leading", ["古典密码与现代密码的演变及攻击模型", "明文是加密后的信息"])
+def test_organizer_does_not_remove_body_or_heading_by_keyword(tmp_path, monkeypatch, leading):
+    body, _ = _organized_candidate(tmp_path, monkeypatch, {"segments": [
+        {"start": 0, "end": 12, "text": "明文是加密前的信息。"}]},
+        leading + "\n\n明文是加密后的信息。", organized="明文是加密前的信息。")
+    assert "明文是加密前的信息。" in body and "明文是加密后的信息。" not in body
 
 
 def test_only_verifiable_sentences_earn_a_relisten_marker():
@@ -886,30 +806,11 @@ def test_relisten_marker_is_skipped_for_slides_and_fragments():
         "这种加密方式称为代替密码。（回看 12:00）", window) == ""
 
 
-def test_unsettled_narration_stays_unmarked_while_a_definition_is_marked(
-        tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [
+def test_organizer_preserves_replay_notice_for_narration_and_definitions(tmp_path, monkeypatch):
+    draft = "此类算法历史久远，如凯撒密码。这种加密方式称为代替密码。"
+    body, report = _organized_candidate(tmp_path, monkeypatch, {"segments": [
         {"start": 0, "end": 12, "text": "此类算法历史久远，如凯撒密码。"},
-        {"start": 40, "end": 52, "text": "这种加密方式称为代替密码。"},
-    ]}
-    target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: "此类算法历史久远，如凯撒密码。"
-                                        "这种加密方式称为代替密码。")
+        {"start": 40, "end": 52, "text": "这种加密方式称为代替密码。"}]},
+        draft, replay_notices=["代替密码的定义条件需要回看核对。"])
+    assert draft in body and "代替密码的定义条件需要回看核对。" in body and report["uncertainties"] == []
 
-    def uncertain(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        for verdict in parsed["verdicts"]:
-            verdict.update(status="uncertain", evidence=[], reason="转写含混")
-        return json.dumps(parsed, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", uncertain)
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    narration = [line for line in note.splitlines() if "此类算法历史久远" in line]
-    definition = [line for line in note.splitlines() if "称为代替密码" in line]
-    assert narration and "（回看 " not in narration[0]
-    assert definition and "（回看 " in definition[0]

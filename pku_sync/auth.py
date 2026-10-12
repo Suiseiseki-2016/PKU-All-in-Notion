@@ -13,6 +13,7 @@ verification is disabled for these hosts.
 from __future__ import annotations
 
 import base64
+import logging
 import time
 
 import httpx
@@ -21,7 +22,8 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from .config import settings
-from .network import campus_identity_proxy
+from . import network
+from .network import campus_identity_proxy, campus_identity_fallback_proxy
 
 IAAA_BASE = "https://iaaa.pku.edu.cn"
 BB_BASE = "https://course.pku.edu.cn"
@@ -42,28 +44,36 @@ USER_AGENT = (
 )
 
 
+class CampusLoginRejected(RuntimeError):
+    """IAAA refused the supplied credentials; never include its private response."""
+
+
 def _encrypt_password(password: str, public_key_pem: str) -> str:
     key = load_pem_public_key(public_key_pem.encode())
     assert isinstance(key, RSAPublicKey)
     return base64.b64encode(key.encrypt(password.encode("utf-8"), padding.PKCS1v15())).decode()
 
 
-def new_client(*, force_direct: bool = False) -> httpx.Client:
+def new_client(*, force_direct: bool = False, identity_proxy: str | None = None) -> httpx.Client:
     """An httpx client tuned for the campus network.
 
     course.pku.edu.cn aborts a TLS handshake every so often, roughly once in
     several attempts and more often from off-campus hosts. Retrying inside the
     transport means any request in a long sync recovers, not just the login.
     """
-    proxy = None if force_direct else campus_identity_proxy()
+    proxy = None if force_direct else (identity_proxy or campus_identity_proxy())
     mounts = ({IAAA_BASE: httpx.HTTPTransport(proxy=proxy, retries=1, verify=False)}
-              if proxy else None)
+              if proxy else {})
+    media_proxy = None if force_direct else network.campus_media_proxy()
+    if media_proxy:
+        for host in (RESOURCE_BASE, "https://yjapise.pku.edu.cn"):
+            mounts[host] = httpx.HTTPTransport(proxy=media_proxy, retries=1, verify=False)
     return httpx.Client(
         base_url=BB_BASE,
         follow_redirects=True,
         timeout=httpx.Timeout(20.0, connect=6.0),
         transport=httpx.HTTPTransport(retries=1, verify=False),
-        mounts=mounts,
+        mounts=mounts or None,
         headers={"User-Agent": USER_AGENT},
     )
 
@@ -81,18 +91,29 @@ def get_session(
     retrying cannot help.
     """
     last_error: httpx.TransportError | None = None
+    fallback = campus_identity_fallback_proxy() if campus_identity_proxy() is None else None
     for attempt in range(attempts):
         try:
             return _login(username, password)
         except httpx.TransportError as exc:
             last_error = exc
-            time.sleep(2 * (attempt + 1))
+            if fallback:
+                logging.getLogger(__name__).warning(
+                    "campus_identity_route=windows-local-proxy host=iaaa.pku.edu.cn reason=%s",
+                    type(exc).__name__)
+                try:
+                    return _login(username, password, identity_proxy=fallback)
+                except httpx.TransportError as fallback_error:
+                    last_error = fallback_error
+                fallback = None
+            if attempt + 1 < attempts:
+                time.sleep(2 * (attempt + 1))
     if campus_identity_proxy() is not None:
         try:
             return _login(username, password, force_direct=True)
         except httpx.TransportError as exc:
             last_error = exc
-    raise RuntimeError(f"IAAA login failed after {attempts} attempts: {last_error}")
+    raise RuntimeError(f"IAAA login failed after {attempts} attempts: {last_error}") from last_error
 
 
 def iaaa_authenticate(
@@ -136,19 +157,21 @@ def iaaa_authenticate(
     login_resp.raise_for_status()
     payload = login_resp.json()
     if not payload.get("success"):
-        raise RuntimeError(f"IAAA login failed: {payload.get('errors') or payload}")
+        raise CampusLoginRejected("教学网登录被拒绝，请检查账号和密码；如需额外验证，请先到统一身份认证页面完成验证。")
     return payload["token"]
 
 
 def _login(
-    username: str = "", password: str = "", *, force_direct: bool = False
+    username: str = "", password: str = "", *, force_direct: bool = False,
+    identity_proxy: str | None = None
 ) -> httpx.Client:
     user = username or settings.pku_username
     pwd = password or settings.pku_password
     if not user or not pwd:
         raise RuntimeError("PKU_USERNAME and PKU_PASSWORD must be set in .env")
 
-    client = new_client(force_direct=True) if force_direct else new_client()
+    client = (new_client(force_direct=True) if force_direct else
+              new_client(identity_proxy=identity_proxy) if identity_proxy else new_client())
     try:
         token = iaaa_authenticate(client, "blackboard", _CAMPUS_LOGIN_REGISTERED, user, pwd)
         bb_resp = client.get(_CAMPUS_LOGIN_HTTPS, params={"token": token})

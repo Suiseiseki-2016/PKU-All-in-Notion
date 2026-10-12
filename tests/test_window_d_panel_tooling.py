@@ -40,7 +40,18 @@ def test_driver_uses_panel_routes_and_reruns_are_zero_spend_noops(tmp_path):
     assert outcome["organize_rerun"]["reused"] is True
     assert outcome["organize_rerun"]["points_charged"] == 0
     assert outcome["grade_rerun"]["points_charged"] == 0
-    assert [request["path"] for request in outcome["panel_requests"]] == [
+    # Worker completion can require several read-only polls on a busy runner.
+    # Preserve exact command order and all ledger checks; collapse only
+    # consecutive GETs to the same status endpoint.
+    paths = []
+    status_routes = {"/api/exercises/organize/status", "/api/exercises/grade/status"}
+    for request in outcome["panel_requests"]:
+        path = request["path"]
+        if (request["method"] == "GET" and path in status_routes
+                and paths and paths[-1] == path):
+            continue
+        paths.append(path)
+    assert paths == [
         "/api/exercises/organize/estimate",
         "/api/exercises/organize",
         "/api/exercises/organize/status",

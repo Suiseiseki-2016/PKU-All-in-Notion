@@ -40,5 +40,8 @@ jobs:
       - name: compileall typecheck
         run: uv run python -m compileall -q pku_sync
 
+      - name: Install platform Chromium for browser regressions
+        run: uv run python desktop/scripts/install-ci-browser.py
+
       - name: Fake-based pytest suite
         run: uv run pytest --basetemp=.pytest-basetemp -q

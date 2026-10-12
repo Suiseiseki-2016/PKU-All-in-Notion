@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .desktop_lifecycle import guard_windows_desktop_parent
+
+guard_windows_desktop_parent()
+
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1010,85 +1014,22 @@ def submit_text_cmd(
     text: Annotated[str | None, typer.Option("--text", help="答案文本（与 --file 二选一）")] = None,
     yes: Annotated[
         bool,
-        typer.Option("--yes", help="确认执行提交。默认干跑：取表单、核状态、预览答案，但不提交"),
+        typer.Option("--yes", help="检查已保存的答案草稿后进入二次确认；默认只预览，不登录教学网"),
     ] = False,
 ) -> None:
-    """提交文本作业到教学网。默认干跑，--yes 才真正提交。"""
-    from .auth import get_session
+    """预览文本作业；--yes 后仍需确认目标、完整答案和清单。"""
     from .config import settings
-    from .materials import fetch_deadlines, merge_deadlines, walk_materials
-    from .submit import (
-        AlreadySubmitted,
-        SubmitError,
-        deadline_warning,
-        fetch_form,
-        resolve_course_id,
-        submit_text,
-    )
-
+    from .cli_submission import read_answer, run
+    from .panel.assignment_workflow import PreparationError
     if bool(file) == bool(text):
-        console.print("[red]请给且只给 --file <路径> 或 --text <内容> 之一。[/red]")
+        console.print('请给且只给 --file 或 --text 之一。', style='red')
         raise typer.Exit(2)
-    if file:
-        try:
-            answer = Path(file).read_text(encoding="utf-8")
-        except OSError as exc:
-            console.print(f"[red]读不了 {file}: {exc}[/red]")
-            raise typer.Exit(1) from exc
-    else:
-        answer = text or ""
-    if not answer.strip():
-        console.print("[red]答案为空，拒绝提交。[/red]")
-        raise typer.Exit(2)
-
     try:
-        course_id = resolve_course_id(settings.data_dir, course)
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
+        answer = read_answer(file) if file else (text or '')
+    except (OSError, ValueError, PreparationError) as exc:
+        console.print(str(exc), style='red', markup=False)
         raise typer.Exit(1) from exc
-
-    client = get_session()
-
-    # Title + deadline for the preview and the late-submission warning.
-    title = ""
-    due_at = ""
-    try:
-        _items, assignments = walk_materials(client, course_id)
-        deadlines = fetch_deadlines(client)
-        for assignment in merge_deadlines(assignments, deadlines.get(course_id, [])):
-            if assignment.content_id == content:
-                title, due_at = assignment.title, assignment.due_at
-                break
-    except Exception as exc:  # listing is a convenience; the form is authoritative
-        console.print(f"[yellow]作业信息查询失败（不影响提交）：{exc}[/yellow]")
-
-    if warning := deadline_warning(due_at):
-        console.print(f"[red]{warning}[/red]")
-
-    try:
-        form = fetch_form(client, course_id, content)
-    except AlreadySubmitted as exc:
-        console.print(f"[yellow]{exc}[/yellow]")
-        return
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    console.print(f"目标：{title or content}（{course_id} / {content}）截止：{due_at or '未公布'}")
-    console.print(f"答案 {len(answer)} 字符；开头：{answer[:60].splitlines()[0] if answer else ''}")
-    if not yes:
-        console.print(
-            "[yellow]干跑：表单已取得、可提交；加 --yes 才会真正提交。[/yellow]"
-        )
-        return
-
-    try:
-        receipt = submit_text(client, form, answer)
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]提交成功[/green] 回执 destinationUrl：{receipt.get('destinationUrl')}")
-    console.print("请把回执登记回 Notion 任务行（scripts/assignment_submit.md 第 6 步）。")
+    run(settings, course, content, 'text', answer, yes, console)
 
 
 @submit_app.command("file")
@@ -1101,80 +1042,13 @@ def submit_file_cmd(
     file: Annotated[str, typer.Option("--file", help="要提交的文件路径（docx/pdf/zip/md/txt…）")],
     yes: Annotated[
         bool,
-        typer.Option("--yes", help="确认执行提交。默认干跑：取表单、核状态、预览文件，但不提交"),
+        typer.Option("--yes", help="检查已保存的文件草稿后进入二次确认；默认只预览，不登录教学网"),
     ] = False,
 ) -> None:
-    """提交文件作业（附件形式）到教学网。默认干跑，--yes 才真正提交。"""
-    from .auth import get_session
+    """预览文件作业；--yes 后仍需确认文件、目标和清单。"""
     from .config import settings
-    from .materials import fetch_deadlines, merge_deadlines, walk_materials
-    from .submit import (
-        AlreadySubmitted,
-        SubmitError,
-        deadline_warning,
-        fetch_form,
-        resolve_course_id,
-        submit_file,
-    )
-
-    path = Path(file)
-    if not path.is_file():
-        console.print(f"[red]文件不存在或不是普通文件：{file}[/red]")
-        raise typer.Exit(1)
-
-    try:
-        course_id = resolve_course_id(settings.data_dir, course)
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    client = get_session()
-
-    title = ""
-    due_at = ""
-    try:
-        _items, assignments = walk_materials(client, course_id)
-        deadlines = fetch_deadlines(client)
-        for assignment in merge_deadlines(assignments, deadlines.get(course_id, [])):
-            if assignment.content_id == content:
-                title, due_at = assignment.title, assignment.due_at
-                break
-    except Exception as exc:  # listing is a convenience; the form is authoritative
-        console.print(f"[yellow]作业信息查询失败（不影响提交）：{exc}[/yellow]")
-
-    if warning := deadline_warning(due_at):
-        console.print(f"[red]{warning}[/red]")
-
-    try:
-        form = fetch_form(client, course_id, content, action="newAttempt")
-    except AlreadySubmitted as exc:
-        console.print(f"[yellow]{exc}[/yellow]")
-        return
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    size = path.stat().st_size
-    console.print(
-        f"目标：{title or content}（{course_id} / {content}）截止：{due_at or '未公布'}"
-    )
-    console.print(f"文件：{path.name}（{size} 字节，{path.suffix.lstrip('.') or '未知'} 类型）")
-    if not yes:
-        console.print(
-            "[yellow]干跑：表单已取得、可提交；加 --yes 才会真正提交。[/yellow]"
-        )
-        return
-
-    try:
-        receipt = submit_file(client, form, path)
-    except SubmitError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-    if "destinationUrl" in receipt:
-        console.print(f"[green]提交成功[/green] 回执 destinationUrl：{receipt['destinationUrl']}")
-    else:
-        console.print(f"[green]提交成功[/green] 已上传 {path.name}（Blackboard 未返回回执 JSON）")
-    console.print("请把回执登记回 Notion 任务行（scripts/assignment_submit.md 第 6 步）。")
+    from .cli_submission import run
+    run(settings, course, content, 'file', Path(file), yes, console)
 
 
 @app.command(name="coursetable")

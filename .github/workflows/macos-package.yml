@@ -1,0 +1,43 @@
+name: macOS candidate package
+on:
+  push:
+    branches: ['codex/release-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build Apple Silicon candidate from this source revision
+        run: |
+          test "$(uname -m)" = arm64
+          uv sync --locked --all-extras
+          uv run python -m compileall -q pku_sync
+          uv run playwright install chromium
+          uv run pytest --basetemp=.pytest-basetemp -q
+          uv build --wheel
+          cd desktop
+          npm ci
+          npm run build:macos
+      - name: Verify bundled source and media regression
+        run: |
+          APP='/private/tmp/pku-all-in-notion-target/release/bundle/macos/PKU All in Notion.app'
+          PY="$APP/Contents/Resources/resources/runtime/bin/python"
+          "$PY" -B -I desktop/scripts/verify-bundled-source.py "$APP/Contents/Resources/resources/runtime"
+          codesign --verify --deep --strict "$APP"
+          mkdir -p macos-candidate
+          VERSION=$(node -p "require('./desktop/package.json').version")
+          cp "/private/tmp/pku-all-in-notion-target/release/bundle/dmg/PKU All in Notion_${VERSION}_aarch64.dmg" "macos-candidate/PKU-All-in-Notion-${VERSION}-Apple-Silicon.dmg"
+          git rev-parse HEAD > macos-candidate/source-commit.txt
+          shasum -a 256 macos-candidate/*.dmg > macos-candidate/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-candidate
+          path: macos-candidate/
+          if-no-files-found: error

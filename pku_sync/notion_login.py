@@ -35,6 +35,7 @@ it is no longer the ``pku-sync notion login`` path.
 from __future__ import annotations
 
 import base64
+import html
 import secrets as secrets_mod
 import socket
 import threading
@@ -259,30 +260,43 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         if parsed.path != CALLBACK_PATH:
             self._respond(404, "不是回调路径，忽略。")
             return
-        query = parse_qs(parsed.query)
-        error = (query.get("error") or [""])[0]
-        if error:
-            self.server.result["error"] = error
-            self._respond(400, f"授权失败：{error}。可关闭本页面，回到 PKU All in Notion 重试。")
-            return
-        state = (query.get("state") or [""])[0]
-        if state != self.server.state:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        states = query.get("state") or []
+        if (len(states) != 1 or not states[0]
+                or not secrets_mod.compare_digest(states[0].encode(), self.server.state.encode())):
             # A stale tab or a stray request: reject but keep waiting for
             # the real callback from the page this login opened.
             self._respond(400, "state 不匹配：请关闭旧授权页，用最新打开的授权页完成授权。")
             return
-        code = (query.get("code") or [""])[0]
-        if not code:
-            self._respond(400, "回调缺少 code 参数。")
-            return
-        self.server.result["code"] = code
-        self._respond(200, "授权成功，可以关闭本页面，回到 PKU All in Notion 继续。")
+        # Multiple tabs can arrive concurrently at the threaded listener.
+        # Only the first matching, unambiguous result may end this request.
+        with self.server.result_lock:
+            if self.server.result:
+                status, message = 409, "本次授权回调已处理，请返回应用查看结果。"
+            elif query.get("error") and query.get("code"):
+                status, message = 400, "回调参数冲突，请使用最新打开的授权页。"
+            elif query.get("error"):
+                errors = query["error"]
+                if len(errors) != 1 or not errors[0]:
+                    status, message = 400, "回调错误参数无效，请使用最新打开的授权页。"
+                else:
+                    error = errors[0] if errors[0] in {
+                        "access_denied", "user_cancelled", "user_canceled"
+                    } else "provider_error"
+                    self.server.result["error"] = error
+                    status, message = 400, "授权被拒绝。可关闭本页面，回到 PKU All in Notion 重试。"
+            elif len(query.get("code") or []) != 1 or not query["code"][0]:
+                status, message = 400, "回调缺少有效的 code 参数。"
+            else:
+                self.server.result["code"] = query["code"][0]
+                status, message = 200, "授权成功，可以关闭本页面，回到 PKU All in Notion 继续。"
+        self._respond(status, message)
 
     def _respond(self, status: int, message: str) -> None:
         body = (
             "<html><head><meta charset='utf-8'><title>PKU All in Notion 授权</title></head>"
             f"<body style='font-family:sans-serif;padding:2em;line-height:1.6'>"
-            f"<h3>{message}</h3></body></html>"
+            f"<h3>{html.escape(message)}</h3></body></html>"
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -298,6 +312,7 @@ class _CallbackServer(ThreadingHTTPServer):
     def __init__(self, port: int, state: str):
         self.state = state
         self.result: dict = {}
+        self.result_lock = threading.Lock()
         super().__init__(("127.0.0.1", port), _CallbackHandler)
 
     def server_bind(self):

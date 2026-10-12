@@ -147,3 +147,57 @@ def test_explicit_material_link_can_override_date_without_leaving_course(tmp_pat
     sources = collect_note_sources(root, "2026-09-16", "课堂", allowed_paths=[linked, other, linked])
     assert [(item["title"], item["text"]) for item in sources] == [(linked.name, "胚胎期")]
     assert collect_note_sources(root, "2026-09-16", "课堂", allowed_paths=[]) == []
+
+
+def test_long_page_preserves_tail_and_spacing_for_separate_term_review(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from pku_sync import note_editor, note_sources, transcript_notes
+    root = tmp_path / "course"
+    path = root / "materials" / "教学内容" / "20260916完整页.pptx"
+    text = "课堂段落。" * 1000 + "\n    保留缩进的代码\n页尾重要条件不得丢失。"
+    _pptx(path, text)
+    sources = collect_note_sources(root, "2026-09-16", "课堂")
+    assert len(sources) == 1 and sources[0]["text"] == text
+    seen = []
+    def ask(system, prompt):
+        seen.append(json.loads(prompt))
+        return "课堂笔记。"
+    transcript_notes.write_notes({"segments": [{"start": 0, "end": 10, "text": "课堂讲述。"}]},
+                            tmp_path / "notes.md", SimpleNamespace(notes_model="qwen3.7-plus"),
+                            "课堂", ask=ask, source_context=sources)
+    assert len(seen) == 1 and "courseware" not in seen[0]
+    assert sources[0]["text"] == text
+    report = json.loads(note_editor.report_path(tmp_path / "notes.md").read_text("utf-8"))
+    assert report["sources_sha256"] == note_editor.fingerprint(sources)
+
+
+def test_office_page_ceiling_and_empty_slides_are_explicit(tmp_path, monkeypatch):
+    from pku_sync import note_sources
+    monkeypatch.setattr(note_sources, "_PAGE_LIMIT", 2)
+    root = tmp_path / "course"
+    path = root / "materials" / "教学内容" / "20260916课件.pptx"
+    path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        for number, text in enumerate(["有文字", "", "被资源上限限制的页"], 1):
+            archive.writestr(f"ppt/slides/slide{number}.xml", f"<slide><t>{text}</t></slide>")
+    sources = collect_note_sources(root, "2026-09-16", "课堂")
+    assert [(row["locator"], row["status"]) for row in sources] == [
+        ("第 1 张", "readable"), ("第 2 张", "unreadable"), ("第 3–3 张（共 3 张）", "truncated")]
+
+
+def test_image_presence_is_disclosed_even_when_page_has_many_words(tmp_path, monkeypatch):
+    from pku_sync import note_sources
+    root = tmp_path / "course"
+    path = root / "materials" / "教学内容" / "20260916图文.pdf"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"isolated PDF parser fixture")
+    text = "可提取的长文本。" * 500
+    class Page:
+        images = [object()]
+        def extract_text(self): return text
+    class Reader:
+        def __init__(self, _path): self.pages = [Page()]
+    monkeypatch.setattr("pypdf.PdfReader", Reader)
+    sources = note_sources.collect_note_sources(root, "2026-09-16", "课堂")
+    assert sources[0]["text"] == text and sources[0]["status"] == "partial"

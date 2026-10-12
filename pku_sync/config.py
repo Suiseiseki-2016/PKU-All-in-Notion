@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Per-task, non-secret evidence identity. Never loaded from env or persisted.
+    _metered_operation_context: dict[str, str] = PrivateAttr(default_factory=dict)
     model_config = SettingsConfigDict(
         # CWD first for the normal repo-root run, then the package's own root:
         # an external scheduler or service may start the process anywhere, and
@@ -33,20 +37,14 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://openrouter.ai/api/v1"
     openai_api_key: str = ""
     notes_model: str = "qwen/qwen3.5-397b-a17b"
-    # A second, evidence-focused pass removes ASR noise from primary study notes.
+    notes_strategy: Literal["transcript", "topics"] = "transcript"
+    notes_merge_model: str = ""  # legacy model-merge recovery; new topic notes assemble locally
+    # Legacy settings retained so existing .env files still load. The current
+    # plain editor and topic workflow do not grade prose or require citations;
+    # these flags no longer enable sentence matching or model review loops.
     notes_fact_check: bool = True
-    # Experimental strict per-sentence evidence gate. Keep opt-in until a
-    # full real lecture establishes its false-positive rate and running cost.
-    # A complete note must pass the evidence-linked sentence audit before it
-    # can become the student-facing artifact. This costs extra LLM calls but
-    # catches errors that page-citation syntax and local rules cannot detect.
     notes_claim_audit: bool = True
-    # Natural paragraphs from verified fact IDs require the independent
-    # sentence audit above. High-risk facts and coursework keep exact wording.
-    # Keep the fact-bound paragraph composer opt-in until a complete real
-    # lecture passes factual, readability, and cost acceptance.
     notes_structured_composition: bool = False
-    # Match ASR windows to clearly associated slide pages despite wrong terms.
     notes_source_matching: bool = True
 
     # Backend for one-shot LLM calls (daily summary; batch content later).

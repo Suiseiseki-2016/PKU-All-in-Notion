@@ -7,15 +7,25 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from ..pipeline import collect_jobs, recording_stage
-from .recordings_api import recording_id, _safe_attachment_path
+from .recordings_api import recording_id, publication_matches_job, _safe_attachment_path
 from .campus_todos import distinct_announcement_tasks, announcement_source_url
 from .handbook_requirements import handbook_review_cards
 
 _LECTURE_NUMBER = re.compile(r"第\s*([0-9０-９]+)\s*[讲次]", re.IGNORECASE)
+
+
+def official_content_source_url(course_id, item):
+    parent_id = str(item.get('parent_content_id') or '')
+    if re.fullmatch(r'_\d+_\d+', parent_id):
+        return ('https://course.pku.edu.cn/webapps/blackboard/content/listContent.jsp?' +
+                urlencode({'course_id': course_id, 'content_id': parent_id}))
+    return 'https://course.pku.edu.cn/'
 _TEACHER_DEADLINE = re.compile(
     r"(?:DDL|截止(?:时间|日期)?|最晚(?:提交)?)(?:\s|[:：]|为|是){0,10}"
     r"(?P<date>20\d{2}[/-]\d{1,2}[/-]\d{1,2}"
@@ -73,15 +83,83 @@ def _number(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _section_states(root: Path, folder: Path, course_id: str, metadata: dict) -> dict:
+    """Display cached evidence without granting it publication authority."""
+    from ..catalog_snapshots import cached
+    envelope = cached(root, course_id)
+    result = {}
+    for section, label in (("recordings", "讲次"), ("materials", "课程资料"),
+                           ("announcements", "通知"), ("assignments", "作业")):
+        path = folder / section / 'index.json'
+        sections = envelope.get('snapshot', {}).get('sections', {}) if envelope else {}
+        source = sections.get(section, {})
+        rows = source.get('items') if isinstance(source, dict) and 'items' in source else _read_json(path, None)
+        count = len(rows) if isinstance(rows, list) else 0
+        status = metadata.get(section + '_status', '')
+        failed = (status in {'error', 'partial', 'unavailable'} or
+                  section == 'recordings' and metadata.get('_display_read_reason') == 'recordings_unavailable')
+        if failed:
+            state = 'cached' if isinstance(rows, list) else 'error'
+            message = f'{label}读取失败或不完整；保留之前的内容，请更新这门课或到教学网核对。'
+        elif not isinstance(rows, list) or status == 'not_synced':
+            state = 'not_synced'
+            message = f'{label}尚未读取，请更新这门课；不能据此认定没有内容。'
+        else:
+            state = 'available' if count else 'empty'
+            message = f'已读取 {count} 项{label}。'
+        result[section] = {'state': state, 'count': count, 'message': message}
+    return result
+
+
 def _courses(root: Path):
     for path in sorted(root.glob("*/course.json")):
         metadata = _read_json(path, {})
         if not isinstance(metadata, dict):
             continue
         course_id = metadata.get("course_id")
+        local_status = {key: value for key, value in metadata.items() if key.endswith('_status')}
+        from ..catalog_snapshots import cached
+        canonical = cached(root, course_id) if isinstance(course_id, str) else None
+        if canonical:
+            metadata = {**metadata, **canonical["snapshot"]["course"],
+                        "catalog_revision": canonical["revision"],
+                        "snapshot_complete": True,
+                        "announcements_status": "available", "assignments_status": "available"}
         title = metadata.get("name")
+        from ..catalog_snapshots import CatalogUnavailable, assert_portal_readable
+        metadata["read_only"] = canonical is None
+        try:
+            assert_portal_readable(root, course_id)
+        except CatalogUnavailable:
+            metadata["read_only"] = True
+        # A complete older snapshot is readable evidence, not proof that a
+        # failed new section read succeeded.
+        metadata.update({key: value for key, value in local_status.items()
+                         if value in {'error', 'partial', 'unavailable', 'not_synced'}})
+        ledger = _read_json(root / 'portal-read-status.json', {})
+        reason = ''
+        if isinstance(ledger, dict) and isinstance(course_id, str) and course_id:
+            from ..catalog_snapshots import cache_path
+            if ledger.get('account_namespace') == cache_path(root, course_id).parent.name:
+                row = ledger.get('courses', {}).get(course_id, {}) if isinstance(ledger.get('courses'), dict) else {}
+                reason = row.get('reason', '') if isinstance(row, dict) else ''
+        metadata['_display_read_reason'] = reason
+        metadata['read_only_message'] = (
+            '账号目录版本核对尚未完成；已有内容可读，请更新这门课后重试。'
+            if reason == 'account_unconfirmed' else
+            '教学网录像目录读取失败；已有讲次保留，请检查教学网连接后更新这门课。'
+            if reason == 'recordings_unavailable' else
+            '教学网读取尚未完成；保留已有内容，请检查教学网连接后更新这门课。')
         if isinstance(course_id, str) and course_id and isinstance(title, str) and title:
             yield path.parent, course_id, title, metadata
+
+
+def _official_index(root: Path, folder: Path, course_id: str, section: str, default):
+    from ..catalog_snapshots import cached
+    envelope = cached(root, course_id)
+    if envelope:
+        return envelope["snapshot"]["sections"][section]["items"]
+    return _read_json(folder / section / "index.json", default)
 
 
 def _category(item: dict) -> str:
@@ -97,9 +175,16 @@ def _category(item: dict) -> str:
 def campus_courses(root: Path) -> dict:
     rows = []
     for folder, course_id, title, metadata in _courses(root):
-        materials = _read_json(folder / "materials" / "index.json", [])
-        notices = _read_json(folder / "announcements" / "index.json", [])
-        assignments = _read_json(folder / "assignments" / "index.json", None)
+        materials = _official_index(root, folder, course_id, "materials", [])
+        notices = _official_index(root, folder, course_id, "announcements", [])
+        assignments = _official_index(root, folder, course_id, "assignments", None)
+        from ..catalog_schema import ASSESSMENT_KINDS
+        assessment_ids = {item.get("content_id") for item in materials
+                          if isinstance(item, dict) and item.get("kind") in ASSESSMENT_KINDS
+                          and item.get("content_id")} if isinstance(materials, list) else set()
+        if isinstance(assignments, list):
+            assignments = [item for item in assignments if isinstance(item, dict)
+                           and item.get("content_id") not in assessment_ids]
         handbooks = handbook_review_cards(folder / "materials", materials) if isinstance(materials, list) else []
         rows.append({
             "id": course_id,
@@ -109,20 +194,61 @@ def campus_courses(root: Path) -> dict:
             "recordings": len(collect_jobs(root, course_id)),
             "materials": sum(1 for item in materials if isinstance(item, dict)
                              and _category(item) == "material") if isinstance(materials, list) else 0,
-            "assignments": len(assignments) if isinstance(assignments, list) else
+            "assignments": sum(1 for item in assignments if item.get("source") != "calendar") if isinstance(assignments, list) else
                 sum(1 for item in materials if isinstance(item, dict)
-                    and _category(item) == "assignment") if isinstance(materials, list) else 0,
+                    and item.get("kind") in {"作业", "Assignment"}) if isinstance(materials, list) else 0,
+            "calendar_items": sum(1 for item in assignments if item.get("source") == "calendar") if isinstance(assignments, list) else 0,
             "handbook_reviews": len(handbooks),
             "announcements": len(notices) if isinstance(notices, list) else 0,
             "announcement_tasks": len(distinct_announcement_tasks(course_id, notices, assignments if isinstance(assignments, list) else [])) if isinstance(notices, list) else 0,
             "information": sum(1 for item in materials if isinstance(item, dict)
                                and _category(item) == "information") if isinstance(materials, list) else 0,
             "synced_at": str(metadata.get("synced_at") or ""),
+            "catalog_revision": metadata.get("catalog_revision"),
+            "read_only": metadata["read_only"],
+            "read_only_message": metadata.get('read_only_message', '') if metadata['read_only'] else '',
         })
     return {"courses": rows}
 
 
+def _historical_lessons(root: Path, course_id: str, metadata: dict) -> list[dict]:
+    """Show retained sources without granting current processing eligibility."""
+    from .. import catalog_snapshots as catalog, recording_history
+    from .notion_workspace import historical_lecture
+    from .recordings_api import assignment_snapshot_issue
+    envelope = catalog.cached(root, course_id)
+    if envelope is None or metadata.get('catalog_revision') != envelope['revision']:
+        return []
+    history = recording_history.read_cache(root, course_id, envelope)
+    if not history or not history.get('recordings'):
+        return []
+    result = []
+    for record in history['recordings']:
+        source = record['source']
+        row = {
+            'course_id': course_id, 'source_id': record['source_id'],
+            'source': deepcopy(source), 'title': source['title'],
+            'recorded_at': source['recorded_at'],
+            'original_revision': record['original_revision'],
+            'accepted_revision': record['accepted_revision'],
+            'history_current_revision': history['current_revision'],
+            'historical': True, 'read_only': True, 'processing_allowed': False,
+            'notion_lecture_url': '',
+        }
+        # Navigation needs the exact saved source/parent readback and a
+        # readable, timely official directory. Cached history grants no
+        # projection or publication authority.
+        if not metadata['read_only'] and assignment_snapshot_issue(metadata) is None:
+            target = historical_lecture(root, course_id, record, history)
+            if target is not None:
+                from uuid import UUID
+                row['notion_lecture_url'] = 'https://www.notion.so/' + UUID(target['id']).hex
+        result.append(row)
+    return result
+
+
 def campus_course(root: Path, course_id: str) -> dict:
+    from ..catalog_snapshots import recording_source_id
     found = next(((folder, title, meta) for folder, key, title, meta in _courses(root)
                   if key == course_id), None)
     if found is None:
@@ -131,14 +257,20 @@ def campus_course(root: Path, course_id: str) -> dict:
     jobs = sorted(collect_jobs(root, course_id),
                   key=lambda job: (job.recording.recorded_at, job.recording.title))
     lessons = []
-    home = _read_json(root / "notion-learning-home.json", {})
+    from .notion_home import saved_home
+    home = saved_home(root)
     home_id = home.get("id") if isinstance(home, dict) else None
     by_number: dict[int, list[dict]] = {}
     for job in jobs:
         stage, unavailable = recording_stage(job)
+        try:
+            source_id = recording_source_id(job.recording)
+        except ValueError:
+            source_id = ""
         from .transcript_review import review_pending
         row = {
             "id": recording_id(job),
+            "source_id": source_id,
             "title": job.recording.title,
             "date": job.recording.date,
             "number": _number(job.recording.title),
@@ -164,18 +296,35 @@ def campus_course(root: Path, course_id: str) -> dict:
         )
         publication = _read_json(job.directory / "notion-publication.json", {})
         if (isinstance(publication, dict)
-                and publication.get("recording_id") == row["id"]
+                and publication_matches_job(job, publication)
                 and publication.get("home_id") == home_id
                 and publication.get("note_url")
                 and publication.get("lecture_url")):
             row["notion_note_url"] = publication["note_url"]
             row["notion_lecture_url"] = publication["lecture_url"]
+        projected = {}
+        if home.get("schema") == 2:
+            entries = home.get("courses", {}).get(course_id, {}).get("lectures", {})
+            matches = [entry for entry in entries.values() if isinstance(entry, dict)
+                       and row["source_id"] and entry.get("source_id") == row["source_id"]]
+            projected = matches[0] if len(matches) == 1 else {}
+            if (not row.get("notion_note_url") and projected.get("source_id") == row["source_id"] and projected.get("url")):
+                row["notion_lecture_url"] = projected["url"]
+                if projected.get("note_url"):
+                    row["notion_note_url"] = projected["note_url"]
+        from .summary_acceptance import status as summary_status
+        row["summary_acceptance"] = summary_status(job)
+        remote_acceptance = projected.get("summary_acceptance", {})
+        if (projected.get("source_id") == row["source_id"] and remote_acceptance
+                and (not row["summary_acceptance"]["notes_sha256"]
+                     or remote_acceptance.get("notes_sha256") == row["summary_acceptance"]["notes_sha256"])):
+            row["summary_acceptance"] = remote_acceptance
         lessons.append(row)
         if row["number"] is not None:
             by_number.setdefault(row["number"], []).append(row)
-    raw_materials = _read_json(folder / "materials" / "index.json", [])
-    notices = _read_json(folder / "announcements" / "index.json", [])
-    assignments = _read_json(folder / "assignments" / "index.json", [])
+    raw_materials = _official_index(root, folder, course_id, "materials", [])
+    notices = _official_index(root, folder, course_id, "announcements", [])
+    assignments = _official_index(root, folder, course_id, "assignments", [])
     handbook_reviews = handbook_review_cards(folder / "materials", raw_materials) if isinstance(raw_materials, list) else []
     unassigned = []
     all_materials = []
@@ -187,6 +336,7 @@ def campus_course(root: Path, course_id: str) -> dict:
             if not isinstance(item, dict):
                 continue
             material = {
+                "source_id": str(item.get("source_id") or ""),
                 "title": str(item.get("title") or "未命名课件"),
                 "content_id": str(item.get("content_id") or ""),
                 "kind": str(item.get("kind") or "资料"),
@@ -198,6 +348,7 @@ def campus_course(root: Path, course_id: str) -> dict:
                                 if isinstance(asset, dict)
                                 if (path := _safe_attachment_path(asset.get("path")))],
                 "parent_content_id": str(item.get("parent_content_id") or ""),
+                "body_text": str(item.get("body_text") or ""),
                 "category": _category(item),
                 "index": len(all_materials),
             }
@@ -228,9 +379,14 @@ def campus_course(root: Path, course_id: str) -> dict:
         if item["category"] == "assignment" and item["content_id"]
     }
     formal_assignments = []
+    from ..materials import ASSESSMENT_KINDS
+    assessment_ids = {item['content_id'] for item in all_materials
+                      if item['kind'] in ASSESSMENT_KINDS and item['content_id']}
     if isinstance(assignments, list):
         for item in assignments:
             if not isinstance(item, dict):
+                continue
+            if item.get('content_id') in assessment_ids:
                 continue
             row = {**item, "due_at_label": display_campus_time(item.get("due_at")),
                    "teacher_deadline_quote": teacher_deadline_quote(item.get("instructions"))}
@@ -238,7 +394,17 @@ def campus_course(root: Path, course_id: str) -> dict:
                 material = assignment_materials.get(str(item.get("content_id") or ""))
                 row["attachments"] = material["attachments"] if material else []
             formal_assignments.append(row)
-    return {
+    official_assessments = []
+    for item in all_materials:
+        if item.get('kind') not in ASSESSMENT_KINDS:
+            continue
+        content_id = str(item.get('content_id') or '')
+        official_assessments.append({**item,
+            'source_id': item.get('source_id') or (f'pku:{course_id}:materials:{content_id}' if content_id else ''),
+            'source_url': official_content_source_url(course_id, item),
+            'submission_state': 'unknown', 'due_at': '', 'due_at_label': '',
+            'status_label': '请在教学网核对测验截止时间、作答与提交状态。'})
+    result = {
         "id": course_id,
         "title": title,
         "code": str(metadata.get("code") or ""),
@@ -253,9 +419,18 @@ def campus_course(root: Path, course_id: str) -> dict:
         "announcements_status": str(metadata.get("announcements_status") or "not_synced"),
         "assignments_status": str(metadata.get("assignments_status") or "not_synced"),
         "assignments": formal_assignments,
+        "official_assessments": official_assessments,
         "synced_at": str(metadata.get("synced_at") or ""),
+        "catalog_revision": metadata.get("catalog_revision"),
+        "read_only": metadata["read_only"],
+        "read_only_message": metadata.get('read_only_message', '') if metadata['read_only'] else '',
+        "section_states": _section_states(root, folder, course_id, metadata),
         "synced_at_label": display_campus_time(metadata.get("synced_at")),
         "existing_notion_url": str(metadata.get("existing_notion_url") or ""),
         "summary": _read_json(folder / "summary.json", {}),
         "source_priority": ["recordings", "materials"],
     }
+    historical = _historical_lessons(root, course_id, metadata)
+    if historical:
+        result['historical_lessons'] = historical
+    return result

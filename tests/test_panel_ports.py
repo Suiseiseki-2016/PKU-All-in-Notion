@@ -81,6 +81,7 @@ def test_bind_panel_takes_first_available_8791_when_free():
 
 
 def test_bind_panel_falls_back_to_8792_when_8791_occupied():
+    require_free(8791)
     require_free(8792)
     dummy = occupy_port(8791)
     try:
@@ -98,6 +99,8 @@ def test_bind_panel_falls_back_to_8792_when_8791_occupied():
 
 
 def test_bind_panel_falls_back_to_8793_when_first_two_occupied():
+    require_free(8791)
+    require_free(8792)
     require_free(8793)
     first = occupy_port(8791)
     second = occupy_port(8792)
@@ -116,6 +119,8 @@ def test_bind_panel_falls_back_to_8793_when_first_two_occupied():
 
 
 def test_all_three_ports_occupied_raises_pinned_copy():
+    for port in PANEL_PORTS:
+        require_free(port)
     dummy1 = occupy_port(8791)
     dummy2 = occupy_port(8792)
     dummy3 = occupy_port(8793)

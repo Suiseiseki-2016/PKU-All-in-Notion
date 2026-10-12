@@ -111,28 +111,25 @@ def test_missing_converter_degrades_to_the_original_text(monkeypatch):
         [{"start": 0, "end": 1, "text": "老師"}])[0]["text"] == "老師"
 
 
-def test_traditional_transcript_still_anchors_the_marker_on_the_spoken_moment(
-        tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
+def test_contextual_editor_receives_original_traditional_text_and_timing(tmp_path, monkeypatch):
+    """Natural citations and script choice belong to the contextual editor."""
+    import copy
+    import pytest
+    from pku_sync import note_editor
+    settings = SimpleNamespace(platform_token="test", openai_api_key="", notes_model="test")
     transcript = {"segments": [
         {"start": 0, "end": 12, "text": "那麼今天我們先講一下密碼學的基本概念"},
-        {"start": 40, "end": 52, "text": "老師要求下週三之前提交第一次作業"},
-    ]}
+        {"start": 40, "end": 52, "text": "老師要求下週三之前提交第一次作業"}]}
+    original = copy.deepcopy(transcript)
+    calls = []
+    body = "老师介绍密码学基本概念，并要求下周三之前提交第一次作业；可回看录像约四十秒处。"
+    def provider(_llm, _model, prompt, system, _settings):
+        payload = json.loads(prompt); calls.append(payload)
+        assert payload["transcript"] == original["segments"]
+        return body
+    monkeypatch.setattr(media, "_recovery_llm", provider)
+    monkeypatch.setattr(media, "_pending_time_label", lambda *_: pytest.fail("lexical timestamp selection"))
     target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize",
-                        lambda *a, **k: "老师要求下周三之前提交第一次作业。")
-
-    def uncertain(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        for verdict in parsed["verdicts"]:
-            verdict.update(status="uncertain", evidence=[], reason="转写含混")
-        return json.dumps(parsed, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", uncertain)
     assert media.write_notes(transcript, [], target, settings, "课程") == target
-    note = target.read_text("utf-8")
-    assert "提交第一次作業" not in note
-    assert "（回看 00:40）" in note
-    assert "（回看 00:00）" not in note
+    assert body in target.read_text("utf-8") and transcript == original and len(calls) == 1
+    assert note_editor.review_record_issues(target, transcript) == []

@@ -46,6 +46,18 @@ _CONTEXT_ONLY = re.compile(
 _ORAL_REQUIREMENT = re.compile(r"(?:老师|教师|课堂|口头).{0,12}(?:要求|通知|作业|考试|考勤|展示)")
 
 
+def dangling_object_fragments(text: str) -> list[str]:
+    """Identify a transitive verb followed by an unfinished attributive object."""
+    pattern = re.compile(
+        r"(?:呈现(?:出(?:来)?)?|展示|产生|提供|得到|获得|形成|包括|包含|"
+        r"转换成|转化为|表现(?:为|出))\s*"
+        r"(?:非常|特别|比较|更)?(?:多|少|大量|各种(?:各样)?|不同|相应|相关)的"
+        r"[啊呢吧]*$"
+    )
+    return [fragment.strip() for fragment in re.split(r"[。！？!?；;\n]", text)
+            if pattern.search(fragment.strip())]
+
+
 @dataclass(frozen=True)
 class FactReadiness:
     selected: list[dict[str, Any]]
@@ -115,6 +127,7 @@ def assess_recovery_facts(
             elif _RAC_TERM.search(body):
                 reason, disposition = "spoken_technical_term_needs_audio_review", "review"
             elif (_ASR_NOISE.search(body) or _DANGLING.search(plain)
+                  or dangling_object_fragments(body)
                   or _UNBOUND.search(body) or _CONTEXT_ONLY.search(body)
                   or len(plain) < 12):
                 reason, disposition = "spoken_claim_needs_context_or_asr_review", "review"

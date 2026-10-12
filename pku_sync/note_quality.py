@@ -49,6 +49,21 @@ def _check(name: str, status: str, detail: str) -> dict[str, str]:
     return {"name": name, "status": status, "detail": detail}
 
 
+def note_completeness_issues(note: str) -> list[str]:
+    """Reject explicit content gaps, independently of timing and fact checks.
+
+    A specific uncertain term can remain disclosed for review. An explicitly
+    missing explanation or an empty citation cannot certify a complete note.
+    """
+    issues: list[str] = []
+    if re.search(r"未完整还原|无法(?:可靠)?还原课堂内容|无法作为完整复习笔记|"
+                 r"本章来源核对后覆盖不足|生成失败（", note):
+        issues.append("笔记仍有未完整还原的课堂内容；请恢复缺失章节后再发布。")
+    if re.search(r"[（(]\s*(?:录像(?:时间)?|转写(?:时间)?)\s*[:：]\s*[）)]", note):
+        issues.append("笔记仍有空录像时间或转写时间引用；请核对原文定位后再发布。")
+    return issues
+
+
 def review_fingerprint(note: str, transcript: dict, *, sources: list[dict] | None,
                        assignments: list[dict] | None,
                        assignment_catalog_complete: bool,
@@ -425,6 +440,10 @@ def audit_note(
 ) -> dict:
     """Return checks with pass/fail/review/unverified statuses, without network I/O."""
     checks: list[dict[str, str]] = []
+    completeness = note_completeness_issues(note)
+    checks.append(_check("内容恢复完整性", "fail" if completeness else "pass",
+                         "；".join(completeness) if completeness else
+                         "未检出明确的章节缺口或空时间引用；仍需逐项语义审校"))
     segments = transcript.get("segments") or []
     end = max((float(row.get("end", row.get("start", 0))) for row in segments), default=0.0)
     markers = [_stamp_seconds(*match) for match in re.findall(

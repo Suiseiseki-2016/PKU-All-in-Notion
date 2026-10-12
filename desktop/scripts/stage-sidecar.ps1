@@ -136,8 +136,25 @@ function Stage-Runtime {
     if (-not $wheel) { throw 'uv build did not produce a pku-course-sync wheel.' }
 
     Write-Host "==> Installing wheel $($wheel.Name)"
-    & uv pip install --python $py --system --link-mode copy $wheel.FullName
-    if ($LASTEXITCODE -ne 0) { throw "uv pip install failed ($LASTEXITCODE)" }
+    # Export only runtime dependencies, with their locked hashes and Python
+    # markers. Resolving the wheel alone previously upgraded dependencies that
+    # had never run through the locked development suite.
+    $requirements = Join-Path $RuntimeDir '.bundle-requirements.txt'
+    & uv export --project $RepoRoot --locked --no-dev --no-emit-project --format requirements.txt --output-file $requirements | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Runtime dependency lock export failed ($LASTEXITCODE)" }
+    & uv pip sync --python $py --system --link-mode copy --require-hashes $requirements
+    if ($LASTEXITCODE -ne 0) { throw "Locked runtime dependency installation failed ($LASTEXITCODE)" }
+    & uv pip install --python $py --system --link-mode copy --no-deps $wheel.FullName
+    if ($LASTEXITCODE -ne 0) { throw "Client wheel installation failed ($LASTEXITCODE)" }
+    & uv pip check --python $py --system
+    if ($LASTEXITCODE -ne 0) { throw "Bundled dependency consistency check failed ($LASTEXITCODE)" }
+    # The npm entry uses Windows PowerShell; its module discovery can inherit
+    # PowerShell 7's module path. Hash with .NET rather than relying on autoload.
+    $lockStream = [System.IO.File]::OpenRead((Join-Path $RepoRoot 'uv.lock'))
+    $lockAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    try { $lockHash = -join ($lockAlgorithm.ComputeHash($lockStream) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $lockStream.Dispose(); $lockAlgorithm.Dispose() }
+    Set-Content -LiteralPath (Join-Path $RuntimeDir '.bundle-lock.sha256') -Value $lockHash -Encoding ASCII
 
     Write-Host "==> Smoke: python -m pku_sync --help"
     $helpText = & $py -m pku_sync --help

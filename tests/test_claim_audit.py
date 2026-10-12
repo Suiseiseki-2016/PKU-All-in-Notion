@@ -32,6 +32,68 @@ def test_chapter_assertions_keep_all_bullets_and_sentence_context():
     assert rows[0]["text"].startswith("明文：")
 
 
+def test_audit_wire_keeps_only_existing_actual_block_time_fields_and_original_text():
+    blocks = [dict(BLOCKS[0], start=70.25, end=79.5),
+              {"block_id": "B0002", "text": "老师说明明文是加密前的信息。", "start": 85.0},
+              {"block_id": "B0003", "text": "老师说明明文是加密前的信息。"}]
+    seen = []
+    def ask(system, user):
+        seen.append((system, json.loads(user)))
+        return _answer(system, user)
+    result = audit_chapter("明文是加密前的信息（录像时间：[01:10]）。\n（回看 01:10）", blocks, [], ask)
+    sent = seen[0][1]['blocks']
+    assert sent == [{'id': 'B0001', 'text': blocks[0]['text'], 'start': 70.25, 'end': 79.5},
+                    {'id': 'B0002', 'text': blocks[1]['text'], 'start': 85.0},
+                    {'id': 'B0003', 'text': blocks[2]['text']}]
+    assert len(result['assertions']) == 2
+    assert result['assertions'][1]['text'] == '（回看 01:10）'
+    assert 'floor(start)–ceil(end)' in seen[0][0]
+    assert '定位正确不代表正文事实正确' in seen[0][0]
+    assert '不可附造 timestamp/start/end' in seen[0][0]
+
+
+def test_new_local_audit_protocol_cannot_reuse_old_missing_time_cache(tmp_path):
+    import hashlib
+    from pku_sync import claim_audit
+    text = '明文是加密前的信息。'
+    assertions = chapter_assertions(text)
+    legacy_signature = hashlib.sha256(json.dumps({
+        'policy': claim_audit.POLICY, 'model': '', 'assertions': assertions,
+        'blocks': [{'id': 'B0001', 'text': BLOCKS[0]['text']}], 'pages': [],
+    }, ensure_ascii=False, sort_keys=True).encode('utf8')).hexdigest()
+    path = tmp_path / 'audit.json'
+    path.write_text(json.dumps({'signature': legacy_signature, 'status': 'pass', 'reason': '',
+        'validation_issues': [], 'assertions': assertions,
+        'verdicts': json.loads(_answer('', json.dumps({'claims': assertions})))['verdicts']}), 'utf8')
+    calls = []
+    def ask(system, user):
+        calls.append(json.loads(user))
+        return _answer(system, user)
+    result = audit_chapter(text, BLOCKS, [], ask, cache_path=path)
+    assert len(calls) == 1
+    assert result['signature'] != legacy_signature
+    assert result['status'] == 'pass'
+
+
+def test_time_metadata_does_not_make_unsupported_fact_or_invented_quote_pass():
+    blocks = [dict(BLOCKS[0], start=70.0, end=80.0)]
+    def unsupported(system, user):
+        response = json.loads(_answer(system, user))
+        for row in response['verdicts']:
+            row.update(status='unsupported', evidence=[], reason='原证据不支持该因果关系')
+        return json.dumps(response)
+    result = audit_chapter('明文导致错误结果（录像时间：[01:10]）。', blocks, [], unsupported)
+    assert result['status'] == 'fail'
+    assert result['verdicts'][0]['status'] == 'unsupported'
+    def invented(system, user):
+        response = json.loads(_answer(system, user))
+        for row in response['verdicts']:
+            row['evidence'][0]['quote'] += ' [01:10]'
+        return json.dumps(response)
+    bad_quote = audit_chapter('明文是加密前的信息（录像时间：[01:10]）。', blocks, [], invented)
+    assert bad_quote['status'] != 'pass'
+
+
 def test_unmarked_short_line_is_audited_as_a_claim():
     rows = chapter_assertions("### 古典密码\nPlayfair 分组密码\n两字母组成一个输入块。")
     assert len(rows) == 2
@@ -660,6 +722,65 @@ def test_valid_subset_never_bypasses_required_cited_page():
     assert all("valid_quote_subset_review" not in call for call in calls)
 
 
+@pytest.mark.parametrize("subset_failure", ["quote", "json", "schema", "foreign_id"])
+@pytest.mark.parametrize("final_review", ["valid", "invalid", "missing", "json"])
+def test_subset_failure_issues_retire_only_after_complete_valid_reaudit(
+        tmp_path, subset_failure, final_review):
+    calls = []
+    cache = tmp_path / "audit.json"
+    chapter = "明文是加密前的信息。\n明文是加密前的信息。"
+
+    def ask(system, user):
+        request = json.loads(user)
+        calls.append(request)
+        answer = json.loads(_answer(system, user))
+        if "valid_quote_subset_review" in request:
+            if subset_failure == "json":
+                return "not JSON"
+            if subset_failure == "schema":
+                answer["schema_version"] = 2
+            row = answer["verdicts"][0]
+            row["evidence"] = [{"id": ("B0099" if subset_failure == "foreign_id"
+                                        else "B0001"), "quote": "虚构的完整引文"}]
+        elif ("quote_repair" in request or "focused_evidence_retry" in request
+              or "snippets" in request):
+            if final_review == "json":
+                return "not JSON"
+            if final_review == "missing":
+                answer["verdicts"] = answer["verdicts"][:1]
+            if final_review == "invalid":
+                for row in answer["verdicts"]:
+                    if row["id"] == "C001":
+                        row["evidence"] = [{"id": "B0001", "quote": "虚构的完整引文"}]
+        else:
+            answer["verdicts"][0]["evidence"].append(
+                {"id": "B0001", "quote": "虚构的完整引文"})
+        return json.dumps(answer, ensure_ascii=False)
+
+    report = audit_chapter(chapter, BLOCKS, [], ask, cache_path=cache)
+    assert "valid_quote_subset_review" in calls[1]
+    assert calls[2]["quote_repair"]["original_verdicts"][0]["evidence"][1] == {
+        "id": "B0001", "quote": "虚构的完整引文"}
+    if final_review == "valid":
+        assert report["status"] == "pass"
+        assert report["reason"] == ""
+        assert report["validation_issues"] == []
+        assert len(report["verdicts"]) == len(report["assertions"]) == 2
+        assert all(row["evidence"] == [{"id": "B0001", "quote": "明文是加密前的信息"}]
+                   for row in report["verdicts"])
+        assert len(calls) == 3
+        def no_replay(*_args):
+            raise AssertionError("the complete revalidated batch must be reused")
+        assert audit_chapter(chapter, BLOCKS, [], no_replay,
+                             cache_path=cache) == report
+    else:
+        assert report["status"] != "pass"
+        assert report["validation_issues"]
+        assert {row["id"] for row in report["validation_issues"]} == {"C001"}
+        assert json.loads(cache.read_text("utf8"))["validation_issues"] == report[
+            "validation_issues"]
+
+
 def test_explicit_slide_example_can_be_rechecked_without_teacher_speech():
     pages = [{"title": "ch02.pdf", "locator": "第 7 页",
               "text": ("凯撒密码\n明文字母 abcdefghijklmnopqrstuvwxyz\n"
@@ -831,84 +952,57 @@ def test_verbatim_quote_can_relabel_one_adjacent_transcript_block():
         {"claim_id": "C001", "from": "B9999", "to": "B0001"}]
 
 
-def test_unsupported_plain_claim_stays_without_quarantine(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=True)
-    transcript = {"segments": [{"start": 0, "end": 12,
-                                 "text": "老师说明明文是加密前的信息。"}]}
+def test_contextual_uncertainty_is_readable_disclosed_and_not_falsely_complete(tmp_path, monkeypatch):
+    from pku_sync import note_editor
+    settings = SimpleNamespace(platform_token="test", openai_api_key="", notes_model="test")
+    transcript = {"segments": [{"start": 0, "end": 12, "text": "老师说明明文是加密前的信息。"}]}
+    calls = []
+    def uncertain(_llm, _model, prompt, system, _settings):
+        payload = json.loads(prompt); calls.append(payload)
+        assert payload["transcript"] == transcript["segments"]
+        return "课堂介绍明文概念，具体定义请结合原录像核对。\n\n明文定义尚需结合原录像核对。"
+    monkeypatch.setattr(media, "_recovery_llm", uncertain)
     target = tmp_path / "notes.md"
-    monkeypatch.setattr(media, "_summarize", lambda *a, **k: "明文是加密前的信息。")
-
-    def unsupported(_llm, _model, prompt, system, _settings):
-        parsed = json.loads(_answer(system, prompt))
-        parsed["verdicts"][0].update(status="unsupported", evidence=[], reason="缺少依据")
-        return json.dumps(parsed, ensure_ascii=False)
-
-    monkeypatch.setattr(media, "_recovery_llm", unsupported)
-    # The note reads as complete: a plain sentence the audit could not settle
-    # stays as written, and nothing is quarantined.
     assert media.write_notes(transcript, [], target, settings, "课程") == target
     note = target.read_text("utf-8")
-    assert "明文是加密前的信息" in note
-    assert "待核对（未能完全核实）" not in note
-    assert "已移出正文" not in note
-    assert list((tmp_path / ".notes-parts").glob("*.claim-audit.json"))
-    report = json.loads((tmp_path / "notes.md.claim-audit.json").read_text("utf-8"))
-    assert report["status"] == "pass"
-    assert report["pending_verification"] == 0
-
-    # Identical evidence replays as a stable existing-note pass.
-    assert media.write_notes(transcript, [], target, settings, "课程") == target
-
-    # A corrected reviewer keeps the claim in the chapter body instead.
+    assert "课堂介绍明文概念" in note and "明文定义尚需结合原录像核对" in note
+    report = json.loads(note_editor.report_path(target).read_text("utf-8"))
+    assert report["status"] == "organized" and report["content_complete"] is None
+    assert media.write_notes(transcript, [], target, settings, "课程") == target and len(calls) == 1
     fresh = tmp_path / "fresh.md"
-    monkeypatch.setattr(media, "_recovery_llm",
-                        lambda _llm, _model, prompt, system, _settings: _answer(system, prompt))
-    corrected = SimpleNamespace(platform_token="test", openai_api_key="",
-                                notes_model="corrected-reviewer",
-                                notes_fact_check=False, notes_claim_audit=True)
+    corrected = SimpleNamespace(platform_token="test", openai_api_key="", notes_model="corrected-reviewer")
+    monkeypatch.setattr(media, "_recovery_llm", lambda *_: "明文是加密前的信息。")
     assert media.write_notes(transcript, [], fresh, corrected, "课程") == fresh
-    fresh_note = fresh.read_text("utf-8")
-    assert "明文是加密前的信息" in fresh_note
-    assert "待核对（未能完全核实）" not in fresh_note
-    assert "（回看 " not in fresh_note
-
-    # An unaudited addition still cannot sneak into a finished note.
-    target.write_text(note + "\n未经审校的新增断言。", "utf-8")
-    with pytest.raises(RuntimeError, match="没有匹配当前证据"):
+    assert json.loads(note_editor.report_path(fresh).read_text("utf-8"))["content_complete"] is None
+    target.write_text(note + "\n未经评审的新增内容。", "utf-8")
+    with pytest.raises(RuntimeError, match="来源或保存记录不完整"):
         media.write_notes(transcript, [], target, settings, "课程")
 
 
-def test_partial_slide_text_only_enters_focused_fact_repair(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False)
+def test_partial_slide_text_is_bound_for_term_review_without_expanding_transcript(tmp_path, monkeypatch):
+    from pku_sync import note_editor
+    settings = SimpleNamespace(platform_token="test", openai_api_key="", notes_model="test")
     transcript = {"segments": [{"start": 0, "end": 20,
-                                 "text": "卡契斯基分析密钥长度四个字母以上，计算重复片段的距离。"}]}
-    source = {"title": "古典密码.pdf", "locator": "第 119 页",
-              "status": "partial", "text": "一般来说密码分析家只考虑4个字母以上的密钥长度。\n图表另见原件。"}
-    initial_sources = []
-    repair_sources = []
-
-    def draft(*args, **kwargs):
-        initial_sources.extend(kwargs["sources"])
-        return ("卡契斯基测试对长字符串（通常 4 字母以上）的重复距离求因数。"
-                "重合指数 IC 证实周期猜测。")
-
-    def repair(*args, **kwargs):
-        repair_sources.extend(kwargs["sources"])
-        return ("卡契斯基分析一般只考虑 4 个字母以上的密钥候选长度。"
-                "重合指数 IC 的结果支持周期猜测。")
-
-    monkeypatch.setattr(media, "_summarize", draft)
-    monkeypatch.setattr(media, "_repair_factual_conflicts", repair)
+                               "text": "卡契斯基分析密钥长度四个字母以上，计算重复片段的距离。"}]}
+    source = {"title": "古典密码.pdf", "locator": "第 119 页", "status": "partial",
+              "text": "一般来说密码分析家只考虑4个字母以上的密钥长度。\n图表另见原件。"}
+    bodies = ["卡契斯基测试考虑四字母以上的重复字符串。",
+              "卡契斯基分析一般只考虑 4 个字母以上的密钥候选长度。图表请查看原件。"]
+    calls = []
+    def provider(_llm, _model, prompt, system, _settings):
+        payload = json.loads(prompt); calls.append(payload)
+        assert "courseware" not in payload and payload["transcript"] == transcript["segments"]
+        return bodies[-1]
+    monkeypatch.setattr(media, "_recovery_llm", provider)
+    monkeypatch.setattr(media, "_remove_misattributed_kasiski_limit", lambda *_: pytest.fail("word-rule repair"))
     target = tmp_path / "notes.md"
     media.write_notes(transcript, [], target, settings, "课程", source_context=[source])
-    assert initial_sources == []
-    assert [(row["locator"], row["status"]) for row in repair_sources] == [
-        ("第 119 页", "partial")]
-    assert "4 个字母以上的密钥候选长度" in target.read_text("utf-8")
-    assert "图片和未提取部分未用于笔记生成" in target.read_text("utf-8")
+    note = target.read_text("utf-8")
+    assert bodies[-1] in note and len(calls) == 1
+    report = json.loads(note_editor.report_path(target).read_text("utf-8"))
+    assert report["sources_sha256"] == note_editor.fingerprint([source])
+    assert source["status"] == "partial" and source["text"].endswith("图表另见原件。")
+    assert note_editor.review_record_issues(target, transcript, [source]) == []
 
 
 def test_misattributed_kasiski_limit_is_removed_only_with_exact_matched_slide():

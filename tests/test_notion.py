@@ -7,6 +7,8 @@ import json as json_lib
 import httpx
 import pytest
 
+from test_notion_shared_request_cooldown import coherent_retry_clock as coherent_retry_clock
+
 from pku_sync import notion
 from pku_sync.notion import (
     NotionClient,
@@ -205,8 +207,8 @@ def test_api_error_with_non_json_body(monkeypatch):
             client.whoami()
 
 
-def test_backoff_honors_retry_after_with_cap():
-    assert notion._backoff(httpx.Response(429, headers={"Retry-After": "600"}), 1) == 30.0
+def test_backoff_honors_full_retry_after():
+    assert notion._backoff(httpx.Response(429, headers={"Retry-After": "600"}), 1) == 600.0
     assert notion._backoff(httpx.Response(429, headers={"Retry-After": "3"}), 1) == 3.0
     assert notion._backoff(httpx.Response(429), 2) == 4.0
 
@@ -267,6 +269,36 @@ def test_create_page_appends_children_overflow():
     with make_client(handler) as client:
         client.create_page("a" * 32, "标题", children=blocks)
     assert calls == [("create", 100), ("append", 100), ("append", 50)]
+
+
+def test_positioned_media_batches_return_only_new_ids_and_keep_student_tail(monkeypatch):
+    from pku_sync import notion
+    # The live 2026 file-upload insertion response includes the existing tail
+    # after the new block. It is not a list of exclusively created identities.
+    monkeypatch.setattr(notion, "_BLOCK_BATCH", 1)
+    anchor, student = "a" * 32, "b" * 32
+    first, second = "c" * 32, "d" * 32
+    children = [{"id": anchor, "type": "paragraph"},
+                {"id": student, "type": "paragraph"}]
+    afters = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        payload = json_lib.loads(request.read())
+        after = payload["position"]["after_block"]["id"].replace("-", "")
+        afters.append(after)
+        index = next(i for i, block in enumerate(children) if block["id"] == after)
+        incoming = dict(payload["children"][0], id=first if len(afters) == 1 else second)
+        children.insert(index + 1, incoming)
+        return httpx.Response(200, json={"results": children[index + 1:], "has_more": False})
+
+    blocks = markdown_to_blocks("![课堂图一](file-upload://" + "e" * 32 + ")\n\n"
+                                "![课堂图二](file-upload://" + "f" * 32 + ")")
+    with make_client(handler) as client:
+        created = client.append_blocks("1" * 32, blocks, after=anchor, retry=False)
+    assert [block["id"] for block in created] == [first, second]
+    assert afters == [anchor, first]
+    assert [block["id"] for block in children] == [anchor, first, second, student]
 
 
 def test_append_blocks_batches():

@@ -88,8 +88,12 @@ def occupy_port(port: int) -> socket.socket:
         # earlier tests; a second LIVE bind is still refused (that needs
         # SO_REUSEPORT), so the fallback it stands in for stays honest.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", port))
-    sock.listen(8)
+    try:
+        sock.bind(("127.0.0.1", port))
+        sock.listen(8)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 
@@ -358,10 +362,18 @@ def test_callback_server_binds_loopback_only():
 
 def test_both_callback_ports_occupied_raises_pinned_error(monkeypatch, tmp_path):
     isolated_env(monkeypatch, tmp_path)
+    require_free(8765)
+    require_free(8766)
     first = occupy_port(8765)
-    second = occupy_port(8766)
+    second = None
     urls: list[str] = []
     try:
+        try:
+            second = occupy_port(8766)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 10048:
+                pytest.skip("callback port 8766 became unavailable during Windows fixture setup")
+            raise
         with pytest.raises(NotionError) as excinfo:
             notion_login.login_via_relay(
                 make_settings(),
@@ -382,12 +394,31 @@ def test_both_callback_ports_occupied_raises_pinned_error(monkeypatch, tmp_path)
         assert_occupant_alive(second, 8766)
     finally:
         first.close()
-        second.close()
+        if second is not None:
+            second.close()
     assert not (tmp_path / ".env").exists()
 
 
 def test_callback_ports_are_exactly_the_approved_pair():
     assert CALLBACK_PORTS == (8765, 8766)
+
+
+def test_busy_callback_error_does_not_depend_on_available_test_ports(monkeypatch, tmp_path):
+    isolated_env(monkeypatch, tmp_path)
+    attempts = []
+    urls = []
+    def occupied(port, state):
+        attempts.append(port)
+        raise OSError(10048, "simulated occupied Windows loopback port")
+    monkeypatch.setattr(notion_login, "_CallbackServer", occupied)
+    with pytest.raises(NotionError) as error:
+        notion_login.login_via_relay(make_settings(), port=8765, open_browser=False,
+                                     timeout=5, on_url=urls.append,
+                                     transport=httpx.MockTransport(lambda request: pytest.fail("relay called")))
+    assert attempts == [8765, 8766]
+    assert str(error.value) == CALLBACK_PORTS_BUSY_MESSAGE
+    assert not urls
+    assert not (tmp_path / ".env").exists()
 
 
 def test_login_via_relay_refuses_ports_outside_the_approved_pair(monkeypatch, tmp_path):

@@ -19,10 +19,9 @@ from pypdf.errors import PdfReadError
 _SUPPORTED = {".pdf", ".pptx", ".docx"}
 _EXCLUDED_DIRS = {"课程资料", "教学大纲", "课程作业", "参考资料", "参考文献"}
 # The matching chapter may be near the end of a full-semester slide deck.
-# AI requests still select at most eight pages / 12k characters per chapter;
-# this is only a local extraction ceiling, not an upload allowance.
+# The editor separately batches extracted text to fit requests. Any local
+# page ceiling must be reported; individual page text must never be cropped.
 _PAGE_LIMIT = 256
-_TEXT_LIMIT = 2500
 
 
 def _material_matches(stem: str, recording_date: date) -> bool:
@@ -32,11 +31,10 @@ def _material_matches(stem: str, recording_date: date) -> bool:
 
 
 def _clean(text: str) -> str:
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)[:_TEXT_LIMIT]
+    return text.strip()
 
 
-def _office_pages(path: Path) -> list[tuple[str, str]]:
+def _office_pages(path: Path) -> list[tuple[str, str, str]]:
     pages = []
     with zipfile.ZipFile(path) as archive:
         if path.suffix.lower() == ".pptx":
@@ -44,18 +42,19 @@ def _office_pages(path: Path) -> list[tuple[str, str]]:
                 (name for name in archive.namelist()
                  if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)),
                 key=lambda name: int(re.search(r"slide(\d+)", name).group(1)),
-            )[:_PAGE_LIMIT]
+            )
             label = "第 {number} 张"
         else:
             names = ["word/document.xml"] if "word/document.xml" in archive.namelist() else []
             label = "正文"
-        for index, name in enumerate(names, 1):
+        for index, name in enumerate(names[:_PAGE_LIMIT], 1):
             root = ElementTree.fromstring(archive.read(name))
             text = " ".join(node.text or "" for node in root.iter()
                             if node.tag.rsplit("}", 1)[-1] == "t")
             cleaned = _clean(text)
-            if cleaned:
-                pages.append((label.format(number=index), cleaned))
+            pages.append((label.format(number=index), cleaned, "readable" if cleaned else "unreadable"))
+        if len(names) > _PAGE_LIMIT:
+            pages.append((f"第 {_PAGE_LIMIT + 1}–{len(names)} 张（共 {len(names)} 张）", "", "truncated"))
     return pages
 
 
@@ -66,13 +65,12 @@ def _pdf_pages(path: Path) -> list[tuple[str, str, str]]:
     result = []
     for index, page in enumerate(reader.pages[:_PAGE_LIMIT], 1):
         cleaned = _clean(page.extract_text() or "")
-        # A short text layer beside embedded images is often only the page
-        # title or question number. Treating it as the complete slide/question
-        # would give a student false confidence that the note covers it.
+        # Extraction observes image presence, not whether a certain word
+        # count sufficiently represents its meaning. Images are not OCR'd.
         has_images = bool(page.images)
         if not cleaned:
             status = "unreadable"
-        elif has_images and len(cleaned) < 120:
+        elif has_images:
             status = "partial"
         else:
             status = "readable"

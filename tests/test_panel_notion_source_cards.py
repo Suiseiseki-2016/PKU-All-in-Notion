@@ -60,6 +60,130 @@ class CardClient:
         raise AssertionError(block_id)
 
 
+def test_unchanged_section_status_retains_real_observation_without_timestamp_only_write():
+    client = CardClient()
+    detail = {'synced_at': '2026-10-08T00:00:00Z',
+              'synced_at_label': '2026-10-08 08:00 北京时间'}
+    _sync_source_status(client, 'section', '资料', detail, 3)
+    before = deepcopy(client.pages)
+    detail.update(synced_at='2026-10-08T00:05:00Z',
+                  synced_at_label='2026-10-08 08:05 北京时间')
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Unchanged source status must not issue a write just for its clock')
+    original_update = client.update_paragraph
+    client.update_paragraph = forbidden
+    _sync_source_status(client, 'section', '资料', detail, 3)
+    assert client.pages == before
+    client.update_paragraph = original_update
+    _sync_source_status(client, 'section', '资料', detail, 4)
+    assert '08:05 北京时间 读取到 4 项资料' in visible(client.pages['section'][0])
+    assert client.pages != before
+
+
+def test_source_card_complete_reads_overlap_but_fail_before_any_partial_write(tmp_path):
+    import threading
+    client, state = CardClient(), {}
+    detail = course('交 PDF', '10月1日')
+    detail['assignments'] *= 4
+    detail['assignments'] = [dict(item, content_id=f'_{number}_1',
+                                 source_id=f'source-{number}', title=f'作业{number}')
+                             for number, item in enumerate(detail['assignments'])]
+    _sync_source_section(client, tmp_path, '_456_1', '作业', 'section', detail, state)
+    before, old_state = deepcopy(client.pages), deepcopy(state)
+    original_read = client.list_children
+    barrier = threading.Barrier(4, timeout=2)
+    observed = []
+    def overlapping_read(page):
+        if page != 'section':
+            observed.append(page)
+            barrier.wait()
+            if page == client.titles['作业3']:
+                raise RuntimeError('One real card could not be completely read')
+        return original_read(page)
+    client.list_children = overlapping_read
+    with pytest.raises(RuntimeError, match='One real card'):
+        _sync_source_section(client, tmp_path, '_456_1', '作业', 'section', detail, state)
+    assert len(observed) == 4
+    assert client.pages == before and state == old_state
+
+
+def test_student_edit_after_batch_observation_is_detected_and_preserved(tmp_path):
+    from pku_sync.notion import markdown_to_blocks
+    client, state = CardClient(), {}
+    sync(client, state, '交 PDF', '10月1日', tmp_path)
+    page = client.titles['第一次书面作业']
+    original_read = client.list_children
+    changed = []
+    def read(target):
+        result = original_read(target)
+        if target == page and not changed:
+            changed.append(True)
+            client.pages[page].append(client._new(markdown_to_blocks('学生在同步期间新增的答案')[0]))
+        return result
+    client.list_children = read
+    with pytest.raises(ValueError, match='同步期间发生变化'):
+        sync(client, state, '交 PDF', '10月1日', tmp_path)
+    assert visible(client.pages[page][-1]) == '学生在同步期间新增的答案'
+
+
+def test_remote_missing_requirement_is_repaired_even_with_matching_digest():
+    client, state = CardClient(), {}
+    blocks = sync(client, state, "请提交 PDF", "10月1日 23:30")
+    index = next(i for i, block in enumerate(blocks) if "要交什么" in visible(block))
+    blocks.pop(index)
+    repaired = sync(client, state, "请提交 PDF", "10月1日 23:30")
+    assert any("要交什么：请提交 PDF" == visible(block) for block in repaired)
+
+
+def test_workspace_adopts_only_matching_child_receipt_without_touching_legacy(tmp_path):
+    import json
+    client, old = CardClient(), {}
+    detail = course('交 PDF', '10月1日')
+    _sync_source_section(client, tmp_path, '_1_1', '作业', 'section', detail, old)
+    legacy_bytes = (tmp_path / 'notion-source-state.json').read_bytes()
+    before = deepcopy(client.pages)
+    journal = tmp_path / '.workspace/source-state.json'
+    current = {}
+    _sync_source_section(client, tmp_path, '_1_1', '作业', 'section', detail, current,
+                         state_path=journal, recovery_state=old)
+    assert client.pages == before
+    assert json.loads(journal.read_text('utf-8')) == old == current
+    assert (tmp_path / 'notion-source-state.json').read_bytes() == legacy_bytes
+
+
+def test_foreign_pending_receipt_cannot_be_adopted_into_workspace(tmp_path):
+    import json
+    client, old = CardClient(), {}
+    detail = course('交 PDF', '10月1日')
+    _sync_source_section(client, tmp_path, '_1_1', '作业', 'section', detail, old)
+    foreign = deepcopy(old)
+    for row in foreign.values():
+        row['id'] = 'foreign-page'
+        row['pending'] = {'id': 'foreign-page', 'created_blocks': {'foreign-block': 'x'}}
+    journal, current = tmp_path / '.workspace/source-state.json', {}
+    _sync_source_section(client, tmp_path, '_1_1', '作业', 'section', detail, current,
+                         state_path=journal, recovery_state=foreign)
+    saved = json.loads(journal.read_text('utf-8'))
+    assert saved and all(row['id'] != 'foreign-page' for row in saved.values())
+    assert all('foreign-block' not in row['owned_blocks'] for row in saved.values())
+
+
+def test_new_device_updates_same_source_card_without_local_manifest_and_keeps_notes():
+    client = CardClient()
+    data = course("交 PDF", "10月1日")
+    data["assignments"][0]["source_id"] = "pku:course:assignments:_123_1"
+    _sync_source_section(client, None, "_456_1", "作业", "section", data, {})
+    page_id = client.titles["第一次书面作业"]
+    client.append_blocks(page_id, [paragraph("我写的补充提醒")])
+    data["assignments"][0]["instructions"] = "老师改为交 Word"
+    data["assignments"][0]["due_at_label"] = "10月3日"
+    _sync_source_section(client, None, "_456_1", "作业", "section", data, {})
+    texts = [visible(block) for block in client.pages[page_id]]
+    assert "10月3日" in texts[0]
+    assert "要交什么：老师改为交 Word" in texts
+    assert "我写的补充提醒" in texts
+
+
 class InterruptedCardClient(CardClient):
     def __init__(self):
         super().__init__()
@@ -218,6 +342,93 @@ def test_new_card_update_removes_old_requirements_without_history_note():
     assert "初版要求" not in " ".join(texts)
     assert "10月1日" not in " ".join(texts)
     assert not any("旧版同步记录" in text for text in texts)
+
+
+def test_refresh_time_only_updates_owned_timestamp_without_retiring_old_blocks():
+    client, state = CardClient(), {}
+    detail = course("原有正式要求", "10月1日")
+    detail["assignments"][0]["source_id"] = "pku:course:assignments:_123_1"
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    page_id = client.titles["第一次书面作业"]
+    client.append_blocks(page_id, [paragraph("学生保留内容")])
+    original = deepcopy(client.pages[page_id])
+    def forbid_retirement(*args, **kwargs):
+        raise AssertionError("a later runner cannot retire original owned blocks")
+    client.archive_block = forbid_retirement
+    detail["synced_at"] = "2026-10-08T18:00:00+08:00"
+    detail["synced_at_label"] = "2026-10-08 18:00 北京时间"
+    # A source field that is not rendered must not force a body replacement.
+    detail["assignments"][0]["observed_status"] = "fresh"
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    actual = client.pages[page_id]
+    assert [row["id"] for row in actual] == [row["id"] for row in original]
+    changed = [(before, after) for before, after in zip(original, actual) if before != after]
+    assert len(changed) == 1
+    assert "目录读取：2026-10-08 18:00 北京时间" in visible(changed[0][1])
+    assert actual[-1] == original[-1]
+    assert not next(iter(state.values())).get("pending")
+
+
+def test_unchanged_source_hash_does_not_rewrite_card_for_new_read_time():
+    client, state = CardClient(), {}
+    detail = course("原有正式要求", "10月1日")
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    page_id = client.titles["第一次书面作业"]
+    original = deepcopy(client.pages[page_id])
+    detail["synced_at"] = "2026-10-08T18:00:00+08:00"
+    detail["synced_at_label"] = "2026-10-08 18:00 北京时间"
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    assert client.pages[page_id] == original
+
+
+def test_already_present_current_source_body_reuses_readback_without_adopting_blocks():
+    client, state = CardClient(), {}
+    detail = course("原有正式要求", "10月1日")
+    detail["assignments"][0]["source_id"] = "pku:course:assignments:_123_1"
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    page_id = client.titles["第一次书面作业"]
+    owned_before = deepcopy(next(iter(state.values()))["owned_blocks"])
+    # A different writer already inserted the verified source text. Its IDs
+    # must never be granted local mutation ownership by this read-only reuse.
+    client.append_blocks(page_id, _item_blocks("_456_1", "作业", detail["assignments"][0],
+                                              detail["synced_at_label"])[1:],
+                         after=client.pages[page_id][0]["id"])
+    client.append_blocks(page_id, [paragraph("学生保留内容")])
+    original = deepcopy(client.pages[page_id])
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Do not replay an append or retire another writer's original blocks")
+    client.append_blocks = client.archive_block = forbidden
+    detail["assignments"][0]["observed_status"] = "fresh"
+    detail["synced_at_label"] = "2026-10-08 18:00 北京时间"
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    assert client.pages[page_id] == original
+    assert next(iter(state.values()))["owned_blocks"] == owned_before
+    # A matching digest cannot conceal a later edit of the unowned prefix.
+    changed = client.pages[page_id][1]
+    changed["paragraph"]["rich_text"][0]["text"]["content"] = "学生修改的要求"
+    edited = deepcopy(client.pages[page_id])
+    with pytest.raises(AssertionError, match="Do not replay"):
+        _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    assert client.pages[page_id] == edited
+    assert next(iter(state.values()))["owned_blocks"] == owned_before
+
+
+def test_remote_read_time_change_reuses_verified_body_without_adopting_signature():
+    client, state = CardClient(), {}
+    detail = course("原有正式要求", "10月1日")
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    page_id = client.titles["第一次书面作业"]
+    owned_before = deepcopy(next(iter(state.values()))["owned_blocks"])
+    timestamp = client.pages[page_id][-1]
+    client.update_paragraph(timestamp["id"], "请以教学网原页面为准。目录读取：2026-10-08 18:00 北京时间。课程标识：_456_1。")
+    client.append_blocks(page_id, [paragraph("学生保留内容")])
+    original = deepcopy(client.pages[page_id])
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A different observation time is not authority to rewrite or own the body")
+    client.append_blocks = client.archive_block = client.update_paragraph = forbidden
+    _sync_source_section(client, None, "_456_1", "作业", "section", detail, state)
+    assert client.pages[page_id] == original
+    assert next(iter(state.values()))["owned_blocks"] == owned_before
 
 
 def test_existing_layout_two_card_marks_untracked_old_body_as_historical():

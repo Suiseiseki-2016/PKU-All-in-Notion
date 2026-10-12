@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+from fractions import Fraction
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 import tempfile
@@ -57,6 +58,7 @@ _AUDIO_CODEC = "aac"
 _AUDIO_RATE = 16000
 _AUDIO_LAYOUT = "mono"
 _CHUNK_SECONDS = 600
+_AUDIO_PARTS_VERSION = 2
 
 
 class _NoAudioTrack(Exception):
@@ -147,6 +149,75 @@ def _audio_duration(video: Path) -> float:
     return 0.0
 
 
+def _encode_audio_parts(frames, directory: Path, chunk_seconds: int, progress=None,
+                        total_samples: int = 0) -> list[tuple[Path, float]]:
+    """Bound each part by resampled samples, with timestamps local to the part."""
+    import av
+    from av.audio.fifo import AudioFifo
+    from av.audio.resampler import AudioResampler
+
+    if type(chunk_seconds) is not int or chunk_seconds <= 0:
+        raise ValueError("音频分段长度必须是正整数秒。")
+    limit = chunk_seconds * _AUDIO_RATE
+    directory.mkdir(parents=True, exist_ok=True)
+    parts = []
+    fifo = AudioFifo()
+    resampler = AudioResampler(format="fltp", layout=_AUDIO_LAYOUT, rate=_AUDIO_RATE)
+    sink, track = None, None
+    samples, start, last_report = 0, 0, 0
+    if progress:
+        progress(0, total_samples, "audio_extract", 0)
+
+    def write_resampled(frame):
+        nonlocal sink, track, samples, start, last_report
+        # Source timestamp gaps must not turn into extra billed silence.
+        frame.pts = None
+        fifo.write(frame)
+        while fifo.samples:
+            if sink is None:
+                path = directory / f"part-{len(parts):04d}.m4a"
+                # MP4's default movie timescale rounds edit-list duration to
+                # milliseconds. Preserve the exact 16 kHz sample boundary.
+                sink = av.open(str(path), mode="w", options={"movie_timescale": str(_AUDIO_RATE)})
+                track = sink.add_stream(_AUDIO_CODEC, rate=_AUDIO_RATE)
+                track.layout = _AUDIO_LAYOUT
+                parts.append((path, start / _AUDIO_RATE))
+            piece = fifo.read(min(fifo.samples, limit - (samples - start)))
+            piece.pts = samples - start
+            piece.time_base = Fraction(1, _AUDIO_RATE)
+            for packet in track.encode(piece):
+                sink.mux(packet)
+            samples += piece.samples
+            if progress and samples - last_report >= 30 * _AUDIO_RATE:
+                progress(min(samples, total_samples) if total_samples else samples,
+                         total_samples, "audio_extract", 0)
+                last_report = samples
+            if samples - start == limit:
+                for packet in track.encode(None):
+                    sink.mux(packet)
+                sink.close()
+                sink = None
+                start = samples
+
+    try:
+        for frame in frames:
+            for resampled in resampler.resample(frame):
+                write_resampled(resampled)
+        for resampled in resampler.resample(None):
+            write_resampled(resampled)
+        if sink is not None:
+            for packet in track.encode(None):
+                sink.mux(packet)
+            sink.close()
+            sink = None
+        if progress:
+            progress(total_samples or samples, total_samples or samples, "audio_extract", 0)
+    finally:
+        if sink is not None:
+            sink.close()
+    return parts
+
+
 def _extract_audio_parts(video: Path, directory: Path, chunk_seconds: int, progress=None) -> list[tuple[Path, float]]:
     """Decode once and encode upload-sized AAC parts directly from a long video.
 
@@ -163,64 +234,15 @@ def _extract_audio_parts(video: Path, directory: Path, chunk_seconds: int, progr
             f"{_detail(exc)}。请重新安装本应用后重试{_decoder_note()}。"
         ) from exc
 
-    parts: list[tuple[Path, float]] = []
-    sink = None
     try:
         with av.open(str(video)) as container:
             source = next((s for s in container.streams if s.type == "audio"), None)
             if source is None:
                 raise _NoAudioTrack(video.name)
-            directory.mkdir(parents=True, exist_ok=True)
-            track = None
-            resampler = None
-            samples = 0
-            start = 0
             total_samples = (int(float(source.duration * source.time_base) * _AUDIO_RATE)
                              if source.duration and source.time_base else 0)
-            last_report = 0
-            if progress:
-                progress(0, total_samples, "audio_extract", 0)
-
-            def write_frame(frame) -> None:
-                nonlocal sink, track, start, samples, last_report
-                if sink is None:
-                    path = directory / f"part-{len(parts):04d}.m4a"
-                    sink = av.open(str(path), mode="w")
-                    track = sink.add_stream(_AUDIO_CODEC, rate=_AUDIO_RATE)
-                    track.layout = _AUDIO_LAYOUT
-                    parts.append((path, start / _AUDIO_RATE))
-                for packet in track.encode(frame):
-                    sink.mux(packet)
-                samples += frame.samples
-                if progress and samples - last_report >= 30 * _AUDIO_RATE:
-                    progress(min(samples, total_samples) if total_samples else samples,
-                             total_samples, "audio_extract", 0)
-                    last_report = samples
-                if samples - start >= chunk_seconds * _AUDIO_RATE:
-                    for packet in track.encode(None):
-                        sink.mux(packet)
-                    sink.close()
-                    sink = None
-                    start = samples
-
-            for frame in container.decode(source):
-                if resampler is None:
-                    # AAC output always uses this sample format; each chunk has
-                    # its own encoder, but the resampler is shared across all.
-                    resampler = AudioResampler(format="fltp", layout=_AUDIO_LAYOUT, rate=_AUDIO_RATE)
-                for resampled in resampler.resample(frame):
-                    write_frame(resampled)
-            if resampler is not None:
-                for resampled in resampler.resample(None):
-                    write_frame(resampled)
-            if sink is not None:
-                for packet in track.encode(None):
-                    sink.mux(packet)
-                sink.close()
-                sink = None
-            if progress:
-                progress(total_samples or samples, total_samples or samples,
-                         "audio_extract", 0)
+            return _encode_audio_parts(container.decode(source), directory, chunk_seconds,
+                                       progress, total_samples)
     except _NoAudioTrack as exc:
         raise RuntimeError(
             f"云端转写在该录像里找不到音轨：{exc.args[0]}。"
@@ -231,10 +253,6 @@ def _extract_audio_parts(video: Path, directory: Path, chunk_seconds: int, progr
             f"云端转写无法读取该录像的音轨：{_detail(exc)}。"
             f"请确认录像文件完整，重新下载该录像后重试{_decoder_note()}。"
         ) from exc
-    finally:
-        if sink is not None:
-            sink.close()
-    return parts
 
 
 _RETRY_DELAY = 2.0  # covers an edge/failover reconnect window; tests zero it
@@ -291,7 +309,7 @@ def _upload(url: str, key: str, audio: Path) -> dict:
     return payload
 
 
-def _upload_direct(url: str, key: str, audio: Path) -> dict:
+def _upload_direct(url: str, key: str, audio: Path, *, source_id=None) -> dict:
     """With explicit consent, send this audio part straight to private OSS."""
     import httpx
     from urllib.parse import urlsplit
@@ -304,8 +322,11 @@ def _upload_direct(url: str, key: str, audio: Path) -> dict:
     headers = {"Authorization": f"Bearer {key}"}
     try:
         with httpx.Client(trust_env=not dead_loopback_proxy()) as client:
+            body = {'size_bytes': audio.stat().st_size}
+            if source_id is not None:
+                body['source_id'] = source_id
             issued = client.post(base + suffix + "/direct/init", headers=headers,
-                                 json={"size_bytes": audio.stat().st_size}, timeout=30)
+                                 json=body, timeout=30)
             if issued.status_code != 200:
                 raise RuntimeError(f"音频直传授权失败（HTTP {issued.status_code}）；请检查登录与额度。")
             info = issued.json()
@@ -366,6 +387,10 @@ def transcribe_cloud(video: Path, target: Path, settings: "Settings", progress=N
         if progress:
             progress(0, len(parts), "audio_parts", 0)
         uploader = _upload_direct if direct_oss else _upload
+        source_id = getattr(settings, '_metered_operation_context', {}).get('source_id')
+        if direct_oss and source_id:
+            from functools import partial
+            uploader = partial(_upload_direct, source_id=source_id)
         if len(parts) == 1:
             payload = uploader(url, token, parts[0][0])
             if progress:
@@ -399,37 +424,7 @@ def _split_audio(audio: Path, directory: Path, chunk_seconds: int) -> list[tuple
         duration = float(stream.duration * stream.time_base) if stream.duration else 0
         if duration <= chunk_seconds:
             return [(audio, 0.0)]
-        parts: list[tuple[Path, float]] = []
-        sink = None
-        track = None
-        samples = 0
-        start = 0
-        try:
-            for frame in source.decode(stream):
-                if sink is None:
-                    path = directory / f"part-{len(parts):04d}.m4a"
-                    sink = av.open(str(path), mode="w")
-                    track = sink.add_stream(_AUDIO_CODEC, rate=_AUDIO_RATE)
-                    track.layout = _AUDIO_LAYOUT
-                    parts.append((path, start / _AUDIO_RATE))
-                for packet in track.encode(frame):
-                    sink.mux(packet)
-                samples += frame.samples
-                if samples - start >= chunk_seconds * _AUDIO_RATE:
-                    for packet in track.encode(None):
-                        sink.mux(packet)
-                    sink.close()
-                    sink = None
-                    start = samples
-            if sink is not None:
-                for packet in track.encode(None):
-                    sink.mux(packet)
-                sink.close()
-                sink = None
-        finally:
-            if sink is not None:
-                sink.close()
-        return parts or [(audio, 0.0)]
+        return _encode_audio_parts(source.decode(stream), directory, chunk_seconds) or [(audio, 0.0)]
 
 
 def _transcribe_parts(
@@ -438,7 +433,7 @@ def _transcribe_parts(
 ) -> dict:
     """Run two uploads at a time; retain successful replies for a later retry."""
     stat = video.stat()
-    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}".encode()).hexdigest()[:16]
+    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
     cache = target.parent / ".transcription-parts"
     cache.mkdir(parents=True, exist_ok=True)
     replies: list[dict | None] = [None] * len(parts)
@@ -492,7 +487,7 @@ def _transcribe_parts(
 
 def _clear_part_cache(video: Path, target: Path, count: int) -> None:
     stat = video.stat()
-    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}".encode()).hexdigest()[:16]
+    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
     cache = target.parent / ".transcription-parts"
     for index in range(count):
         (cache / f"{signature}-{index:04d}.json").unlink(missing_ok=True)

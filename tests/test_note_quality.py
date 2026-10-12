@@ -20,7 +20,7 @@ def _transcript():
 
 def test_complete_timeline_does_not_claim_semantic_completeness():
     result = audit_note(_note("概念。"), _transcript())
-    assert result["checks"][0]["status"] == "pass"
+    assert next(row["status"] for row in result["checks"] if row["name"] == "整节时间覆盖") == "pass"
     assert result["verdict"] == "incomplete"
     assert any(row["status"] == "unverified" for row in result["checks"])
 
@@ -35,7 +35,7 @@ def test_natural_layout_audits_classroom_body_without_raw_oral_appendix():
 def test_note_ending_early_fails_even_when_it_has_sources():
     result = audit_note(_note("概念。", "05:00"), _transcript(), sources=[])
     assert result["verdict"] == "fail"
-    assert result["checks"][0]["status"] == "fail"
+    assert next(row["status"] for row in result["checks"] if row["name"] == "整节时间覆盖") == "fail"
 
 
 def test_cited_page_must_exist_and_be_readable():

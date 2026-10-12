@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,17 +19,60 @@ from .envfile import write_env_values
 from .notion_login import env_file_path
 
 DEFAULT_TRANSCRIBE_URL = "https://pku.aeoluswu.info/v1/transcribe"
+_request_client = ContextVar('platform_task_request_client', default=None)
+_read_only_worker = ContextVar('platform_read_only_preparation_worker', default=False)
+_read_worker_stop = ContextVar('platform_read_only_worker_stop', default=None)
+
+
+@contextmanager
+def request_scope():
+    """Reuse connections only for this task; retain each request's credentials."""
+    if _request_client.get() is not None:
+        yield
+        return
+    with httpx.Client(follow_redirects=False) as client:
+        token = _request_client.set(client)
+        try:
+            yield
+        finally:
+            _request_client.reset(token)
 
 
 def _request(method: str, url: str, **kwargs) -> httpx.Response:
-    """Retry relay requests directly when an inherited proxy transport fails."""
+    """Share the caller's read budget; never implicitly replay uncertain writes."""
+    if _read_only_worker.get() and method != 'GET':
+        raise PlatformError('课程准备线程只读，禁止发出修改请求。')
+    stopped = _read_worker_stop.get()
+    if stopped is not None and stopped.is_set():
+        raise PlatformError('课程准备读取已取消。')
     sender = {"GET": httpx.get, "POST": httpx.post, "PUT": httpx.put}[method]
+    timeout = kwargs.get('timeout', 5.0)
+    budget = timeout.read if isinstance(timeout, httpx.Timeout) else timeout
+    deadline = time.monotonic() + budget if method == 'GET' and budget is not None else None
     try:
-        return sender(url, **kwargs)
+        client = _request_client.get()
+        return client.request(method, url, **kwargs) if client is not None else sender(url, **kwargs)
     except httpx.TransportError:
+        # A response can be lost after a write has already taken effect. A
+        # transport exception does not establish that POST/PUT was rejected.
+        # Business protocols with durable idempotency keys perform their own
+        # explicit recovery; the generic transport must never replay writes.
+        if method != "GET":
+            raise
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            if isinstance(timeout, httpx.Timeout):
+                kwargs['timeout'] = httpx.Timeout(**{
+                    phase: min(value, remaining) if value is not None else None
+                    for phase, value in timeout.as_dict().items()})
+            else:
+                kwargs['timeout'] = remaining
         # A configured proxy can be alive while still breaking TLS for this
-        # relay. Retry the same HTTPS request directly before surfacing an
-        # offline state; authentication remains protected by TLS either way.
+        # relay. Retry the same HTTPS read directly before surfacing an
+        # offline state, using only the time left by the first read;
+        # authentication remains protected by TLS either way.
         with httpx.Client(trust_env=False) as client:
             return client.request(method, url, **kwargs)
 
@@ -202,18 +248,21 @@ def _fetch_account_profile(settings) -> dict:
     return {"available": True, "status": "ready", "revision": revision, "profile": profile}
 
 
-def _put_account_profile(settings, revision: int, profile: dict) -> dict:
+def _put_account_profile(settings, revision: int, profile: dict, *, replace_workspace_id=None) -> dict:
     headers = _profile_headers(settings)
     if headers is None:
         return {"available": False, "status": "signed_out"}
     url = _profile_endpoint(settings)
     if url is None:
         return {"available": False, "status": "client_unconfigured"}
+    body = {"revision": revision, "profile": profile}
+    if replace_workspace_id is not None:
+        body['replace_workspace_id'] = replace_workspace_id
     try:
         response = _put(
             url,
             headers=headers,
-            json={"revision": revision, "profile": profile},
+            json=body,
             timeout=15,
         )
     except httpx.HTTPError:
@@ -241,6 +290,12 @@ def sync_account_profile(settings) -> dict:
         return remote
     revision = remote["revision"]
     profile = remote["profile"]
+    if profile.get("notion_workspace_v2"):
+        from .panel.workspace_profile import pull
+        workspace_result = pull(settings, remote)
+        if workspace_result.get("status") != "pulled":
+            return {"available": True, "status": workspace_result["status"], "revision": revision}
+        return {'available': True, 'status': 'pulled', 'revision': revision}
     remote_home = profile.get("notion_home")
     local_home = _local_notion_home(settings)
     if not isinstance(remote_home, dict):
@@ -476,6 +531,8 @@ def _llm_error(response: httpx.Response) -> PlatformError:
         401: "云端登录已失效，请重新激活后重试。",
         402: "AI 点不足，请兑换新额度后重试。",
         403: "请先完成邮箱验证后再使用转写、AI 或兑换额度",
+        409: "任务源身份与已有记录不一致，已停止重复调用；请核对原任务及费用记录。",
+        413: "AI 请求超过云端传输容量，任务未提交；原资料与已完成响应保留。",
         502: "AI 服务暂时没有完成请求，请稍后重试。",
         503: "AI 服务暂未配置，请联系管理员后重试。",
     }
@@ -484,17 +541,37 @@ def _llm_error(response: httpx.Response) -> PlatformError:
     return error
 
 
-def _llm_payload_hash(operation: str, system: str, user: str) -> str:
+# The deployed relay's default HTTP body allowance. Count the real UTF-8
+# JSON envelope, including an escaped prompt and operation metadata.
+LLM_REQUEST_MAX_BYTES = 250 * 1024
+SELECTABLE_NOTE_MODELS = frozenset({"qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902"})
+
+
+def llm_request_body_size(operation, system, prompt, *, model=None, operation_context=None):
+    body = {"operation": operation, "system": system, "user": prompt,
+            "idempotency_key": "0" * 32}
+    if model is not None:
+        body["model"] = model
+    if operation_context:
+        body["operation_context"] = operation_context
+    return len(httpx.Request("POST", "https://unused.invalid/v1/llm/jobs", json=body).content)
+
+
+def _llm_payload_hash(operation: str, system: str, user: str, *, model: str | None = None) -> str:
+    payload = {"operation": operation, "system": system, "user": user}
+    if operation == "notes" and model is not None:
+        payload["model"] = model
     request = json.dumps(
-        {"operation": operation, "system": system, "user": user},
+        payload,
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(request.encode("utf-8")).hexdigest()
 
 
-def _llm_job_key(operation: str, system: str, user: str, *, attempt: int = 0) -> str:
+def _llm_job_key(operation: str, system: str, user: str, *, attempt: int = 0,
+                 model: str | None = None) -> str:
     """Use a stable key until the relay explicitly reports job failure."""
-    digest = _llm_payload_hash(operation, system, user)
+    digest = _llm_payload_hash(operation, system, user, model=model)
     return hashlib.sha256(f"{digest}:{attempt}".encode("ascii")).hexdigest()[:32]
 
 
@@ -531,17 +608,38 @@ def _advance_llm_job_attempt(path: Path, attempt: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _llm_notes_job(operation: str, prompt: str, settings, *, system: str, token: str) -> dict:
+def _llm_durable_job(operation: str, prompt: str, settings, *, system: str, token: str, operation_context=None) -> dict:
+    selected_model = None
+    if operation == "notes":
+        requested_model = getattr(settings, "notes_model", None)
+        if requested_model in SELECTABLE_NOTE_MODELS:
+            selected_model = requested_model
+        elif requested_model not in (None, "", "qwen/qwen3.5-397b-a17b"):
+            raise PlatformError("云端笔记模型无效；请明确选择服务支持的模型，原稿保留。")
+        if selected_model == "qwen3.7-plus" and len(system) + len(prompt) > 30000:
+            raise PlatformError("云端笔记模型完整输入超过 30000 字符；来源未裁剪，任务未提交。")
     endpoint = _endpoint(settings.cloud_transcribe_url, "/v1/llm/jobs")
     headers = {"Authorization": f"Bearer {token}"}
-    state_path = _llm_job_state_path(settings, _llm_payload_hash(operation, system, prompt))
-    attempt_number = _llm_job_attempt(state_path)
+    state_path = _llm_job_state_path(settings, _llm_payload_hash(operation, system, prompt,
+                                                            model=selected_model))
+    # Quiz/grade keys remain identical across devices and restarts. In
+    # particular an expired result or ambiguous settlement must not advance
+    # to a fresh billable request on just one device.
+    attempt_number = _llm_job_attempt(state_path) if operation == "notes" else 0
     body = {
         "operation": operation,
         "system": system,
         "user": prompt,
-        "idempotency_key": _llm_job_key(operation, system, prompt, attempt=attempt_number),
+        "idempotency_key": _llm_job_key(operation, system, prompt, attempt=attempt_number,
+                                         model=selected_model),
     }
+    if selected_model is not None:
+        body["model"] = selected_model
+    if operation_context:
+        body['operation_context'] = operation_context
+    if llm_request_body_size(operation, system, prompt, model=selected_model,
+                             operation_context=operation_context) > LLM_REQUEST_MAX_BYTES:
+        raise _llm_error(httpx.Response(413))
     configured_timeout = float(getattr(settings, "llm_timeout", _LLM_JOB_DEADLINE_SECONDS))
     deadline = time.monotonic() + min(
         _LLM_JOB_DEADLINE_SECONDS, max(1.0, configured_timeout)
@@ -598,22 +696,29 @@ def _llm_notes_job(operation: str, prompt: str, settings, *, system: str, token:
                 raise PlatformError("云端返回异常，请联系管理员")
             failure = _llm_error(httpx.Response(error_status))
             # The relay error is operator text; retain only the safe mapping.
-            _advance_llm_job_attempt(state_path, attempt_number)
+            if operation == "notes":
+                _advance_llm_job_attempt(state_path, attempt_number)
             raise failure
         if status not in {"queued", "running"}:
             raise PlatformError("云端返回异常，请联系管理员")
         time.sleep(min(_LLM_JOB_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    raise PlatformError("笔记生成仍在云端进行，请稍后重新整理；不会重复扣费。")
+    raise PlatformError("AI 任务仍在云端进行，请稍后重试；相同请求不会重复扣费。")
 
 
-def llm(operation: str, prompt: str, settings, *, system: str | None = None) -> dict:
+def llm(operation: str, prompt: str, settings, *, system: str | None = None, operation_context=None) -> dict:
     """Run one approved metered LLM operation through the relay."""
     token = (settings.platform_token or "").strip()
     if not token:
         raise PlatformError("云端登录已失效，请重新激活后重试。")
     resolved_system = system or _DEFAULT_LLM_SYSTEM
-    if operation == "notes":
-        return _llm_notes_job(operation, prompt, settings, system=resolved_system, token=token)
+    context = operation_context if operation_context is not None else getattr(settings, '_metered_operation_context', {})
+    if (not isinstance(context, dict) or set(context) - {'purpose', 'course_id', 'content_id', 'source_id', 'client_operation_id'}
+            or any(not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_:.-]{1,160}', value)
+                   for value in context.values())):
+        raise PlatformError('付费任务源身份无效，已停止发送。')
+    if operation in {"notes", "quiz", "grade", "qa"}:
+        return _llm_durable_job(operation, prompt, settings, system=resolved_system, token=token,
+                                operation_context=context)
     try:
         response = _post(
             _endpoint(settings.cloud_transcribe_url, "/v1/llm"),

@@ -55,39 +55,32 @@ def test_sentence_that_adds_new_material_is_kept():
     assert media.drop_repeated_chapter_sentences(chapter, seen) == chapter
 
 
-def test_definition_restated_in_the_next_chapter_is_written_once(tmp_path, monkeypatch):
-    settings = SimpleNamespace(platform_token="test", openai_api_key="",
-                               notes_model="test", notes_fact_check=False,
-                               notes_claim_audit=False)
-    first = ["我们先把加密的定义写清楚，加密是把明文变换成密文的过程。",
-             "第一部分的要点讲完了，接下来我们看模运算与乘法逆元。",
-             "模运算的细节我们后面还会继续展开。"]
-    second = ["再回到定义，加密是把明文变换成密文的过程。",
-              "第二部分的要点讲完了，接下来我们讲频率分析与重合指数。",
-              "频率分析要数出每个字母出现的次数。"]
-    transcript = {"segments": [
-        {"start": 0.0, "end": 20.0, "text": first[0]},
-        {"start": 25.0, "end": 45.0, "text": first[1]},
-        {"start": 50.0, "end": 70.0, "text": first[2]},
-        {"start": 250.0, "end": 270.0, "text": second[0]},
-        {"start": 275.0, "end": 295.0, "text": second[1]},
-        {"start": 300.0, "end": 320.0, "text": second[2]},
-    ]}
-    drafts = ["### 基本概念\n" + "".join(first),
-              "### 继续讨论\n" + "".join(second)]
-    calls = {"count": 0}
-
-    def draft_for_chapter(*args, **kwargs):
-        draft = drafts[min(calls["count"], len(drafts) - 1)]
-        calls["count"] += 1
-        return draft
-
-    monkeypatch.setattr(media, "_summarize", draft_for_chapter)
+def test_contextual_editor_receives_previous_chapter_without_rule_deletion(tmp_path, monkeypatch):
+    """The provider controls repetition; this verifies full input and output preservation."""
+    import copy
+    import json
+    import pytest
+    from pku_sync import note_editor
+    settings = SimpleNamespace(platform_token="test", openai_api_key="", notes_model="test")
+    first = "加密是把明文变换成密文的过程。后面继续讨论模运算。"
+    second = "再回到加密的定义，现在讲频率分析与重合指数，统计每个字母出现的次数。"
+    transcript = {"segments": [{"start": 0, "end": 70, "text": first},
+                               {"start": 250, "end": 320, "text": second}]}
+    original = copy.deepcopy(transcript)
+    final = {1: "### 基本概念\n加密是把明文变换成密文的过程，并涉及模运算。",
+             2: "### 频率分析\n在前述定义基础上，老师说明频率分析与重合指数，需要统计每个字母出现的次数。"}
+    calls = []
+    def provider(_llm, _model, prompt, system, _settings):
+        payload = json.loads(prompt); calls.append(payload)
+        part = payload["part"]
+        assert payload["transcript"] == [transcript["segments"][part-1]]
+        assert payload["previous_context"] == ([] if part == 1 else [original["segments"][0]])
+        return final[part]
+    monkeypatch.setattr(media, "_recovery_llm", provider)
+    monkeypatch.setattr(media, "drop_repeated_chapter_sentences", lambda *_: pytest.fail("lexical deletion"))
     target = tmp_path / "notes.md"
     media.write_notes(transcript, [], target, settings, "课程", window_seconds=120)
     note = target.read_text("utf-8")
-    assert calls["count"] >= 2
-    assert note.count("加密是把明文变换成密文的过程") == 1
-    assert "第二部分的要点讲完了" in note
-    assert "频率分析要数出每个字母出现的次数" in note
-    assert "第一部分的要点讲完了" in note
+    assert len(calls) == 2 and transcript == original
+    assert all(body in note for body in final.values())
+    assert note_editor.review_record_issues(target, transcript) == []

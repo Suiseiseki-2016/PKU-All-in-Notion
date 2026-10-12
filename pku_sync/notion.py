@@ -24,11 +24,17 @@ body-only, original URL and title untouched.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import mimetypes
+import math
+import os
 import re
+import threading
 import time
 import uuid as uuid_lib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -38,7 +44,7 @@ API_HOST = "https://api.notion.com"
 API_BASE = f"{API_HOST}/v1"
 API_VERSION = "2022-06-28"
 
-_RETRYABLE = (429, 500, 502, 503, 504)
+_RETRYABLE = (500, 502, 503, 504)
 _ATTEMPTS = 3
 _BLOCK_BATCH = 100  # API cap for one children payload
 _TEXT_LIMIT = 2000  # max chars in one rich-text text object
@@ -67,6 +73,49 @@ class NotionError(RuntimeError):
         self.body = body
 
 
+class _TokenCooldown:
+    """One token's server embargo, shared by all clients in this process."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._until = 0.0
+
+    def wait(self) -> None:
+        with self._condition:
+            while True:
+                remaining = self._until - time.monotonic()
+                if remaining <= 0:
+                    return
+                if not math.isfinite(remaining):
+                    raise NotionError('Notion 请求冷却时间无效，未发送请求。')
+                # Long workspace embargoes must remain complete. Bounded waits
+                # avoid Windows timeout overflow and recheck extended deadlines.
+                self._condition.wait(timeout=min(remaining, 60.0))
+
+    def defer(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        if not math.isfinite(deadline) or seconds < 0:
+            raise NotionError('Notion 请求冷却时间无效，未发送请求。')
+        with self._condition:
+            self._until = max(self._until, deadline)
+            self._condition.notify_all()
+
+
+# Retain the embargo when one client closes and another opens with the same
+# token. Anonymous keys and state live only in memory until this process exits.
+_COOLDOWN_SALT = os.urandom(32)
+_COOLDOWN_LOCK = threading.Lock()
+_TOKEN_COOLDOWNS: dict[bytes, _TokenCooldown] = {}
+
+
+def _token_cooldown(token: str) -> _TokenCooldown:
+    key = hmac.digest(_COOLDOWN_SALT, token.encode('utf8'), hashlib.sha256)
+    with _COOLDOWN_LOCK:
+        if key not in _TOKEN_COOLDOWNS:
+            _TOKEN_COOLDOWNS[key] = _TokenCooldown()
+        return _TOKEN_COOLDOWNS[key]
+
+
 class NotionClient:
     """Thin token-authed client for the subset of the REST API we use."""
 
@@ -74,12 +123,23 @@ class NotionClient:
         self,
         token: str,
         *,
-        base_url: str = API_HOST,
+        base_url: str | None = None,
         timeout: float = 60.0,
         transport: httpx.BaseTransport | None = None,
         direct_transport: httpx.BaseTransport | None = None,
     ):
+        if base_url is None:
+            base_url = API_HOST
+            boundary = os.environ.get('PKU_NOTION_API_BASE', '')
+            if boundary:
+                parsed = urlsplit(boundary)
+                if (parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost', '::1'}
+                        or not parsed.port or parsed.username or parsed.password
+                        or parsed.path not in {'', '/'} or parsed.query or parsed.fragment):
+                    raise ValueError('Notion HTTP boundary must be an explicit loopback origin')
+                base_url = boundary
         self._token = token
+        self._cooldown = _token_cooldown(token)
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._direct_transport = direct_transport
@@ -93,7 +153,8 @@ class NotionClient:
             headers=self._headers,
             timeout=timeout,
             transport=transport,
-            trust_env=not dead_loopback_proxy(),
+            trust_env=(not dead_loopback_proxy()
+                       and urlsplit(self._base).hostname not in {'127.0.0.1', 'localhost', '::1'}),
         )
 
     # -- plumbing ---------------------------------------------------------
@@ -110,6 +171,7 @@ class NotionClient:
         headers: dict | None,
     ) -> httpx.Response:
         """Retry one safe read without a flaky inherited desktop proxy."""
+        self._cooldown.wait()
         with httpx.Client(
             base_url=self._base,
             headers=self._headers,
@@ -117,7 +179,17 @@ class NotionClient:
             transport=self._direct_transport,
             trust_env=False,
         ) as client:
-            return client.request(method, url, params=params, headers=headers)
+            response = client.request(method, url, params=params, headers=headers)
+        # The direct read retains its one-attempt budget, but its final throttle
+        # must still pause other clients using this token.
+        self._record_throttle(response, _ATTEMPTS)
+        return response
+
+    def _record_throttle(self, response: httpx.Response, attempt: int) -> bool:
+        if response.status_code not in {429, 529} or _access_blocked(response):
+            return False
+        self._cooldown.defer(_backoff(response, attempt))
+        return True
 
     def __enter__(self) -> "NotionClient":
         return self
@@ -136,11 +208,26 @@ class NotionClient:
         headers: dict | None = None,
         retry: bool = True,
     ) -> dict:
-        """One request; ambiguous non-idempotent writes can disable retries."""
+        from .projection_receipts import assert_notion_write_phase
+        from .projection_notion_effects import tracked_notion_mutation
+        assert_notion_write_phase(method, url)
+        with tracked_notion_mutation(self, method.upper(), url, json_body, files=files) as tracked:
+            return self._request_transport(method, url, json_body=json_body, params=params,
+                files=files, headers=headers, retry=retry and not tracked)
+
+    def _request_transport(
+        self, method: str, url: str, *, json_body: dict | None = None,
+        params: dict | None = None, files: dict | None = None,
+        headers: dict | None = None, retry: bool = True,
+    ) -> dict:
+        """Do not replay ambiguous writes; explicit throttling did not commit."""
+        from .projection_receipts import assert_notion_write_phase
+        assert_notion_write_phase(method, url)
         response: httpx.Response | None = None
-        attempts = _ATTEMPTS if retry else 1
+        attempts = _ATTEMPTS
         for attempt in range(1, attempts + 1):
             try:
+                self._cooldown.wait()
                 response = self._http.request(
                     method, url, json=json_body, params=params, files=files, headers=headers
                 )
@@ -160,7 +247,16 @@ class NotionClient:
                     break
                 time.sleep(min(2 ** (attempt - 1), 4.0))
                 continue
-            if response.status_code not in _RETRYABLE or attempt == attempts:
+            throttled = response.status_code in {429, 529}
+            if throttled:
+                if _access_blocked(response):
+                    break
+                # Even the last rejected attempt establishes an embargo for
+                # sibling clients; publishing this cannot depend on retrying.
+                self._record_throttle(response, attempt)
+            if (attempt == attempts or
+                    not (throttled or (retry and _read_request(method, url)
+                                      and response.status_code in _RETRYABLE))):
                 break
             time.sleep(_backoff(response, attempt))
         assert response is not None
@@ -178,6 +274,9 @@ class NotionClient:
 
     def get_page(self, page_id: str) -> dict:
         return self._request("GET", f"/v1/pages/{_norm_id(page_id)}")
+
+    def get_block(self, block_id: str) -> dict:
+        return self._request("GET", f"/v1/blocks/{_norm_id(block_id)}")
 
     def create_page(
         self, parent_page_id: str, title: str, *, children: list[dict] | None = None,
@@ -280,6 +379,11 @@ class NotionClient:
                 headers={"Notion-Version": _FILE_UPLOAD_API_VERSION} if media_upload else None,
             )
             rows = body.get("results") or []
+            if media_upload and cursor:
+                # Positioned 2026 responses can include the existing sibling
+                # tail after the inserted batch. Those are not created IDs,
+                # and must not move the next batch past student content.
+                rows = rows[:len(chunk)]
             created.extend(rows)
             if rows and rows[-1].get("id"):
                 cursor = rows[-1]["id"]
@@ -399,22 +503,23 @@ class NotionClient:
                 "mode": "single_part",
             },
             headers={"Notion-Version": _FILE_UPLOAD_API_VERSION},
+            retry=False,
         )
-        upload_url = created.get("upload_url") or (
-            f"{self._base}/v1/file_uploads/{created['id']}/send"
-        )
+        upload_id = created.get('id')
+        if not isinstance(upload_id, str) or not re.fullmatch(r'[A-Za-z0-9-]+', upload_id):
+            raise NotionError('上传目标身份无效，未发送文件。')
+        send_path = f'/v1/file_uploads/{upload_id}/send'
+        upload_url = created.get('upload_url')
+        if upload_url is not None and upload_url != API_HOST + send_path:
+            raise NotionError('上传目标与已创建文件不一致，未发送文件。')
         # The send endpoint must keep the multipart content type that httpx
         # generates, so only pass through non-content headers here.
-        headers = {
-            h["name"]: h["value"]
-            for h in created.get("upload_headers") or []
-            if h.get("name", "").lower() != "content-type"
-        }
-        headers.setdefault("Authorization", f"Bearer {self._token}")
-        headers["Notion-Version"] = _FILE_UPLOAD_API_VERSION
+        headers = {'Authorization': f'Bearer {self._token}',
+                   'Notion-Version': _FILE_UPLOAD_API_VERSION}
         data = file.read_bytes()
         sent = self._request(
-            "POST", upload_url, files={"file": (file.name, data, content_type)}, headers=headers
+            "POST", send_path, files={"file": (file.name, data, content_type)}, headers=headers,
+            retry=False,
         )
         status = sent.get("status")
         if status != "uploaded":
@@ -826,13 +931,41 @@ def _block_title(block: dict) -> str:
     return inner.get("title") or inner.get("caption") or block["id"]
 
 
+def _access_blocked(response: httpx.Response) -> bool:
+    try:
+        details = response.json().get('additional_data') or {}
+        return details.get('rate_limit_reason') == 'public_api_request_blocked'
+    except (ValueError, AttributeError):
+        return False
+
+
+def _read_request(method: str, url: str) -> bool:
+    if method.upper() == 'GET':
+        return True
+    # These POST endpoints query data without creating or changing it. Unknown
+    # POST/PATCH endpoints must not replay a write after an ambiguous 5xx.
+    return method.upper() == 'POST' and (
+        url == '/v1/search' or bool(re.fullmatch(
+            r'/v1/(?:databases|data_sources)/[0-9a-fA-F-]+/query', url)))
+
+
 def _backoff(response: httpx.Response, attempt: int) -> float:
     header = response.headers.get("Retry-After")
     if header is not None:
         try:
-            return min(float(header), 30.0)
+            delay = float(header)
+            if math.isfinite(delay) and delay >= 0:
+                return delay
         except ValueError:
             pass
+    try:
+        value = (response.json().get('additional_data') or {}).get('retry_after')
+        if value is not None:
+            delay = float(value)
+            if math.isfinite(delay) and delay >= 0:
+                return delay
+    except (ValueError, TypeError, AttributeError):
+        pass
     return 2.0 * attempt
 
 

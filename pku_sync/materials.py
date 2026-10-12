@@ -15,13 +15,15 @@ Blackboard's public REST API is only half usable for a student account here:
 from __future__ import annotations
 
 import re
+from collections import Counter
 from ipaddress import ip_address
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from .models import Announcement, Assignment, AttachmentRef, ContentItem, SourceLink
+from .catalog_schema import ASSESSMENT_KINDS
 
 BB_API = "/learn/api/public/v1"
 LIST_CONTENT = "/webapps/blackboard/content/listContent.jsp"
@@ -31,7 +33,7 @@ ANNOUNCEMENT_PAGE = "/webapps/blackboard/execute/announcement"
 PAGE_LIMIT = "200"
 
 FOLDER_KIND = "内容文件夹"
-ASSIGNMENT_KINDS = frozenset({"作业", "考试", "测试"})
+ASSIGNMENT_KINDS = frozenset({"作业", "Assignment"})
 
 # "已附加文件: TLCL-19.01.pdf ( 2.022 MB )" precedes the human description.
 _ATTACHED_RE = re.compile(r"已附加文件\s*[:：]\s*\S.*?\(\s*[\d.]+\s*[KMGT]?B\s*\)\s*")
@@ -55,11 +57,17 @@ def _paginate(client: httpx.Client, path: str, params: dict | None = None) -> li
     results: list[dict] = []
     url: str | None = path
     first = True
+    visited = set()
 
     while url:
+        if url in visited:
+            raise ValueError("教学网目录分页循环，快照不完整。")
+        visited.add(url)
         resp = client.get(url, params=query if first else None)
         resp.raise_for_status()
         body = resp.json()
+        if not isinstance(body, dict) or not isinstance(body.get("results"), list):
+            raise ValueError("教学网目录未返回完整 JSON，禁止作为空目录同步。")
         results.extend(body.get("results", []))
         url = (body.get("paging") or {}).get("nextPage")
         first = False
@@ -162,7 +170,30 @@ def _top_level_areas(client: httpx.Client, course_id: str) -> list[dict]:
         {"id": entry["id"], "title": entry["title"]}
         for entry in _paginate(client, f"{BB_API}/courses/{course_id}/contents")
         if entry.get("id") and entry.get("title")
+        and (entry.get("availability") or {}).get("available") != "No"
     ]
+
+
+def _complete_content_page(html: str, course_id: str, content_id: str) -> bool:
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.find("ul", id="content_listContainer") is not None:
+        return True
+    # An empty directory has no list. Require Blackboard's explicit empty
+    # marker and its form's exact native identities, never an error receipt.
+    root = soup.find(id="content")
+    if root is None:
+        return False
+    message = root.select_one("#containerdiv .noItems.container-empty .main-message")
+    if message is None or message.get_text(strip=True) != "没有要显示的内容。":
+        return False
+    forms = root.find_all("form", attrs={"name": "contentForm"})
+    if len(forms) != 1:
+        return False
+    action = urlsplit(str(forms[0].get("action") or ""))
+    if action.scheme or action.netloc or action.path not in ("listContent.jsp", LIST_CONTENT):
+        return False
+    query = parse_qs(action.query, keep_blank_values=True)
+    return query.get("course_id") == [course_id] and query.get("content_id") == [content_id]
 
 
 def _walk_folder(
@@ -176,17 +207,18 @@ def _walk_folder(
     items: list[ContentItem],
     assignments: list[Assignment],
 ) -> None:
-    if depth > max_depth or content_id in visited:
+    if depth > max_depth:
+        raise ValueError("教学网目录超过读取深度，快照不完整。")
+    if content_id in visited:
         return
     visited.add(content_id)
 
-    try:
-        resp = client.get(
-            LIST_CONTENT, params={"course_id": course_id, "content_id": content_id}
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError:
-        return
+    resp = client.get(
+        LIST_CONTENT, params={"course_id": course_id, "content_id": content_id}
+    )
+    resp.raise_for_status()
+    if not _complete_content_page(resp.text, course_id, content_id):
+        raise ValueError("教学网内容目录未返回完整页面，禁止作为空目录同步。")
 
     for entry in _parse_content_list(resp.text, course_id, parent_path, content_id):
         item, child_id = entry
@@ -346,6 +378,7 @@ def fetch_deadlines(client: httpx.Client) -> dict[str, list[Assignment]]:
         by_course.setdefault(course_id, []).append(
             Assignment(
                 course_id=course_id,
+                source_id="calendar:" + str(raw["id"]) if raw.get("id") else "",
                 title=raw.get("title") or "(无标题)",
                 due_at=raw.get("end") or raw.get("start") or "",
                 source="calendar",
@@ -357,16 +390,19 @@ def fetch_deadlines(client: httpx.Client) -> dict[str, list[Assignment]]:
 
 
 def merge_deadlines(assignments: list[Assignment], deadlines: list[Assignment]) -> list[Assignment]:
-    """Fold calendar due dates into the assignments found in the content tree.
+    """Only an exact native course/content identity can associate a deadline.
 
-    The two sources name the same assignment identically but neither is a
-    superset, so unmatched calendar entries are kept as their own records.
+    Calendar entries without native target identities remain independent facts;
+    a matching title never proves they belong to one formal submission target.
     """
-    by_title = {a.title: a for a in assignments}
+    identity = lambda item: (item.course_id, item.content_id)
+    assignment_counts = Counter(identity(a) for a in assignments if a.content_id)
+    deadline_counts = Counter(identity(a) for a in deadlines if a.content_id)
+    by_identity = {identity(a): a for a in assignments if a.content_id and assignment_counts[identity(a)] == 1}
     merged = list(assignments)
     for deadline in deadlines:
-        existing = by_title.get(deadline.title)
-        if existing is not None:
+        existing = by_identity.get(identity(deadline)) if deadline.content_id else None
+        if existing is not None and deadline_counts[identity(deadline)] == 1:
             if not existing.due_at:
                 existing.due_at = deadline.due_at
         else:
