@@ -303,12 +303,24 @@ def summary_blocks(data_dir: Path, course_id: str, *, day: date | None = None) -
     return blocks
 
 
-def find_course_page(client: NotionClient, data_dir: Path, course_id: str) -> dict:
+def find_course_page(client: NotionClient, data_dir: Path, course_id: str, *,
+                     identity_observation=None) -> dict:
     from .notion_home import _course_titles, saved_home
 
     home = saved_home(data_dir)
     if not home:
         raise ValueError("请先选择 Notion 父页面并创建学习主页。")
+    if home.get("schema") == 2:
+        from .notion_workspace import _course_page
+        from .campus_catalog import campus_courses
+        row = next(row for row in campus_courses(data_dir)["courses"] if row["id"] == course_id)
+        if identity_observation is not None:
+            observed_home, observed = identity_observation
+            if observed_home['id'] != home['id']:
+                raise ValueError('新版主页在总结期间发生变化；已有内容已保留。')
+            return _course_page(client, home['id'], row, create=False,
+                                observed=observed, verify_selected=True)
+        return _course_page(client, home["id"], row, create=False)
     title = _course_titles(data_dir)[course_id]
     matches = [page for page in client.list_child_pages(home["id"]) if page.get("title") == title]
     if not matches:
@@ -323,15 +335,46 @@ def _course_folder(data_dir: Path, course_id: str) -> Path | None:
                 None)
 
 
-def _save_summary_marker(data_dir: Path, course_id: str, result: dict) -> None:
+def _confirmed_course(data_dir: Path, course_id: str) -> tuple[dict, tuple]:
+    """Cached browsing permission never authorizes an unconfirmed write."""
+    from .. import catalog_snapshots as catalog
+    from ..catalog_schema import fingerprint
+
+    if not (data_dir / 'portal-read-status.json').is_file():
+        raise catalog.CatalogUnavailable('这门课的教学网读取状态尚未确认；已有总结保留，请先更新课程目录。')
+    catalog.assert_portal_readable(data_dir, course_id)
+    namespace = catalog.cache_path(data_dir, course_id).parent.name
+    envelope = catalog.cached(data_dir, course_id)
+    course = campus_course(data_dir, course_id)
+    if (namespace in {'unscoped', 'signed-out'} or envelope is None
+            or course.get('read_only') is not False
+            or course.get('catalog_revision') != envelope['revision']
+            or catalog.cache_path(data_dir, course_id).parent.name != namespace):
+        raise catalog.CatalogUnavailable('这门课的教学网目录尚未确认；已有总结保留，请先重新更新课程目录。')
+    # Re-read the ledger after local detail assembly as well. Account/revision
+    # and the complete official snapshot must stay identical through the write.
+    catalog.assert_portal_readable(data_dir, course_id)
+    return course, (namespace, envelope['revision'], fingerprint(envelope['snapshot']))
+
+
+def _assert_summary_authority(data_dir: Path, course_id: str, expected: tuple) -> None:
+    from ..catalog_snapshots import CatalogUnavailable
+    _, current = _confirmed_course(data_dir, course_id)
+    if current != expected:
+        raise CatalogUnavailable('教学网课程确认状态在总结期间变化；未确认完成，请重新更新课程目录。')
+
+
+def _save_summary_marker(data_dir: Path, course_id: str, result: dict, *, authority: tuple) -> None:
     """Remember the newest snapshot so the course page can link straight to it."""
     folder = _course_folder(data_dir, course_id)
     if folder is None:
-        return
+        from ..catalog_snapshots import CatalogUnavailable
+        raise CatalogUnavailable('这门课的本机目录已变化；未确认总结完成，已有内容保留。')
     marker = folder / "summary.json"
     payload = {"title": result["title"], "url": result["url"],
                "created": result["created"],
                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _assert_summary_authority(data_dir, course_id, authority)
     try:
         temporary = marker.with_name(marker.name + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1), "utf-8")
@@ -341,29 +384,41 @@ def _save_summary_marker(data_dir: Path, course_id: str, result: dict) -> None:
 
 
 def publish_course_summary(client: NotionClient, data_dir: Path, course_id: str, *,
-                           day: date | None = None) -> dict:
+                           day: date | None = None, identity_observation=None,
+                           defer_marker: bool = False) -> dict:
     """Create today's snapshot under the course page, or reuse the same day's."""
     stamp = day or beijing_today()
-    course = campus_course(data_dir, course_id)
+    course, authority = _confirmed_course(data_dir, course_id)
     title = summary_title(course["title"], stamp)
-    course_page = find_course_page(client, data_dir, course_id)
+    course_page = find_course_page(client, data_dir, course_id,
+                                   identity_observation=identity_observation)
     children = client.list_child_pages(course_page["id"])
     existing = [page for page in children if (page.get("title") or "") == title]
     if existing:
         page_id = existing[0]["id"]
         result = {"course_id": course_id, "title": title, "created": False,
                   "url": existing[0].get("url") or f"https://www.notion.so/{page_id.replace('-', '')}"}
-        _save_summary_marker(data_dir, course_id, result)
+        if defer_marker:
+            result['_course_page_id'] = course_page['id']
+            result['_summary_authority'] = authority
+        else:
+            _save_summary_marker(data_dir, course_id, result, authority=authority)
         return result
     # Snapshots accumulate by date: an older day's page keeps its content and
     # today's run adds today's page rather than rewriting it.
+    blocks = summary_blocks(data_dir, course_id, day=stamp)
+    _assert_summary_authority(data_dir, course_id, authority)
     page = client.create_page(course_page["id"], title,
-                              children=summary_blocks(data_dir, course_id, day=stamp),
+                              children=blocks,
                               retry=False)
     page_id = page["id"]
     result = {"course_id": course_id, "title": title, "created": True,
               "url": page.get("url") or f"https://www.notion.so/{page_id.replace('-', '')}"}
-    _save_summary_marker(data_dir, course_id, result)
+    if defer_marker:
+        result['_course_page_id'] = course_page['id']
+        result['_summary_authority'] = authority
+    else:
+        _save_summary_marker(data_dir, course_id, result, authority=authority)
     return result
 
 
@@ -378,6 +433,17 @@ def publish_course_summaries(data_dir: Path, token: str, course_ids: list[str], 
     titles: dict[str, str] = {}
     total = len(course_ids)
     with NotionClient(token) as client:
+        from .notion_home import saved_home
+        from .notion_workspace import _course_identity_snapshot, _existing_course_page, _verify_home
+        home = saved_home(data_dir)
+        batched = home.get('schema') == 2
+        observation, observation_error, pending = None, None, []
+        if batched:
+            try:
+                _verify_home(client.get_page(home['id']), home['id'], home['parent_id'])
+                observation = (home, _course_identity_snapshot(client, home['id']))
+            except Exception as exc:
+                observation_error = exc
         for index, course_id in enumerate(course_ids, 1):
             try:
                 title = campus_course(data_dir, course_id)["title"]
@@ -389,14 +455,45 @@ def publish_course_summaries(data_dir: Path, token: str, course_ids: list[str], 
             if on_progress:
                 on_progress(index - 1, total, title)
             try:
-                result = publish_course_summary(client, data_dir, course_id, day=day)
+                if observation_error is not None:
+                    raise observation_error
+                options = {'identity_observation': observation, 'defer_marker': True} if batched else {}
+                result = publish_course_summary(client, data_dir, course_id, day=day, **options)
             except Exception as exc:  # one bad course must not stop the batch
                 failures.append((title, str(exc)))
             else:
-                created += int(result["created"])
-                existing += int(not result["created"])
-                urls.append(result["url"])
+                if batched:
+                    pending.append((course_id, title, result))
+                else:
+                    created += int(result["created"])
+                    existing += int(not result["created"])
+                    urls.append(result["url"])
             if on_progress:
                 on_progress(index, total, title)
+        if pending:
+            final, final_error = None, None
+            try:
+                if saved_home(data_dir).get('id') != home['id']:
+                    raise ValueError('新版主页在总结期间发生变化；已有内容已保留。')
+                _verify_home(client.get_page(home['id']), home['id'], home['parent_id'])
+                final = _course_identity_snapshot(client, home['id'])
+            except Exception as exc:
+                final_error = exc
+            for course_id, title, result in pending:
+                try:
+                    if final_error is not None:
+                        raise final_error
+                    actual = _existing_course_page(client, home['id'],
+                        {'id': course_id, 'title': title}, observed=final)
+                    if actual is None or actual['id'] != result.pop('_course_page_id'):
+                        raise ValueError('新版课程身份在总结期间发生变化；未确认完成，已有内容已保留。')
+                    _save_summary_marker(data_dir, course_id, result,
+                                         authority=result.pop('_summary_authority'))
+                except Exception as exc:
+                    failures.append((title, str(exc)))
+                else:
+                    created += int(result['created'])
+                    existing += int(not result['created'])
+                    urls.append(result['url'])
     return {"requested": total, "created": created, "existing": existing,
             "urls": urls, "failures": failures}

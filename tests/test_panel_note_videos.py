@@ -9,11 +9,22 @@ _MB = 1024 * 1024
 
 def _write_transcript(directory, spoken: dict[int, str]) -> None:
     """A transcript that says ``spoken[t]`` around second ``t``."""
-    (directory / "transcript.json").write_text(json.dumps({
+    transcript = {
         "duration": max(spoken) + 60 if spoken else 60,
         "segments": [{"start": float(start), "end": start + 4.0, "text": text}
                      for start, text in sorted(spoken.items())],
-    }, ensure_ascii=False), "utf-8")
+    }
+    (directory / "transcript.json").write_text(json.dumps(transcript, ensure_ascii=False), "utf-8")
+    # Exercise the current editor's file/review protocol with an offline
+    # provider. This fixture makes no independent claim of factual accuracy.
+    from types import SimpleNamespace
+    from pku_sync import note_editor
+    target = directory / "notes.md"
+    body = target.read_text("utf-8")
+    target.unlink()
+    note_editor.write_notes(transcript, target, SimpleNamespace(notes_model="offline"), "课程",
+                           ask=lambda *a: json.dumps({"note": body, "complete": True,
+                                                      "uncertainties": []}, ensure_ascii=False))
 
 
 class _FakeNotion:
@@ -263,7 +274,8 @@ def test_publish_without_markers_or_source_video(tmp_path):
     report = json.loads((tmp_path / note_videos._REPORT_NAME).read_text("utf-8"))
     assert report["status"] == "not_needed"
     assert report["complete"] is True
-    assert note_videos.video_publication_complete(tmp_path) is True
+    # An unreviewed hand-written note cannot authorize source deletion.
+    assert note_videos.video_publication_complete(tmp_path) is False
 
     other = tmp_path / "lecture-2"
     other.mkdir()
@@ -275,17 +287,12 @@ def test_publish_without_markers_or_source_video(tmp_path):
     assert note_videos.video_publication_complete(other) is False
 
 
-def test_marker_pointing_at_the_wrong_moment_publishes_no_clip(tmp_path, monkeypatch):
-    """A real note anchored a deadline at 92:23 while it was said at 95:13.
-
-    The text marker is a hint a student can shrug off; a clip is quoted
-    evidence, so an anchor that lands on unrelated audio must not become one.
-    """
+def test_reviewed_paraphrases_publish_clips_without_word_scores(tmp_path, monkeypatch):
     video = tmp_path / "video.mp4"
     video.write_bytes(b"source")
     (tmp_path / "notes.md").write_text(
-        "老师提到第一项正式作业截止时间为 10 月 25 日（回看 92:23）\n"
-        "调用 listen 后服务器可以在监听套接字上等待新连接到达（回看 44:51）\n",
+        "首份作业在十月二十五日到期（回看 95:13）\n"
+        "服务端调用 listen 后进入等待客户端连接的状态（回看 44:51）\n",
         "utf-8",
     )
     _write_transcript(tmp_path, {
@@ -293,19 +300,20 @@ def test_marker_pointing_at_the_wrong_moment_publishes_no_clip(tmp_path, monkeyp
         5713: "你看这个作业的截止时间是十月二十五号",     # 95:13 — the real moment
         2691: "调用listen之后服务器就在监听套接字上等待新的连接到达",
     })
+    monkeypatch.setattr(note_videos, "corroboration", lambda *a: (_ for _ in ()).throw(
+        AssertionError("text similarity verdict called")))
     monkeypatch.setattr(note_videos, "_extract_clip", lambda source, target, start, duration: (
         target.parent.mkdir(parents=True, exist_ok=True), target.write_bytes(b"clip")))
-    notion = _FakeNotion(["截止时间（回看 92:23）", "listen（回看 44:51）"])
+    notion = _FakeNotion(["截止时间（回看 95:13）", "listen（回看 44:51）"])
 
-    assert note_videos.publish_note_videos(notion, "note", tmp_path) == 1
+    assert note_videos.publish_note_videos(notion, "note", tmp_path) == 2
 
     report = json.loads((tmp_path / note_videos._REPORT_NAME).read_text("utf-8"))
     by_stamp = {clip["timestamp"]: clip for clip in report["clips"]}
-    assert by_stamp["92:23"]["status"] == "unverified"
-    assert by_stamp["92:23"]["score"] == 0.0
+    assert "92:23" not in by_stamp and by_stamp["95:13"]["status"] == "inserted"
     assert by_stamp["44:51"]["status"] == "inserted"
-    assert report["skipped_unverified"] == 1
-    assert notion.uploads == ["clip-2691.mp4"] or len(notion.uploads) == 1
+    assert report["skipped_unverified"] == 0 and len(notion.uploads) == 2
+    assert all("score" not in item for item in report["clips"])
     # Nothing is pending, so the recording is not pinned to disk forever.
     assert report["complete"] is True
 
@@ -320,12 +328,73 @@ def test_clips_need_a_transcript_to_check_the_marker_against(tmp_path, monkeypat
 
     assert note_videos.publish_note_videos(_FakeNotion(), "note", tmp_path) == 0
     report = json.loads((tmp_path / note_videos._REPORT_NAME).read_text("utf-8"))
-    assert report["corroborated"] is False
+    assert report["reviewed"] is False
     assert report["clips"][0]["status"] == "unverified"
     assert report["skipped_unverified"] == 1
     assert report["verification_pending"] == 1
     assert report["status"] == "partial"
     assert report["complete"] is False
+
+
+def test_rebuild_clips_use_staged_note_and_keep_previous_note(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from pku_sync import note_editor
+    (tmp_path / "video.mp4").write_bytes(b"source")
+    target = tmp_path / "notes.md"
+    target.write_text("旧讲解（回看 01:02）", "utf-8")
+    _write_transcript(tmp_path, {62: "旧讲解", 184: "新版讲述"})
+    original = target.read_bytes()
+    staged = tmp_path / "notes.rebuild-test.md"
+    transcript = json.loads((tmp_path / "transcript.json").read_text("utf-8"))
+    note_editor.write_notes(transcript, staged, SimpleNamespace(notes_model="offline",
+        _metered_operation_context={"client_operation_id": "explicit-rebuild"}), "课程",
+        ask=lambda *a: json.dumps({"note": "新版讲述（回看 03:04）", "complete": True, "uncertainties": []}, ensure_ascii=False))
+    timestamps = []
+    def clip(video, folder, timestamp, max_bytes=None):
+        timestamps.append(timestamp)
+        folder.mkdir(exist_ok=True)
+        path = folder / "clip.mp4"
+        path.write_bytes(b"clip")
+        return path
+    monkeypatch.setattr(note_videos, "clip_for_timestamp", clip)
+    notion = _FakeNotion(["新版讲述（回看 03:04）"])
+    assert note_videos.publish_note_videos(notion, "note", tmp_path, notes_path=staged) == 1
+    assert timestamps == [184] and target.read_bytes() == original
+    assert note_videos.video_publication_complete(tmp_path, notes_path=staged) is True
+    assert note_videos.video_publication_complete(tmp_path) is False
+
+
+def test_uncertain_note_without_clip_markers_cannot_authorize_source_deletion(tmp_path):
+    from types import SimpleNamespace
+    from pku_sync import note_editor
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"source")
+    transcript = {"segments": [{"start": 0, "end": 120, "text": "主要例题听不清。"}]}
+    (tmp_path / "transcript.json").write_text(json.dumps(transcript), "utf-8")
+    target = tmp_path / "notes.md"
+    note_editor.write_notes(transcript, target, SimpleNamespace(notes_model="offline"), "课程",
+        ask=lambda *a: json.dumps({"note": "保留可辨认的内容。", "complete": False,
+                                  "uncertainties": ["请回看主要例题。"]}, ensure_ascii=False))
+    assert note_videos.publish_note_videos(_FakeNotion(), "note", tmp_path) == 0
+    report = json.loads((tmp_path / note_videos._REPORT_NAME).read_text("utf-8"))
+    assert report["complete"] is True and report["content_complete"] is False
+    assert note_videos.video_publication_complete(tmp_path) is False and video.read_bytes() == b"source"
+
+
+def test_source_deletion_requires_current_note_transcript_and_video(tmp_path, monkeypatch):
+    (tmp_path / "video.mp4").write_bytes(b"source")
+    (tmp_path / "notes.md").write_text("定义（回看 01:02）", "utf-8")
+    _write_transcript(tmp_path, {62: "定义"})
+    monkeypatch.setattr(note_videos, "_extract_clip", lambda video, target, start, duration: (
+        target.parent.mkdir(exist_ok=True), target.write_bytes(b"clip")))
+    note_videos.publish_note_videos(_FakeNotion(["定义（回看 01:02）"]), "note", tmp_path)
+    assert note_videos.video_publication_complete(tmp_path) is True
+    original = (tmp_path / "notes.md").read_bytes()
+    (tmp_path / "notes.md").write_bytes(original + b"changed")
+    assert note_videos.video_publication_complete(tmp_path) is False
+    (tmp_path / "notes.md").write_bytes(original)
+    (tmp_path / "transcript.json").write_text('{"segments":[]}', "utf-8")
+    assert note_videos.video_publication_complete(tmp_path) is False
 
 
 def test_corroboration_scores_the_best_claim_at_that_moment():

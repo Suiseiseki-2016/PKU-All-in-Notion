@@ -22,11 +22,9 @@ Only the network boundaries are replaced:
   reaches them the test reports the branch instead of silently faking a video.
 * ``pku_sync.lecture_source_download.prepare_lesson_sources`` and
   ``pku_sync.note_sources.collect_note_sources`` -- campus courseware reading.
-* ``pku_sync.media.write_notes`` -- the AI note writer.  The stub writes a note
-  in the *production layout* (``## 本讲来源`` / ``## 课堂内容`` / ``###``
-  chapters / ``## 作业与考试口头线索`` / ``*已整理至录像 MM:SS。*``), so every
-  downstream gate (``note_coverage_gap_seconds``, ``audit_note``,
-  ``note_source_conflicts``, ``_note_format_issues``) still runs for real.
+* ``pku_sync.media._recovery_llm`` -- an offline provider response. The real
+  writer sends original windows once, persists plain responses and binds saved bytes.
+  Fixtures exercise formatting and publication, not real model accuracy.
 * ``pku_sync.notion.NotionClient`` and ``pku_sync.panel.notion_home.NotionClient``
   -- in-memory Notion workspace that logs every call.
 
@@ -475,10 +473,17 @@ def harness(tmp_path, monkeypatch):
         calls.append("collect_note_sources")
         return []
 
-    def fake_write_notes(transcript, keyframes, target, settings, title, **kwargs):
-        calls.append(f"write_notes(title={title!r})")
-        Path(target).write_text(note["text"], "utf-8")
-        return Path(target)
+    def fake_model(llm, model, prompt, system, settings):
+        from pku_sync import knowledge_workflow
+        payload = json.loads(prompt)
+        calls.append(f"write_notes(title={payload['course']!r})")
+        if system == knowledge_workflow.PLAN_SYSTEM:
+            return json.dumps({'units':[{'title':'完整本讲','first_segment':0,
+                'reference_segments':[], 'courseware_indices':[]}]})
+        if system == knowledge_workflow.MERGE_SYSTEM:
+            return json.dumps({'sections':[{'title':'完整本讲','first_unit':0,
+                'last_unit':0,'body':note['text']}]})
+        return note["text"]
 
     from pku_sync import media, notion as notion_module
     monkeypatch.setattr("pku_sync.auth.get_session", fake_get_session)
@@ -486,7 +491,7 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(lecture_source_download, "prepare_lesson_sources",
                         fake_prepare_lesson_sources)
     monkeypatch.setattr(note_sources, "collect_note_sources", fake_collect_note_sources)
-    monkeypatch.setattr(media, "write_notes", fake_write_notes)
+    monkeypatch.setattr(media, "_recovery_llm", fake_model)
     monkeypatch.setattr(notion_module, "NotionClient",
                         lambda token, *args, **kwargs: FakeNotionClient(store, token))
     monkeypatch.setattr(notion_home, "NotionClient",
@@ -508,6 +513,31 @@ def harness(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # the reproduction
 # --------------------------------------------------------------------------
+
+@pytest.mark.parametrize('saved_strategy',['transcript','topics'])
+def test_process_action_restores_completed_paid_note_before_fetching_sources(harness, monkeypatch, saved_strategy):
+    from pku_sync import media
+    from pku_sync.note_editor import report_path
+    target=harness.job_dir/'notes.md'
+    sources=[{'title':'本讲已保存课件','text':'已提取课件','status':'readable'}]
+    media.write_notes(TRANSCRIPT,[],target,_settings(harness.root),RECORDING_TITLE,
+                      strategy=saved_strategy,source_context=sources)
+    original=target.read_bytes();target.unlink()
+    receipt=report_path(target).read_bytes()
+    harness.calls.clear()
+    def forbidden(*a,**k):pytest.fail('local commit recovery fetched or billed a source')
+    monkeypatch.setattr(lecture_source_download,'prepare_lesson_sources',forbidden)
+    monkeypatch.setattr(note_sources,'collect_note_sources',forbidden)
+    monkeypatch.setattr(media,'_recovery_llm',forbidden)
+    status,payload=harness.process()
+    assert status==200,payload
+    state=harness.wait()
+    assert state['state']=='done',harness.diagnosis(state)
+    assert target.read_bytes()==original and report_path(target).read_bytes()==receipt
+    assert len(harness.store.child_pages(harness.notion['lecture_page']))==1
+    assert (harness.job_dir/'notion-publication.json').is_file()
+    assert not harness.calls
+
 
 def test_process_action_publishes_note_end_to_end(harness):
     """《整理这节录像》 must finish, publish, and write the on-disk marker."""
@@ -668,30 +698,8 @@ LEGACY_WINDOW_NOTE = """# 第一讲 课堂笔记
 """
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN TRADEOFF (kept by product decision, 2026-10-02): a note with "
-    "`## MM:SS–MM:SS` window headings is rejected by note_publish_issues "
-    "('自然排版'), although note_coverage_gap_seconds and "
-    "note_images._WINDOW both require/support exactly that format. The chosen "
-    "remedy is 「重新整理笔记」 to rewrite such notes in the current layout, so "
-    "this test documents the accepted limitation. If the gate is ever relaxed "
-    "to accept window headings, this test starts passing and fails loudly on "
-    "the strict marker, which is the signal to delete the marker."))
 def test_legacy_window_heading_note_can_be_published(harness):
-    """Reproduction: the reported 《整理这节录像》 failure for an existing note.
-
-    ``pku_sync/panel/note_images.py`` places slide images after ``heading_2``
-    blocks whose text matches ``MM:SS–MM:SS`` and ``pku_sync/media.py
-    .note_coverage_gap_seconds`` documents both the window-heading and the
-    end-marker note formats as valid.  ``pku_sync/panel/recordings_api.py
-    .note_publish_issues`` nevertheless turns ``note_quality.audit_note``'s
-    "自然排版" review status into a hard publication failure:
-
-        ValueError: 笔记暂不能作为完整课程笔记发布：笔记仍像时间段提纲或原始转写，
-        请整理成自然段落后再发布。；本机笔记已保留。
-
-    The task ends in ``state == "failed"`` and nothing is written to Notion.
-    """
+    """A reviewed note with time headings publishes without a prose-format verdict."""
     harness.note_text = LEGACY_WINDOW_NOTE
 
     status, _ = harness.process()
@@ -702,35 +710,27 @@ def test_legacy_window_heading_note_can_be_published(harness):
     assert (harness.job_dir / "notion-publication.json").is_file()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "REAL DEFECT (unfixed): the note writer's own raw-transcript fallback "
-    "marker ('以下为原始转录', pku_sync/media.py) makes note_publish_issues "
-    "reject the note, so a locally generated note can never be published. It "
-    "is unreachable on the student cloud path, which raises instead of writing "
-    "the fallback, so it only bites notes produced by a local-LLM CLI/TUI run "
-    "and later published from the panel."))
-def test_writer_raw_transcript_fallback_note_can_be_published(harness):
-    """Reproduction: the note writer's own fallback marker blocks publication.
-
-    When a chapter cannot be summarized, ``pku_sync/media.py`` writes
-    ``> 生成失败（…），以下为原始转录：`` plus the raw window text into the
-    note body.  ``note_quality.audit_note`` then reports 自然排版 = "review"
-    (``raw_asr = "以下为原始转录" in body``) and ``note_publish_issues`` blocks
-    the note.  The note therefore exists locally but can never be published
-    through 《整理这节录像》 — the failure message tells the student to do the
-    one thing the action is already doing.
-    """
+def test_organized_uncertain_transcript_excerpt_can_be_published(harness):
+    """Plain uncertain text publishes without a model completeness certificate."""
     harness.note_text = NOTE_TEXT.replace(
         "### 对称密码与分组结构\n",
         "### 对称密码与分组结构\n\n"
         "> 生成失败（AI 服务暂时不可用），以下为原始转录：\n\n"
         "- 我们今天讲对称密码的基本概念。\n")
+    harness.note_text += "\n\n这段原转写仍需结合录像核对。"
 
     status, _ = harness.process()
     assert status == 200
     state = harness.wait()
     assert state["state"] == "done", harness.diagnosis(state)
     assert (harness.job_dir / "notion-publication.json").is_file()
+    from pku_sync.note_editor import report_path
+    report = json.loads(report_path(harness.job_dir / "notes.md").read_text("utf-8"))
+    assert report["content_complete"] is None and report["status"] == "organized"
+    assert report["assessment"] == "organization-not-content-certification"
+    body = (harness.job_dir / "notes.md").read_text("utf-8")
+    assert harness.note_text in body
+    assert "这段原转写仍需结合录像核对。" in body
 
 
 def test_desktop_button_posts_this_route(harness):

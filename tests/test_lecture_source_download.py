@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import io
+import zipfile
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 
 from pku_sync.lecture_source_download import (
-    MAX_FILE_BYTES, _candidate_attachments, _fetch_bounded, _safe_webdav_url,
+    MAX_FILE_BYTES, _candidate_attachments, _fetch_bounded, _fetch_document, _safe_webdav_url,
     prepare_lesson_sources,
 )
 from pku_sync.models import AttachmentRef, ContentItem, Recording
@@ -109,3 +113,113 @@ def test_preparation_downloads_only_manual_matched_file(tmp_path, monkeypatch):
     # The verified local copy avoids another login or download on retry.
     paths_again, _ = prepare_lesson_sources(job, key, SimpleNamespace(pku_username="", pku_password=""))
     assert paths_again == paths and len(calls) == 1
+
+
+def test_exact_native_extensionless_official_metadata_is_a_lecture_candidate(tmp_path):
+    # Original failing metadata from r8. No oracle facts enter note generation.
+    course = tmp_path / "native-course"
+    (course / "recordings").mkdir(parents=True)
+    recording = Recording(course_id="_101540_1", title="2026-09-30第5-6节", recorded_at="2026-09-30 09:00:00")
+    (course / "recordings/index.json").write_text(json.dumps([recording.model_dump()]), "utf-8")
+    job = RecordingJob("native-course", course, recording)
+    row = {"title": "20260930中枢神经系统发育", "kind": "文件", "path": "教学内容/20260930中枢神经系统发育",
+           "content_id": "_1717897_1", "attachments": [{"filename": "20260930中枢神经系统发育",
+            "path": "/bbcswebdav/pid-1717897-dt-content-rid-13142651_1/xid-13142651_1"}]}
+    _index(job, [row])
+    assert _candidate_attachments(job, "native-source") == [(row, row["attachments"][0])]
+
+
+def test_extensionless_still_requires_exact_scope_and_never_relabels_other_suffix(tmp_path):
+    job = _job(tmp_path, two_same_day=True)
+    dated = _row("20260924 slides", "20260924 slides")
+    wrong = _row("20260924 executable", "source.exe", content_id="wrong")
+    _index(job, [dated, wrong])
+    assert _candidate_attachments(job, "selected") == []
+    (job.course_dir / "materials/matches.json").write_text(json.dumps({dated["path"]: "selected", wrong["path"]: "selected"}))
+    assert _candidate_attachments(job, "selected") == [(dated, dated["attachments"][0])]
+    assert _candidate_attachments(job, "other") == []
+
+
+def office_bytes(suffix):
+    core, namespace, root, content_type = (
+        ("ppt/presentation.xml", "http://schemas.openxmlformats.org/presentationml/2006/main", "presentation",
+         "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml")
+        if suffix == ".pptx" else
+        ("word/document.xml", "http://schemas.openxmlformats.org/wordprocessingml/2006/main", "document",
+         "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"))
+    result = io.BytesIO()
+    with zipfile.ZipFile(result, "w") as archive:
+        archive.writestr(core, f'<{root} xmlns="{namespace}"/>')
+        archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/' + core + '" ContentType="' + content_type + '"/></Types>')
+    return result.getvalue()
+
+
+@pytest.mark.parametrize("suffix", [".pdf", ".pptx", ".docx"])
+def test_extensionless_magic_inference_ignores_untrusted_header_path(tmp_path, suffix):
+    payload = b"%PDF-1.4\n%%EOF" if suffix == ".pdf" else office_bytes(suffix)
+    url = "https://course.pku.edu.cn/bbcswebdav/xid-123/file"
+    def response(request):
+        return httpx.Response(200, content=payload, headers={"Content-Type": "text/html", "Content-Disposition": 'attachment; filename="../../injected.exe"'}, request=request)
+    base = tmp_path / "original-official-name"
+    with httpx.Client(transport=httpx.MockTransport(response)) as client:
+        typed = _fetch_document(client, url, base, MAX_FILE_BYTES)
+    assert typed == tmp_path / (base.name + suffix)
+    assert typed.read_bytes() == payload
+    assert not base.exists() and not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("payload", [b"<html>login</html>", b"not a document", b"PK\x03\x04unknown-zip"])
+def test_extensionless_headers_cannot_authorize_invalid_body(tmp_path, payload):
+    url = "https://course.pku.edu.cn/bbcswebdav/xid-123/file"
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=payload, headers={"Content-Type": "application/pdf"}, request=request))) as client:
+        assert _fetch_document(client, url, tmp_path / "official", MAX_FILE_BYTES) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ambiguous_zip_core_and_byte_overflow_are_rejected(tmp_path):
+    stream = io.BytesIO(office_bytes(".pptx"))
+    with zipfile.ZipFile(stream, "a") as archive:
+        archive.writestr("word/document.xml", "<document/>")
+    url = "https://course.pku.edu.cn/bbcswebdav/xid-123/file"
+    for payload, budget in [(stream.getvalue(), MAX_FILE_BYTES), (b"%PDF-" + b"x" * 30, 10)]:
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=payload, request=request))) as client:
+            assert _fetch_document(client, url, tmp_path / "official", budget) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_extensionless_preparation_creates_bound_typed_cache_and_preserves_edited_file(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    row = _row("20260924 slides", "20260924 slides")
+    _index(job, [row])
+    live = ContentItem(course_id="course-1", content_id="item-1", title=row["title"], kind="文件", parent_path="教学内容/第一周", attachments=[AttachmentRef(filename=row["attachments"][0]["filename"], url=row["attachments"][0]["path"])])
+    from pku_sync import auth, materials
+    calls = []
+    def response(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, content=b"%PDF-1.4\n%%EOF", request=request)
+    monkeypatch.setattr(auth, "get_session", lambda **kwargs: httpx.Client(transport=httpx.MockTransport(response)))
+    monkeypatch.setattr(materials, "walk_materials", lambda client, cid: ([live], []))
+    settings = SimpleNamespace(pku_username="fixture", pku_password="fixture")
+    paths, failures = prepare_lesson_sources(job, "selected", settings)
+    assert not failures and len(paths) == 1 and paths[0].suffix == ".pdf"
+    receipts = list(paths[0].parent.glob("*.source.json"))
+    assert len(receipts) == 1 and set(json.loads(receipts[0].read_text())) == {"schema", "source_sha256", "suffix", "bytes", "sha256"}
+    retry, failures = prepare_lesson_sources(job, "selected", SimpleNamespace(pku_username="", pku_password=""))
+    assert retry == paths and not failures and len(calls) == 1
+    paths[0].write_bytes(b"%PDF-student-edit")
+    edited = paths[0].read_bytes()
+    retry, failures = prepare_lesson_sources(job, "selected", settings)
+    assert retry == [] and len(failures) == 1
+    assert paths[0].read_bytes() == edited and len(calls) == 2
+
+
+def test_changed_official_attachment_identity_cannot_replace_extensionless_source(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    row = _row("20260924 slides", "20260924 slides")
+    _index(job, [row])
+    live = ContentItem(course_id="course-1", content_id="item-1", title=row["title"], kind="文件", parent_path="教学内容/第一周", attachments=[AttachmentRef(filename=row["attachments"][0]["filename"], url="/bbcswebdav/xid-other/swapped")])
+    from pku_sync import auth, materials
+    monkeypatch.setattr(auth, "get_session", lambda **kwargs: httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("identity mismatch must not fetch"))))
+    monkeypatch.setattr(materials, "walk_materials", lambda client, cid: ([live], []))
+    paths, failures = prepare_lesson_sources(job, "selected", SimpleNamespace(pku_username="fixture", pku_password="fixture"))
+    assert paths == [] and len(failures) == 1

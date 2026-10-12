@@ -20,6 +20,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, WindowEvent};
+mod draft_save;
 
 const PANEL_PORTS: [u16; 3] = [8791, 8792, 8793];
 const HEALTHZ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,6 +28,7 @@ const HEALTHZ_INTERVAL: Duration = Duration::from_millis(250);
 
 struct PanelState {
     child: Mutex<Option<Child>>,
+    endpoint: Mutex<Option<(String, String)>>,
 }
 
 enum PanelLaunch {
@@ -224,8 +226,50 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn app_dir() -> Result<PathBuf, String> {
+    // Explicit alternate profile for installed-native acceptance and portable
+    // installs. The default remains unchanged; never redirect HOME/USERPROFILE.
+    if let Some(value) = std::env::var_os("PKU_DESKTOP_DATA_DIR") {
+        return validate_alternate_app_dir(PathBuf::from(value));
+    }
     let home = home_dir().ok_or_else(|| "无法确定用户主目录（HOME / USERPROFILE）。".to_string())?;
     Ok(home.join("PKU-All-in-Notion"))
+}
+
+fn validate_alternate_app_dir(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.is_absolute() || path.parent().is_none() || path.as_os_str().is_empty() {
+        return Err("PKU_DESKTOP_DATA_DIR 必须是非根目录的绝对路径。".to_string());
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod profile_path_tests {
+    use super::{validate_alternate_app_dir, healthz_matches};
+    use std::path::PathBuf;
+
+    #[test]
+    fn alternate_profile_rejects_relative_and_root_paths() {
+        for value in ["", ".", "..", "relative/profile"] {
+            assert!(validate_alternate_app_dir(PathBuf::from(value)).is_err());
+        }
+        let temporary = std::env::temp_dir();
+        let root = temporary.ancestors().last().unwrap().to_path_buf();
+        assert!(validate_alternate_app_dir(root).is_err());
+    }
+
+    #[test]
+    fn alternate_profile_accepts_an_absolute_nonroot_without_changing_home() {
+        let profile = std::env::temp_dir().join("pku-native-profile-test");
+        assert_eq!(validate_alternate_app_dir(profile.clone()).unwrap(), profile);
+    }
+
+    #[test]
+    fn startup_rejects_healthy_but_unrelated_panels() {
+        assert!(!healthz_matches(r#"{"ok":true}"#, "current-child"));
+        assert!(!healthz_matches(r#"{"ok":true,"instance_id":"old-child"}"#, "current-child"));
+        assert!(!healthz_matches(r#"{"ok":false,"instance_id":"current-child"}"#, "current-child"));
+        assert!(healthz_matches(r#"{"ok":true,"instance_id":"current-child"}"#, "current-child"));
+    }
 }
 
 fn panel_exe_name() -> &'static str {
@@ -377,6 +421,9 @@ fn kill_panel(child: &mut Child) {
 
 fn stop_panel(app: &AppHandle) {
     if let Some(state) = app.try_state::<PanelState>() {
+        if let Ok(mut endpoint) = state.endpoint.lock() {
+            *endpoint = None;
+        }
         if let Ok(mut guard) = state.child.lock() {
             if let Some(mut child) = guard.take() {
                 kill_panel(&mut child);
@@ -385,7 +432,14 @@ fn stop_panel(app: &AppHandle) {
     }
 }
 
-fn poll_healthz() -> Result<u16, String> {
+fn healthz_matches(body: &str, instance_id: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .map(|value| value.get("ok").and_then(|v| v.as_bool()) == Some(true)
+            && value.get("instance_id").and_then(|v| v.as_str()) == Some(instance_id))
+        .unwrap_or(false)
+}
+
+fn poll_healthz(instance_id: &str) -> Result<u16, String> {
     let deadline = Instant::now() + HEALTHZ_TIMEOUT;
     while Instant::now() < deadline {
         for port in PANEL_PORTS {
@@ -394,7 +448,11 @@ fn poll_healthz() -> Result<u16, String> {
                 .timeout(Duration::from_secs(1))
                 .call()
             {
-                Ok(resp) if (200..300).contains(&resp.status()) => return Ok(port),
+                Ok(resp) if (200..300).contains(&resp.status()) => {
+                    if resp.into_string().map(|body| healthz_matches(&body, instance_id)).unwrap_or(false) {
+                        return Ok(port);
+                    }
+                },
                 _ => {}
             }
         }
@@ -488,6 +546,14 @@ fn start_panel(app: AppHandle) {
     // The desktop shell owns installation and signed updates. The bundled
     // panel must not offer the separate `uv tool upgrade` path.
     cmd.env("PKU_DESKTOP_APP", "1");
+    #[cfg(windows)]
+    cmd.env("PKU_DESKTOP_PARENT_PID", std::process::id().to_string());
+    // Another source panel or installation may already own a preferred port.
+    // Only this launched child's startup response may select our WebView URL.
+    let instance_id = format!("{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos());
+    cmd.env("PKU_PANEL_INSTANCE_ID", &instance_id);
 
     // Use the current Windows proxy settings for the entire panel, including
     // Notion and cloud services, even if this process inherited a stale port.
@@ -499,16 +565,11 @@ fn start_panel(app: AppHandle) {
         windows_identity_proxy_bypassed(),
     );
 
-    // The retrying Python transport needs the active Windows user proxy for
-    // IAAA; it still downloads large campus videos through a direct route.
-    #[cfg(windows)]
-    if std::env::var_os("PKU_CAMPUS_IDENTITY_PROXY").is_none() {
-        if windows_identity_proxy_bypassed() {
-            cmd.env("PKU_CAMPUS_IDENTITY_PROXY", "direct");
-        } else if let Some(proxy) = windows_user_https_proxy() {
-            cmd.env("PKU_CAMPUS_IDENTITY_PROXY", proxy);
-        }
-    }
+    // Leave an absent IAAA override absent. The Python transport tries direct
+    // first and may recover through the user's live local Windows proxy after
+    // a transport failure. A generated "direct" value here would be mistaken
+    // for an explicit user preference and disable that recovery. Real inherited
+    // PKU_CAMPUS_IDENTITY_PROXY preferences remain available to the child.
 
     // Keep uv resolvable for in-app upgrade paths when UV_TOOL_BIN_DIR is set.
     if let Ok(bin_dir) = std::env::var("UV_TOOL_BIN_DIR") {
@@ -538,7 +599,7 @@ fn start_panel(app: AppHandle) {
     }
 
     emit_status(&app, "正在等待本机服务就绪…");
-    let port = match poll_healthz() {
+    let port = match poll_healthz(&instance_id) {
         Ok(port) => port,
         Err(err) => {
             append_log(&log_path, &format!("[launcher] {} {err}", now_stamp()));
@@ -549,6 +610,11 @@ fn start_panel(app: AppHandle) {
     };
 
     let target = format!("http://127.0.0.1:{port}/app");
+    if let Some(state) = app.try_state::<PanelState>() {
+        if let Ok(mut guard) = state.endpoint.lock() {
+            *guard = Some((format!("http://127.0.0.1:{port}"), instance_id.clone()));
+        }
+    }
     append_log(
         &log_path,
         &format!("[launcher] {} 健康检查通过，打开 {target}", now_stamp()),
@@ -698,7 +764,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PanelState {
             child: Mutex::new(None),
+            endpoint: Mutex::new(None),
         })
+        .invoke_handler(tauri::generate_handler![draft_save::save_reviewed_draft])
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || start_panel(handle));

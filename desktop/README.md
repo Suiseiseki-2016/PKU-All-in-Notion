@@ -47,6 +47,11 @@ tree). The shell then finds `pku-sync` via `UV_TOOL_BIN_DIR` → `~/.local/bin` 
 
 ### Windows WebView check
 
+发布候选的桌面生命周期检查使用 `desktop/scripts/smoke-release.ps1`。默认创建全新
+临时数据目录，保留学生目录；也可指定不存在的绝对路径 `-AppDataDir` 和新的
+`-ResultPath` 保存结果。检查实际后台进程身份、两次启动、单实例、无辅助窗口及
+正常关窗释放。这个烟测不代替真实登录、同步、学习流程及完整发布验收。
+
 ```bat
 cd desktop
 npm install

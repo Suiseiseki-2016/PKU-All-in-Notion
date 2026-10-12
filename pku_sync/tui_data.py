@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from threading import Event
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 if TYPE_CHECKING:
     import httpx
@@ -683,3 +684,147 @@ def freshness(date_iso: str | None, today: datetime | None = None) -> str:
     if diff.days < 0:
         return "未来"
     return f"{diff.days} 天前"
+
+
+@dataclass(frozen=True)
+class CourseMetadataRead:
+    course_id: str
+    recordings: list[Any] | None = None
+    material_items: list[Any] | None = None
+    tree_assignments: list[Any] | None = None
+    notices: list[Any] | None = None
+    recordings_error: Exception | None = None
+    materials_error: Exception | None = None
+    notices_error: Exception | None = None
+    recordings_status: str = "not_read"
+    materials_status: str = "not_read"
+    notice_status: str = "not_read"
+
+
+class _CollectionStopped(Exception):
+    pass
+
+
+def _check_rows(rows: Any, course_id: str) -> None:
+    if not isinstance(rows, list):
+        raise ValueError("course metadata did not return a complete list")
+    if any(getattr(row, "course_id", None) != course_id for row in rows):
+        raise ValueError("course metadata returned rows for a different course")
+
+
+def read_course_metadata(
+    client: Any,
+    course_ids: Iterable[str],
+    *,
+    recordings_fn: Callable,
+    materials_fn: Callable,
+    announcements_fn: Callable,
+    check_cancel: Callable[[], None] | None = None,
+    max_workers: int = 4,
+) -> dict[str, CourseMetadataRead]:
+    """Read each course's existing parsers in order, up to four courses at once.
+
+    Cancellation checks run only on the calling thread. If cancellation raises,
+    pending work is canceled, in-flight reads drain, and no partial result is
+    returned to a publisher. The client remains open for its owner to close.
+    """
+    from .materials import ToolUnavailable
+
+    ids = tuple(course_ids)
+    if any(not isinstance(course_id, str) or not course_id for course_id in ids):
+        raise ValueError("invalid course identity")
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate course identity")
+    if not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("max_workers must be positive")
+    workers = min(max_workers, 4, len(ids))
+    stopped = Event()
+
+    def check_owner() -> None:
+        if check_cancel is not None:
+            check_cancel()
+
+    def fetch_one(course_id: str, *, serial: bool = False) -> CourseMetadataRead:
+        def checkpoint() -> None:
+            if serial:
+                check_owner()
+            if stopped.is_set():
+                raise _CollectionStopped()
+
+        checkpoint()
+        try:
+            recordings = recordings_fn(client, course_id)
+            _check_rows(recordings, course_id)
+        except Exception as exc:
+            return CourseMetadataRead(course_id, recordings_error=exc,
+                                      recordings_status="error")
+
+        checkpoint()
+        try:
+            material_items, tree_assignments = materials_fn(client, course_id)
+            _check_rows(material_items, course_id)
+            _check_rows(tree_assignments, course_id)
+            materials_error = None
+        except Exception as exc:
+            material_items = tree_assignments = None
+            materials_error = exc
+
+        checkpoint()
+        try:
+            notices = announcements_fn(client, course_id)
+            _check_rows(notices, course_id)
+            notices_error, notice_status = None, "available"
+        except ToolUnavailable as exc:
+            notices, notices_error, notice_status = None, exc, "unavailable"
+        except Exception as exc:
+            notices, notices_error, notice_status = None, exc, "error"
+        checkpoint()
+        return CourseMetadataRead(
+            course_id=course_id, recordings=recordings,
+            material_items=material_items, tree_assignments=tree_assignments,
+            notices=notices, recordings_status="available",
+            materials_status="error" if materials_error is not None else "available",
+            notice_status=notice_status, materials_error=materials_error,
+            notices_error=notices_error,
+        )
+
+    check_owner()
+    if workers <= 1:
+        results = {}
+        for course_id in ids:
+            results[course_id] = fetch_one(course_id, serial=True)
+        check_owner()
+        return results
+
+    # Submit only one bounded window. Cancellation never leaves a backlog of
+    # untouched courses that can later issue requests after the owner exits.
+    iterator = iter(ids)
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="campus-metadata")
+    pending = {}
+    results = {}
+    try:
+        for _ in range(workers):
+            check_owner()
+            course_id = next(iterator)
+            pending[pool.submit(fetch_one, course_id)] = course_id
+        while pending:
+            check_owner()
+            completed, _ = wait(pending, timeout=.02, return_when=FIRST_COMPLETED)
+            check_owner()
+            for future in completed:
+                course_id = pending.pop(future)
+                results[course_id] = future.result()
+            for _ in completed:
+                check_owner()
+                course_id = next(iterator, None)
+                if course_id is not None:
+                    pending[pool.submit(fetch_one, course_id)] = course_id
+        check_owner()
+        return {course_id: results[course_id] for course_id in ids}
+    except BaseException:
+        stopped.set()
+        for future in pending:
+            future.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)

@@ -51,9 +51,16 @@ def sync_all(
     root: Path,
     resolve_recordings: bool = True,
 ) -> list[SyncReport]:
+    from .catalog_snapshots import read_status
+    read_status(root, False, "legacy_refresh_requires_account_confirmation")
+    from .course_storage import plan_course_directories, CourseStorageConflict
+    try:
+        plan_course_directories(root, courses)
+    except CourseStorageConflict as exc:
+        return [SyncReport(course=course, errors=[str(exc)]) for course in courses]
     try:
         deadlines = fetch_deadlines(client)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         deadlines = {}
         deadline_error = f"deadlines unavailable: {exc}"
     else:
@@ -67,6 +74,7 @@ def sync_all(
             root,
             deadlines.get(course.course_id, []),
             resolve_recordings=resolve_recordings,
+            deadlines_complete=not deadline_error,
         )
         if deadline_error:
             report.errors.append(deadline_error)
@@ -80,9 +88,25 @@ def sync_course(
     root: Path,
     deadlines: list[Assignment],
     resolve_recordings: bool = True,
+    *,
+    deadlines_complete: bool = True,
 ) -> SyncReport:
     report = SyncReport(course=course)
-    course_dir = root / safe_name(course.directory, course.course_id.strip("_"))
+    from .catalog_snapshots import read_status
+    read_status(root, False, "legacy_refresh_requires_account_confirmation")
+    announcements = _step(report, "announcements", lambda: fetch_announcements(client, course.course_id))
+    walked = _step(report, "materials", lambda: walk_materials(client, course.course_id))
+    recordings = _step(report, "recordings", lambda: list_recordings(client, course.course_id))
+    if announcements is None or walked is None or recordings is None or not deadlines_complete:
+        report.errors.append("教学网数据读取不完整，已保留旧快照；禁止覆盖共享目录。")
+        return report
+    items, tree_assignments = walked
+    from .course_storage import course_directory, CourseStorageConflict
+    try:
+        course_dir = course_directory(root, course)
+    except CourseStorageConflict as exc:
+        report.errors.append(str(exc))
+        return report
     course_dir.mkdir(parents=True, exist_ok=True)
     manifest = Manifest(course_dir / "manifest.json")
 
@@ -99,17 +123,13 @@ def sync_course(
         + "\n",
     )
 
-    announcements = _step(report, "announcements", lambda: fetch_announcements(client, course.course_id)) or []
     _write_announcements(client, announcements, course_dir, manifest, report)
 
-    walked = _step(report, "materials", lambda: walk_materials(client, course.course_id))
-    items, tree_assignments = walked if walked else ([], [])
     _write_materials(client, items, course_dir, manifest, report)
 
     assignments = merge_deadlines(tree_assignments, deadlines)
     _write_assignments(assignments, deadlines, course_dir, report)
 
-    recordings = _step(report, "recordings", lambda: list_recordings(client, course.course_id)) or []
     _write_recordings(client, recordings, course_dir, report, resolve_recordings)
 
     manifest.save()

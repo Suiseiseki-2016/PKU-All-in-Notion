@@ -204,6 +204,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
                 };
                 window.__candidateTest.render();
             }""")
+            page.locator('[data-action="campus-open-center"][data-center="assignments"]').click()
             form = page.locator("#assignment-prepare-form")
             assert "启动后会检查更新" in page.locator('.sidebar [data-block="update"]').inner_text()
             assert page.locator('[data-action="request-update"]').count() == 0
@@ -251,7 +252,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
 
 
 @pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_notion_preview_opens_browser_and_returns_to_dashboard():
+def test_notion_preview_opens_browser_and_returns_to_old_library():
     from pku_sync.panel.connection import build_fake_connection_service
 
     opened = []
@@ -291,6 +292,9 @@ def test_notion_preview_opens_browser_and_returns_to_dashboard():
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
+            page.get_by_role("heading", name="我的课程").wait_for()
+            assert page.locator('[data-action="open-course"]').count() == 0
+            page.locator('.sidebar [data-action="open-library"]').click()
             page.locator('[data-action="open-course"]').first.click()
             page.locator('[data-action="select-lecture"]').first.click()
             page.locator('[data-action="launch"][data-kind="lecture"]').first.click()
@@ -298,7 +302,7 @@ def test_notion_preview_opens_browser_and_returns_to_dashboard():
             assert len(opened) == 1
             assert opened[0].startswith("https://www.notion.so/")
             assert page.url == "http://panel.test/app"
-            assert page.locator('[data-nav="dashboard"][aria-current="page"]').count() >= 1
+            assert page.locator('[data-nav="library"][aria-current="page"]').count() >= 1
             assert page.locator('[data-action="open-course"]').count() >= 1
         finally:
             browser.close()
@@ -408,6 +412,9 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
             # The panel polls verification automatically; a manual refresh button can
             # disappear during Playwright's click action once the desired state arrives.
             page.locator("#redeem-form").wait_for(timeout=15000)
+            account_settings = page.locator('.sidebar [data-persistent-disclosure="desktop-account"]')
+            if not account_settings.evaluate("el => el.open"):
+                account_settings.locator('summary').click()
             page.locator("#code").fill("NOPE0000")
             page.locator('#redeem-form [data-action="redeem"]').click()
             page.get_by_text("兑换码无效或已使用", exact=True).wait_for()
@@ -476,10 +483,21 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
     (tmp_path / "notion-learning-home.json").write_text(json.dumps({
         "id": "home", "parent_id": "oauth-template", "url": "https://notion.so/home"
     }), "utf-8")
+    # Processing is enabled only for an account-confirmed official snapshot.
+    # A bare legacy index now intentionally renders as read-only.
+    from pku_sync import catalog_snapshots as catalog
+    from pku_sync.models import Course
+    catalog.activate_account(settings)
+    material_rows = json.loads((campus / "materials/index.json").read_text("utf-8"))
+    for number, row in enumerate(material_rows, 1):
+        row["content_id"] = f"_fixture{number}_1"
+    catalog.save_cache(tmp_path, {"revision": 1, "snapshot": catalog.build_snapshot(
+        Course(course_id="campus-one", name=notion_course["title"]),
+        [recording], material_rows, [], [])})
     started = []
     catalog_calls = []
-    app.state.recording_manager.start_catalog_sync = lambda: (catalog_calls.append("startup") or {
-        "state": "done", "kind": "catalog", "stage": "Notion 目录已建立"
+    app.state.recording_manager.start_background_sync = lambda **kwargs: (catalog_calls.append("explicit") or {
+        "state": "done", "kind": "sync", "scope": "background", "stage": "逐课更新已完成"
     })
     app.state.recording_manager.start_campus_process = lambda *args, **kwargs: (
         started.append((args, kwargs)) or {"state": "running", "kind": "process", "stage": "下载录像",
@@ -508,16 +526,22 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
             page = browser.new_page()
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
-            for _ in range(20):
-                if catalog_calls: break
-                page.wait_for_timeout(100)
-            assert catalog_calls == ["startup"]
+            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').wait_for()
+            assert catalog_calls == []
+            # Retain the one-dispatch check, but require an explicit command.
+            # Reading the parent list no longer grants a background write.
+            assert client.post('/api/campus/notion/sync').status_code == 200
+            assert catalog_calls == ["explicit"]
             page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
             page.get_by_role("heading", name="第1讲录像").wait_for()
+            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             assert page.locator(".material-file-link").count() == 1
             assert "slides.pdf" in page.locator(".material-file-link").inner_text()
             page.locator('[data-material-select="1"]').select_option(index=1)
             page.locator('[data-action="campus-material-assign"][data-material="1"]').click()
+            page.locator('[data-material-select="1"]').wait_for(state='detached')
+            page.locator('[data-action="campus-course-home"]').click()
+            page.locator('[data-action="campus-open-lesson"]').click()
             page.locator(".recording-row").get_by_text("补充阅读").wait_for()
             assert started == []
             assert not list(tmp_path.rglob("video.mp4"))
@@ -526,6 +550,9 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
             button = page.locator('[data-action="campus-process"]')
             button.wait_for()
             page.wait_for_function('!document.querySelector("[data-action=campus-process]").disabled')
+            style = page.get_by_role('combobox', name='笔记方式')
+            assert style.input_value() == 'transcript'
+            style.select_option('topics')
             page.once("dialog", lambda dialog: dialog.dismiss())
             button.click()
             assert started == []
@@ -535,6 +562,7 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
             assert len(started) == 1
             assert started[0][0][1] == "campus-one"
             assert started[0][1]["direct_oss"] is True
+            assert started[0][1]['notes_strategy'] == 'topics'
             page.wait_for_function('!document.querySelector("[data-recording-direct-oss]").checked')
             assert not list(tmp_path.rglob("video.mp4"))
             page.locator(".recording-task progress[value='5242880']").wait_for()
@@ -553,6 +581,7 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
                 json.dumps({"keyframes": []}), "utf-8")
             page.reload()
             page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
+            page.locator('[data-action="campus-open-lesson"]').click()
             publish = page.get_by_role("button", name="发布已有笔记")
             publish.wait_for()
             page.once("dialog", lambda dialog: dialog.accept())
@@ -575,6 +604,7 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
             }), "utf-8")
             page.reload()
             page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
+            page.locator('[data-action="campus-open-lesson"]').click()
             jump = page.locator('[data-action="campus-open-lecture"]')
             jump.wait_for()
             assert page.locator('[data-action="campus-process"]').count() == 0
@@ -654,17 +684,21 @@ def test_materials_only_course_and_demo_notice_in_edge(tmp_path):
             assert "…1540_1" in card.inner_text()
             assert "_101540_1" not in card.inner_text()
             assert "LONG-COURSE-CODE-2026" not in card.inner_text()
+            page.locator('.sidebar [data-action="campus-account-settings"]').click()
             assert page.locator(".campus-setup .setup-steps li").count() == 4
             assert page.get_by_text("Notion 演示连接").count() == 0
             assert page.locator(".campus-setup").get_by_text("演示模式", exact=False).count() == 1
             card.get_by_role("button", name="查看课程").click()
-            page.get_by_role("heading", name="课程内容").wait_for()
+            page.locator('.campus-centers').wait_for()
             assert page.get_by_text("这门课程暂时没有录像").is_visible()
+            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             assert page.locator(".material-file-link").count() == 1
             assert page.locator('[data-action="campus-material-ignore"]').count() == 0
             assert page.locator("[data-recording-direct-oss]").count() == 0
             assert page.get_by_text("音频经 15 分钟").count() == 0
-            assert "_101540_1" in page.locator(".course-hero").inner_text()
+            assert page.locator(".course-hero").get_attribute('data-course-id') == "_101540_1"
+            page.locator('[data-action="campus-course-home"]').click()
+            page.locator('[data-action="campus-open-center"][data-center="assignments"]').click()
             page.get_by_role("button", name="准备作业文件").click()
             form = page.locator("#assignment-prepare-form")
             form.wait_for()
@@ -749,9 +783,10 @@ def test_handbook_requirements_visible_when_formal_assignment_index_is_empty(tmp
             page.goto("http://panel.test/app")
             card = page.locator(".course-card")
             card.wait_for()
-            assert "0 项教学网正式作业索引" in card.inner_text()
-            assert "1 份课程手册待核对" in card.inner_text()
+            assert "0 项正式作业" in card.inner_text()
+            assert "课程手册待核对" not in card.inner_text()
             card.get_by_role("button", name="查看课程").click()
+            page.locator('[data-action="campus-open-center"][data-center="assignments"]').click()
             section = page.locator("#course-assignments")
             assert "教学网正式作业索引当前为 0 项" in section.inner_text()
             assert "课程手册中的待核对要求" in section.inner_text()
@@ -835,6 +870,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
                 };
                 window.__candidateTest.render();
             }""")
+            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             box = page.locator(".recording-task")
             text = box.inner_text()
             assert "第 1/2 步" in text
@@ -878,7 +914,14 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
 
             # The course page keeps a permanent way to generate or reopen it.
             assert page.locator('[data-action="campus-course-summary"]').count() == 1
+            page.get_by_role('button', name='课程设置', exact=True).click()
             assert page.get_by_role("button", name="生成全部课程总结").count() == 1
+            assert "写入 Notion 时中断" in page.locator('.recording-task').inner_text(timeout=3000)
+            assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
+            page.locator('[data-action="campus-course-home"]').click()
+            assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
+            assert page.locator('.campus-centers a').count() == 4
+            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;
                 s.campus.course.summary = {url:'https://www.notion.so/summary-page',
@@ -906,7 +949,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
                 s.recordings.task = {state:'idle'};
                 s.campus.loading = false;
                 const style = document.createElement('style');
-                style.textContent = '.app-shell{height:400px;display:block}.main{height:120px;overflow-y:auto}';
+                style.textContent = '.app-shell{height:400px;display:block}.main{height:120px;overflow-y:auto}.course-summary-control{min-height:900px}';
                 document.head.appendChild(style);
                 window.__candidateTest.render();
                 document.querySelector('.main').scrollTop = 320;

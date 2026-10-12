@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
 
@@ -52,13 +53,17 @@ EMPTY_PAGE_HTML = "<html><body><h1>作业</h1><p>暂无内容</p></body></html>"
 
 
 class FakeClient:
-    def __init__(self, status_code=200, text=""):
+    def __init__(self, status_code=200, text="", review_text=None):
         self.status_code = status_code
         self.text = text
+        self.review_text = review_text
         self.calls: list[dict] = []
 
     def get(self, path, params=None):
         self.calls.append({"method": "get", "path": path, "params": params})
+        self.url = 'https://course.pku.edu.cn' + path + '?' + urlencode(params or {})
+        if self.review_text is not None:
+            return SimpleNamespace(status_code=self.status_code, text=self.review_text, url=self.url)
         return self
 
     def post(self, path, data=None, files=None, headers=None):
@@ -78,6 +83,100 @@ def test_parse_form_reads_single_quoted_hidden_inputs():
     assert form.hidden["studentSubmission.text_f"] == "encrypted-token"
     assert form.hidden["studentSubmission.text_w"] == "/webapps/assignment/submit"
     assert form.hidden["course_id"] == "_101578_1"
+
+
+@pytest.mark.parametrize('html,state', [(FORM_HTML, 'submission_form'),
+    (REVIEW_HISTORY_HTML, 'review_history'), (EMPTY_PAGE_HTML, 'unknown'),
+    ('<form><input type="password">Review Submission History</form>', 'unknown')])
+def test_submission_state_is_read_only_and_conservative(html, state):
+    class Campus:
+        def get(self, path, params):
+            assert path == pku_submit.SUBMIT_PATH
+            assert params == {'course_id': '_101578_1', 'content_id': '_1708913_1'}
+            return SimpleNamespace(status_code=200, text=html,
+                url='https://course.pku.edu.cn' + path + '?course_id=_101578_1&content_id=_1708913_1')
+        def post(self, *args, **kwargs):
+            pytest.fail('state inspection must never POST')
+    result = pku_submit.inspect_submission(Campus(), '_101578_1', '_1708913_1')
+    assert result['state'] == state
+    assert result['authority'] == 'course.pku.edu.cn'
+    assert result['verified'] is (state != 'unknown')
+
+
+def test_submission_state_rejects_mismatched_target_even_with_history_markup():
+    class Campus:
+        def get(self, *args, **kwargs):
+            return SimpleNamespace(status_code=200, text=REVIEW_HISTORY_HTML,
+                url='https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_9_1&content_id=_8_1')
+    result = pku_submit.inspect_submission(Campus(), '_101578_1', '_1708913_1')
+    assert result['state'] == 'unknown' and not result['verified']
+
+
+def test_fetch_form_refuses_hidden_target_mismatch():
+    with pytest.raises(SubmitError, match='不匹配'):
+        fetch_form(FakeClient(text=FORM_HTML), '_1_1', '_2_1')
+
+
+@pytest.mark.parametrize('location,html', [
+    ('https://iaaa.pku.edu.cn/login', REVIEW_HISTORY_HTML),
+    ('https://other.example/webapps/assignment/uploadAssignment?course_id=_101578_1&content_id=_1708913_1', REVIEW_HISTORY_HTML),
+    ('https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_9_1&content_id=_8_1', REVIEW_HISTORY_HTML),
+    ('https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_101578_1&content_id=_1708913_1',
+     '<input type="password"><div>Review Submission History</div>'),
+    ('https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_101578_1&content_id=_1708913_1',
+     '<script>Review Submission History</script>'),
+], ids=['login-redirect', 'foreign-host', 'wrong-assignment', 'password-form', 'script-only'])
+@pytest.mark.parametrize('mode', ['file', 'text'])
+def test_submission_receipt_requires_exact_official_target(tmp_path, location, html, mode):
+    class Campus(FakeClient):
+        def get(self, *args, **kwargs):
+            return SimpleNamespace(status_code=200, text=html, url=location)
+    client = Campus(text='{"destinationUrl":"/review"}')
+    answer = tmp_path / 'answer.pdf'
+    answer.write_bytes(b'fake answer')
+    with pytest.raises(SubmitError):
+        if mode == 'file':
+            submit_file(client, _form(), answer)
+        else:
+            submit_text(client, _form(), 'fake answer')
+
+
+@pytest.mark.parametrize('location', [
+    'https://iaaa.pku.edu.cn/login',
+    'https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_9_1&content_id=_8_1',
+    'https://course.pku.edu.cn/webapps/assignment/uploadAssignment?course_id=_101578_1&course_id=_9_1&content_id=_1708913_1',
+    'https://course.pku.edu.cn:8443/webapps/assignment/uploadAssignment?course_id=_101578_1&content_id=_1708913_1',
+    'https://course.pku.edu.cn:invalid/webapps/assignment/uploadAssignment?course_id=_101578_1&content_id=_1708913_1',
+], ids=['login', 'other-target', 'duplicate-target', 'other-port', 'invalid-port'])
+def test_fetch_form_rejects_redirected_or_ambiguous_target_before_post(location):
+    class Campus:
+        def get(self, *args, **kwargs):
+            return SimpleNamespace(status_code=200, text=FORM_HTML, url=location)
+        def post(self, *args, **kwargs):
+            pytest.fail('unverified target must not receive a submission')
+    with pytest.raises(SubmitError):
+        fetch_form(Campus(), '_101578_1', '_1708913_1')
+
+
+def test_fetch_form_does_not_treat_script_text_as_submission_history():
+    html = FORM_HTML.replace('</body>', '<script>Review Submission History</script></body>')
+    assert fetch_form(FakeClient(text=html), '_101578_1', '_1708913_1').nonce == 'nonce-abc-123'
+
+
+@pytest.mark.parametrize('status,url,html', [
+    (403, 'https://course.pku.edu.cn', REVIEW_HISTORY_HTML),
+    (200, 'https://iaaa.pku.edu.cn/login', REVIEW_HISTORY_HTML),
+    (200, 'http://course.pku.edu.cn', REVIEW_HISTORY_HTML),
+    (200, 'https://course.pku.edu.cn', '<script>Review Submission History</script>'),
+    (200, 'https://course.pku.edu.cn', 'x' * (2 * 1024 * 1024 + 1)),
+], ids=['forbidden', 'login-redirect', 'insecure-url', 'script-only', 'oversized-page'])
+def test_unverified_page_does_not_claim_current_submission_state(status, url, html):
+    class Campus:
+        def get(self, *a, **kw):
+            target = url + pku_submit.SUBMIT_PATH + '?course_id=_101578_1&content_id=_1708913_1'
+            return SimpleNamespace(status_code=status, text=html, url=target)
+    result = pku_submit.inspect_submission(Campus(), '_101578_1', '_1708913_1')
+    assert not result['verified'] and result['state'] == 'unknown'
 
 
 def test_parse_form_missing_nonce_is_none():
@@ -113,13 +212,14 @@ def test_fetch_form_surfaces_http_and_missing_form_errors():
 
 def test_submit_text_posts_multipart_with_ajax_header_and_all_hidden_fields():
     receipt = json.dumps({"destinationUrl": "/webapps/assignment/uploadAssignment?mode=DEFAULT"})
-    client = FakeClient(text=receipt)
+    client = FakeClient(text=receipt, review_text=REVIEW_HISTORY_HTML)
     form = parse_form(FORM_HTML, "_101578_1", "_1708913_1")
 
     body = submit_text(client, form, "正强化：发奖金增加上班行为。")
 
     assert body["destinationUrl"].endswith("mode=DEFAULT")
-    (call,) = client.calls
+    call = client.calls[0]
+    assert client.calls[1]["params"] == {"course_id": form.course_id, "content_id": form.content_id}
     assert call["path"].startswith("/webapps/assignment/uploadAssignment?action=submit")
     # Every hidden input goes back, plus the answer field.
     assert call["data"]["blackboard.platform.security.NonceUtil.nonce.ajax"] == "nonce-abc-123"
@@ -138,6 +238,17 @@ def test_submit_text_rejects_non_json_and_missing_receipt():
         submit_text(FakeClient(text='{"other": 1}'), _form(), "答案")
     with pytest.raises(SubmitError, match="HTTP 500"):
         submit_text(FakeClient(status_code=500, text="访问已拒绝"), _form(), "答案")
+
+
+def test_text_preview_hash_is_checked_before_shared_arm_or_post():
+    called = []
+    class NoPost:
+        def post(self, *args, **kwargs):
+            pytest.fail('changed text must never POST')
+    with pytest.raises(pku_submit.SubmissionFileChanged):
+        submit_text(NoPost(), _form(), 'changed text', expected_sha256='a' * 64,
+                    before_post=lambda: called.append('arm'))
+    assert called == []
 
 
 def _form():
@@ -163,17 +274,49 @@ def test_mime_type_for_maps_common_extensions(tmp_path):
     assert mime_type_for(tmp_path / "unknown.zz9") == "application/octet-stream"
 
 
+def test_submit_file_rejects_changed_bytes_before_any_portal_post(tmp_path):
+    import hashlib
+    answer = tmp_path / 'answer.pdf'
+    answer.write_bytes(b'changed answer')
+    class NoPost:
+        def post(self, *args, **kwargs):
+            pytest.fail('changed content must not be sent')
+    with pytest.raises(pku_submit.SubmissionFileChanged):
+        submit_file(NoPost(), _form(), answer, expected_sha256=hashlib.sha256(b'previewed answer').hexdigest())
+
+
+def test_submit_file_requires_shared_arm_after_hash_check_and_before_post(tmp_path):
+    import hashlib
+    answer = tmp_path / 'answer.pdf'
+    answer.write_bytes(b'answer')
+    calls = []
+    class NoPost:
+        def post(self, *args, **kwargs):
+            pytest.fail('unconfirmed arm must prevent POST')
+    def arm():
+        calls.append('arm')
+        raise SubmitError('shared permit not confirmed')
+    with pytest.raises(pku_submit.SubmissionFileChanged):
+        submit_file(NoPost(), _form(), answer, expected_sha256='a' * 64, before_post=arm)
+    assert calls == []
+    with pytest.raises(SubmitError, match='permit'):
+        submit_file(NoPost(), _form(), answer, expected_sha256=hashlib.sha256(b'answer').hexdigest(), before_post=arm)
+    assert calls == ['arm']
+
+
 def test_submit_file_posts_multipart_with_file_part_and_filepicker_fields(tmp_path):
     answer_path = tmp_path / "answer.docx"
     answer_path.write_bytes(b"PK\x03\x04fake-docx-bytes")
     receipt = json.dumps({"destinationUrl": "/webapps/assignment/done"})
-    client = FakeClient(text=receipt)
+    client = FakeClient(text=receipt, review_text=REVIEW_HISTORY_HTML)
     form = parse_form(FORM_HTML, "_101578_1", "_1708913_1")
 
     body = submit_file(client, form, answer_path)
 
     assert body["destinationUrl"].endswith("/done")
-    (call,) = client.calls
+    call = client.calls[0]
+    assert body["portal_verified"] is True
+    assert body["review_history_html"] == REVIEW_HISTORY_HTML
     assert call["path"].startswith("/webapps/assignment/uploadAssignment?action=submit")
     # Hidden inputs round-trip, plus the FilePicker contract fields.
     assert call["data"]["blackboard.platform.security.NonceUtil.nonce.ajax"] == "nonce-abc-123"
@@ -191,14 +334,25 @@ def test_submit_file_posts_multipart_with_file_part_and_filepicker_fields(tmp_pa
     assert call["headers"]["X-Requested-With"] == "XMLHttpRequest"
 
 
-def test_submit_file_accepts_empty_json_receipt(tmp_path):
+def test_submit_file_accepts_empty_response_only_with_official_review_history(tmp_path):
     answer_path = tmp_path / "answer.md"
     answer_path.write_text("# answer", encoding="utf-8")
-    client = FakeClient(text="")
+    client = FakeClient(text="", review_text=REVIEW_HISTORY_HTML)
     form = parse_form(FORM_HTML, "_101578_1", "_1708913_1")
     body = submit_file(client, form, answer_path)
     assert body["submitted"] is True
     assert body["file"] == "answer.md"
+    assert body["portal_verified"] is True
+
+
+@pytest.mark.parametrize("response", ["", '{"destinationUrl":"/webapps/assignment/done"}'])
+def test_submit_file_never_claims_success_without_official_readback(tmp_path, response):
+    answer = tmp_path / "answer.pdf"
+    answer.write_bytes(b"answer")
+    client = FakeClient(text=response, review_text=FORM_HTML)
+    with pytest.raises(SubmitError, match="提交历史"):
+        submit_file(client, _form(), answer)
+    assert sum(call["method"] == "post" for call in client.calls) == 1
 
 
 def test_submit_file_rejects_unreadable_and_http_failures(tmp_path):

@@ -260,6 +260,12 @@ h1, h2, h3, p { margin-top: 0; }
 .form-note.hint { color: var(--muted); }
 .auth-actions { margin-top: 14px; }
 .auth-switches { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+#auth-form .field-label:not(:first-child) { margin-top: 16px; }
+#auth-form .auth-actions .btn { width: 100%; }
+#auth-form input[readonly] { background: #f6f8f5; }
+.btn[aria-busy="true"]::before { content: ""; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: button-spin .8s linear infinite; }
+@keyframes button-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn[aria-busy="true"]::before { animation: none; } }
 .account-email { font-weight: 650; word-break: break-all; }
 .account-verify { color: var(--muted); font-size: 12px; }
 .redeem-form { margin-top: 12px; }
@@ -370,6 +376,8 @@ h1, h2, h3, p { margin-top: 0; }
   font-weight: 800;
 }
 .account-card p { margin: 0 0 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.account-actions > summary { cursor: pointer; padding: 6px 0; color: var(--green-deep); font-size: 12px; font-weight: 700; }
+.account-actions[open] > summary { margin-bottom: 9px; }
 .mobile-topbar { display: none; }
 .mobile-topbar-left { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .mobile-overview {
@@ -605,6 +613,8 @@ h1, h2, h3, p { margin-top: 0; }
   font-weight: 750;
 }
 .hero-actions { display: flex; gap: 9px; flex-shrink: 0; align-items: flex-start; }
+.course-hero-compact { padding: 18px 22px; gap: 16px; }
+.course-hero-compact h1 { font-size: 24px; letter-spacing: -.03em; }
 .course-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(270px, .8fr);
@@ -1088,6 +1098,44 @@ h1, h2, h3, p { margin-top: 0; }
 .material-match-control { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .material-match-control select { min-height: 40px; max-width: 260px; border: 1px solid #cad9d0; border-radius: 9px; background: white; }
 .recording-credentials label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 700; }
+.recording-credentials { align-items: end; padding: 18px; margin: 16px 0; border: 1px solid var(--line); border-radius: 14px; background: #f8fbf8; }
+.recording-credentials label { flex: 1 1 180px; }
+.recording-credentials input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #cad9d0; border-radius: 10px; background: white; color: var(--ink); font: inherit; }
+.credentials-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.recording-credentials .form-note { flex-basis: 100%; margin-top: 0; }
+.home-setup { margin: 20px 0 0; padding: 24px; background: #fcfefd; }
+.home-setup-header { display: flex; gap: 14px; align-items: flex-start; }
+.home-notion-mark { display: grid; place-items: center; flex: 0 0 44px; height: 44px; background: white; border: 1px solid #cad9d0; border-radius: 12px; font: 700 27px Georgia, serif; color: #26372e; }
+.home-setup-header .eyebrow { font-size: 10px; margin: 0 0 4px; }
+.home-setup-header h2 { margin: 0; font-size: 20px; }
+.home-setup-header p:last-child { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.home-setup-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .85fr); gap: 24px; margin-top: 24px; }
+.home-destination label, .home-setup-footer strong { font-size: 13px; font-weight: 750; }
+.home-destination p, .home-setup-footer p, .home-connect p { margin: 7px 0 12px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.home-destination select, .home-location-controls select { display: block; width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #cad9d0; border-radius: 10px; background: white; font: inherit; color: var(--ink); }
+.home-destination > .btn { margin-top: 8px; }
+.home-pages-empty { padding: 13px; border: 1px dashed #cad9d0; border-radius: 10px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.home-preview { padding: 18px 20px; border: 1px solid #dce8df; border-radius: 14px; background: #f2f7f3; }
+.home-preview small { color: var(--muted); font-size: 11px; }
+.home-preview h3 { margin: 10px 0; font-size: 15px; }
+.home-preview ul { list-style: none; padding: 0; margin: 0; }
+.home-preview li { padding: 7px 0 7px 13px; border-left: 2px solid #b6d3bf; font-size: 12px; color: #5c7466; }
+.home-setup-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.home-setup-footer p { margin-bottom: 0; }
+.home-ready-badge { display: inline-block; margin: 18px 0 12px; padding: 5px 10px; border-radius: 20px; color: var(--green-deep); background: #eaf4ec; font-size: 12px; }
+.home-setup-actions, .home-location-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.home-setup-advanced { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.home-setup-advanced > summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.home-location-controls { margin-top: 16px; }
+.home-location-controls label { min-width: 0; flex: 1 1 200px; display: grid; gap: 8px; font-size: 12px; }
+.home-connect { margin-top: 18px; }
+.home-setup-error { padding-top: 10px; }
+@media (max-width: 640px) {
+  .home-setup { padding: 18px; }
+  .home-setup-body { grid-template-columns: 1fr; gap: 16px; }
+  .home-setup-footer { flex-direction: column; align-items: stretch; }
+  .home-setup-footer .btn, .credentials-actions { width: 100%; }
+}
 
 .campus-setup .setup-steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; list-style: none; padding: 0; margin: 10px 0; }
 .campus-setup li { display: flex; align-items: baseline; gap: 9px; min-width: 0; color: var(--green-deep); font-weight: 700; }
@@ -1125,6 +1173,30 @@ h1, h2, h3, p { margin-top: 0; }
 .course-summary-control { display: grid; gap: 8px; justify-items: end; text-align: right; }
 .course-summary-control small { max-width: 240px; color: var(--muted); font-size: 12px; }
 .recording-warning { display: block; margin-top: 6px; color: #8a5a12; font-size: 12px; }
+.campus-centers { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
+.campus-centers a { padding: 10px 16px; border: 1px solid #cad9d0; border-radius: 10px; color: var(--green-deep); background: white; text-decoration: none; font-weight: 700; }
+.campus-centers a:hover, .campus-centers a:focus-visible { background: #edf5ef; }
+.campus-centers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.campus-centers a { display: flex; align-items: center; justify-content: space-between; padding: 22px 18px; }
+.campus-lesson-pages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.campus-lesson-page { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; background: white; border: 1px solid var(--line); border-radius: 14px; }
+.campus-lesson-page small { color: var(--muted); }
+.campus-lesson-page h3 { margin: 8px 0; }
+@media (max-width: 800px) { .campus-centers { grid-template-columns: repeat(2, minmax(0, 1fr)); } .campus-lesson-pages { grid-template-columns: 1fr; } }
+.campus-settings > summary { cursor: pointer; font-weight: 700; padding: 8px 0; }
+.campus-settings[open] > summary { margin-bottom: 18px; }
+#course-lessons, #course-assignments, #course-notices, #course-quizzes { scroll-margin-top: 24px; }
+.campus-quiz-choices { display: grid; gap: 10px; margin: 16px 0; }
+.campus-quiz-choices label { display: flex; gap: 10px; align-items: center; }
+.campus-quiz-choices input { width: auto; }
+#course-quizzes textarea { display: block; width: 100%; min-height: 140px; margin: 10px 0; }
+.campus-quiz-item { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 12px; }
 @media (max-width: 700px) {
   .course-summary-control { justify-items: start; text-align: left; }
 }
+/* Native confirmation uses the application's accessible, awaited dialog. */
+.product-confirmation { max-width: min(560px, 90vw); padding: 24px; border: 1px solid #d8d8d8; border-radius: 14px; color: #252525; background: #fff; }
+.product-confirmation::backdrop { background: rgba(0, 0, 0, .35); }
+.product-confirmation h2 { margin-top: 0; font-size: 20px; }
+.product-confirmation p { white-space: pre-wrap; line-height: 1.65; }
+.product-confirmation-actions { display: flex; justify-content: flex-end; gap: 12px; }

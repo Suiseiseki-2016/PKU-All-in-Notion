@@ -84,6 +84,12 @@ def seed_course(root: Path, folder: str, name: str, recordings: list[dict] | Non
             directory = course_dir / "recordings" / safe_name(recording.slug, "recording")
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "notes.md").write_text(item["notes"], encoding="utf-8")
+            # These fixtures model explicitly reviewed summaries, not merely
+            # the existence of generated notes.
+            from types import SimpleNamespace
+            from pku_sync.panel.summary_acceptance import status, accept
+            job = SimpleNamespace(directory=directory, recording=recording)
+            accept(job, notes_sha256=status(job)["notes_sha256"], confirmed=True)
     (course_dir / "recordings" / "index.json").write_text(
         json.dumps(entries, ensure_ascii=False), encoding="utf-8"
     )
@@ -128,7 +134,8 @@ def test_suffixed_local_course_matches_plain_notion_title(tmp_path: Path):
     )
     assert notes_texts(notes) == [NET_NOTES]
     assert notes[0]["title"] == NOTION_NET_LECTURE
-    assert notes[0]["source"] == "课堂录像笔记"
+    assert notes[0]["source"] == "已验收课堂总结"
+    assert notes[0]["source_id"] and len(notes[0]["notes_sha256"]) == 64
     # The lecture-title intersection requirement stays: another lecture's
     # scope must not pick this recording up.
     other = provider.for_scope(

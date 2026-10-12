@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 import httpx
 
-from .media import DownloadResult, download_recording, extract_keyframes, write_notes
+from .media import (DownloadResult, EXPIRED_MEDIA_STATUSES, download_recording,
+                    extract_keyframes, write_notes)
 from .models import Recording
 from .note_sources import collect_note_sources
 from .recordings import resolve_media
@@ -30,9 +32,42 @@ class RecordingJob:
     course_dir: Path
     recording: Recording
 
-    @property
+    @cached_property
     def directory(self) -> Path:
-        return self.course_dir / "recordings" / safe_name(self.recording.slug, "recording")
+        root = self.course_dir / "recordings"
+        proposed = root / safe_name(self.recording.slug, "recording")
+        from .catalog_snapshots import recording_source_id
+        try:
+            identity = recording_source_id(self.recording)
+        except ValueError:
+            return proposed  # Legacy unidentifiable caches remain local-only.
+        matches = []
+        foreign_proposed = False
+        for marker in root.glob("*/recording.json"):
+            if not marker.resolve().is_relative_to(root.resolve()):
+                continue
+            try:
+                if marker.stat().st_size > 256_000:
+                    continue
+                previous = Recording.model_validate_json(marker.read_text("utf-8"))
+                same = (previous.course_id == self.recording.course_id
+                        and recording_source_id(previous) == identity)
+            except (OSError, ValueError):
+                continue
+            if same:
+                matches.append(marker.parent)
+            elif marker.parent == proposed:
+                foreign_proposed = True
+        if len(matches) > 1:
+            raise ValueError("同一教学网讲次对应多个本地目录，请先核对；已有文件均已保留。")
+        if matches:
+            return matches[0]
+        if foreign_proposed:
+            # Same-day equal titles are not the same teaching-portal session.
+            import hashlib
+            suffix = hashlib.sha256((self.recording.course_id + "\n" + identity).encode()).hexdigest()[:24]
+            return root / ("recording-" + suffix)
+        return proposed
 
     @property
     def video(self) -> Path:
@@ -63,6 +98,20 @@ def collect_jobs(root: Path, course_filter: str = "") -> list[RecordingJob]:
             entries = json.loads(index.read_text("utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        from .catalog_snapshots import cached
+        try:
+            metadata = json.loads((course_dir / "course.json").read_text("utf-8"))
+            canonical = cached(root, metadata.get("course_id", ""))
+        except (OSError, ValueError):
+            canonical = None
+        if canonical:
+            snapshot = canonical["snapshot"]
+            course_name = snapshot["course"]["name"]
+            private = {entry.get("recorded_at"): entry for entry in entries if isinstance(entry, dict)}
+            entries = [{**{key: value for key, value in private.get(row["recorded_at"], {}).items()
+                           if key in {"play_url", "mp4_url", "m3u8_url", "platform_course_id", "subject_id", "room", "unavailable_reason"}},
+                        **row, "course_id": snapshot["course_id"]}
+                       for row in snapshot["sections"]["recordings"]["items"]]
         for entry in entries:
             recording = Recording.model_validate(entry)
             if course_filter and recording.course_id != course_filter:
@@ -127,6 +176,18 @@ def download_job(client: httpx.Client, job: RecordingJob, progress=None) -> Down
         return DownloadResult(path=None, error=f"resolve failed: {exc}")
 
     result = download_recording(client, job.recording, job.directory, progress=progress)
+    if result.path is None and result.http_status in EXPIRED_MEDIA_STATUSES:
+        # A media URL may expire after its initial resolution. Renew the player
+        # chain once, never classify network/disk failures from diagnostic text.
+        # Empty or rejected fresh metadata must not replay the previous address.
+        job.recording.mp4_url = ""
+        job.recording.m3u8_url = ""
+        job.recording.unavailable_reason = ""
+        try:
+            resolve_media(client, job.recording)
+        except Exception as exc:
+            return DownloadResult(path=None, error=f"resolve failed: {type(exc).__name__}")
+        result = download_recording(client, job.recording, job.directory, progress=progress)
     if result.path is not None:
         (job.directory / "recording.json").write_text(
             json.dumps(job.recording.model_dump(), ensure_ascii=False, indent=1), "utf-8"
@@ -162,11 +223,15 @@ def process_job(job: RecordingJob, settings, *, include_keyframes: bool = True, 
     if transcript:
         try:
             notes_path = job.directory / "notes.md"
-            source_context = ([] if notes_path.exists() else collect_note_sources(
-                job.course_dir, job.recording.date, job.recording.title,
-                allowed_paths=source_paths,
-            ))
-            source_context.extend(source_failures or [])
+            from .transcript_notes import restore_saved_note
+            restore_saved_note(notes_path, transcript)
+            source_context = None
+            if not notes_path.exists():
+                source_context = collect_note_sources(
+                    job.course_dir, job.recording.date, job.recording.title,
+                    allowed_paths=source_paths,
+                )
+                source_context.extend(source_failures or [])
             notes = write_notes(
                 transcript,
                 keyframes,

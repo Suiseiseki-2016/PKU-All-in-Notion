@@ -17,8 +17,8 @@ this module is its productized form, with the same wire behavior:
   with no attachment) and must carry ``X-Requested-With: XMLHttpRequest``.
   Missing either fails with 500 (“访问已拒绝” / “not
   MultipartHttpServletRequest”).
-- Success is HTTP 200 with ``{"destinationUrl": …}`` (text) or an empty
-  body (file).
+- A POST response is provisional. Success requires a fresh official
+  review-history read for the same course and assignment.
 
 File attachments (docx/pdf/zip/…) POST to the same endpoint with the file
 in the ``newFile_LocalFile0`` multipart part plus Blackboard's FilePicker
@@ -29,10 +29,12 @@ the same 2026-09 upload flow.
 from __future__ import annotations
 
 import mimetypes
+import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, parse_qs, urlencode
 
 from bs4 import BeautifulSoup
 
@@ -89,6 +91,10 @@ class SubmitError(RuntimeError):
     """Submission cannot proceed; the message explains why."""
 
 
+class SubmissionFileChanged(SubmitError):
+    """A definite pre-POST failure: uploaded bytes differ from the preview."""
+
+
 class AlreadySubmitted(SubmitError):
     """The form page shows the review-history state (already submitted)."""
 
@@ -129,6 +135,62 @@ def parse_form(html: str, course_id: str, content_id: str) -> SubmissionForm | N
     return SubmissionForm(course_id=course_id, content_id=content_id, hidden=hidden)
 
 
+def _official_assignment_page(response, course_id: str, content_id: str) -> BeautifulSoup | None:
+    """Only a bounded page from the exact official assignment proves state."""
+    html = response.text
+    try:
+        location = urlsplit(str(getattr(response, 'url', '')))
+        query = parse_qs(location.query)
+        valid = (response.status_code == 200 and location.scheme == 'https'
+                 and location.hostname == 'course.pku.edu.cn'
+                 and location.port in (None, 443) and location.username is None
+                 and location.password is None and location.path == SUBMIT_PATH
+                 and query.get('course_id') == [course_id]
+                 and query.get('content_id') == [content_id]
+                 and len(html.encode('utf-8')) <= 2 * 1024 * 1024)
+    except ValueError:
+        return None
+    if not valid:
+        return None
+    soup = BeautifulSoup(html, 'html.parser')
+    if soup.find('input', attrs={'type': re.compile('^password$', re.I)}):
+        return None
+    return soup
+
+
+def inspect_submission(client, course_id: str, content_id: str) -> dict:
+    """Read the official default entry without opening a new attempt or POSTing.
+
+    A form does not prove no prior attempt exists. Review-history markup does
+    not prove the grade or that one specific local draft was received.
+    """
+    if not _BB_ID_RE.fullmatch(course_id) or not _BB_ID_RE.fullmatch(content_id):
+        raise SubmitError('教学网课程或作业目标 ID 无效。')
+    params = {'course_id': course_id, 'content_id': content_id}
+    result = {'authority': 'course.pku.edu.cn', **params, 'state': 'unknown',
+              'verified': False, 'label': '教学网当前提交状态未确认',
+              'checked_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+              'source_url': 'https://course.pku.edu.cn' + SUBMIT_PATH + '?' + urlencode(params)}
+    response = client.get(SUBMIT_PATH, params=params)
+    html = response.text
+    soup = _official_assignment_page(response, course_id, content_id)
+    if soup is None:
+        return result
+    form = parse_form(html, course_id, content_id)
+    if form and (form.hidden.get('course_id') != course_id or form.hidden.get('content_id') != content_id):
+        return result
+    text = soup.get_text(' ', strip=True)
+    if any(marker in text for marker in _REVIEW_MARKERS):
+        result.update(state='review_history', verified=True,
+            label='教学网显示提交历史，请核对具体尝试与成绩', form_present=form is not None)
+    elif form:
+        result.update(state='submission_form', verified=True,
+            label='教学网显示提交表单；尚未确认成功提交记录', form_present=True)
+    if result['verified']:
+        result['page_sha256'] = hashlib.sha256(html.encode('utf-8')).hexdigest()
+    return result
+
+
 def fetch_form(
     client, course_id: str, content_id: str, action: str | None = None
 ) -> SubmissionForm:
@@ -147,20 +209,29 @@ def fetch_form(
     if resp.status_code != 200:
         raise SubmitError(f"取表单失败（HTTP {resp.status_code}）：{_snippet(resp.text)}")
     html = resp.text
-    if any(marker in html for marker in _REVIEW_MARKERS):
+    soup = _official_assignment_page(resp, course_id, content_id)
+    if soup is None:
+        raise SubmitError('教学网页面的课程或作业目标未确认，禁止提交。')
+    if any(marker in soup.get_text(' ', strip=True) for marker in _REVIEW_MARKERS):
         raise AlreadySubmitted("该作业已提交过（页面为复查提交历史状态），不做重复提交。")
     form = parse_form(html, course_id=course_id, content_id=content_id)
     if form is None:
         raise SubmitError("页面没有可解析的提交表单（可能未开放、非文本作业入口或无权限）。")
+    if form.hidden.get('course_id') != course_id or form.hidden.get('content_id') != content_id:
+        raise SubmitError('教学网表单中的课程或作业目标不匹配，禁止提交。')
     return form
 
 
-def submit_text(client, form: SubmissionForm, text: str) -> dict:
+def submit_text(client, form: SubmissionForm, text: str, *, expected_sha256: str | None = None, before_post=None) -> dict:
     """POST the answer as a text submission and return Blackboard's receipt.
 
     The receipt (``{"destinationUrl": …}``) is what gets written back to
     the Notion task row as the submission receipt.
     """
+    if expected_sha256 is not None and hashlib.sha256(text.encode('utf-8')).hexdigest() != expected_sha256:
+        raise SubmissionFileChanged('文本内容自预览后已变化，未发送提交请求，请重新准备。')
+    if before_post is not None:
+        before_post()
     resp = client.post(
         f"{SUBMIT_PATH}?action=submit",
         data=form.fields(text),
@@ -178,17 +249,34 @@ def submit_text(client, form: SubmissionForm, text: str) -> dict:
         raise SubmitError(f"响应不是 JSON：{_snippet(resp.text)}") from exc
     if not isinstance(body, dict) or "destinationUrl" not in body:
         raise SubmitError(f"响应缺少 destinationUrl：{_snippet(resp.text)}")
-    return body
+    return _verified_receipt(client, form, body)
 
 
-def submit_file(client, form: SubmissionForm, path: Path) -> dict:
+def _verified_receipt(client, form: SubmissionForm, response: dict) -> dict:
+    params = {"course_id": form.course_id, "content_id": form.content_id}
+    try:
+        review = client.get(SUBMIT_PATH, params=params)
+    except Exception as exc:
+        raise SubmitError("提交后无法读取教学网提交历史，请先核对历史，勿重复发送。") from exc
+    html = review.text
+    soup = _official_assignment_page(review, form.course_id, form.content_id)
+    if (soup is None
+            or not any(marker in soup.get_text(' ', strip=True) for marker in _REVIEW_MARKERS)
+            or parse_form(html, form.course_id, form.content_id) is not None):
+        raise SubmitError("教学网提交历史未确认本次提交，请先核对历史，勿重复发送。")
+    return {**response, "submitted": True, "portal_verified": True,
+            **params, "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "review_history_html": html,
+            "review_history_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest()}
+
+
+def submit_file(client, form: SubmissionForm, path: Path, *, expected_sha256: str | None = None, before_post=None) -> dict:
     """POST a file attachment (docx/pdf/zip/…) as the assignment submission.
 
     Same endpoint and AJAX multipart contract as the text path; the file is
     carried in the ``newFile_LocalFile0`` part with the FilePicker fields
-    Blackboard requires (see FILE_EXTRA_FIELDS). Blackboard may answer a
-    file submit with an empty body, so a receipt is optional: the return
-    value is the JSON response when present, else ``{"submitted": True}``.
+    Blackboard requires (see FILE_EXTRA_FIELDS). An empty response requires
+    the same official review-history verification as a JSON response.
     """
     filename = path.name
     content_type = mime_type_for(path)
@@ -196,11 +284,15 @@ def submit_file(client, form: SubmissionForm, path: Path) -> dict:
         raw = path.read_bytes()
     except OSError as exc:
         raise SubmitError(f"读不了文件 {path}: {exc}") from exc
+    if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise SubmissionFileChanged('文件内容自预览后已变化，未发送提交请求，请重新准备。')
 
     data = dict(form.hidden)
     data.update(FILE_EXTRA_FIELDS)
     data["newFile_linkTitle"] = filename
 
+    if before_post is not None:
+        before_post()
     resp = client.post(
         f"{SUBMIT_PATH}?action=submit",
         data=data,
@@ -215,9 +307,7 @@ def submit_file(client, form: SubmissionForm, path: Path) -> dict:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    if body:
-        return body
-    return {"submitted": True, "file": filename, "content_type": content_type}
+    return _verified_receipt(client, form, {**body, "file": filename, "content_type": content_type})
 
 
 def resolve_course_id(data_dir: Path, course: str) -> str:

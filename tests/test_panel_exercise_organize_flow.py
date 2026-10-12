@@ -156,6 +156,31 @@ def test_same_scope_reuses_identity_without_second_create_or_charge():
     assert len(adapter.calls) == 1 and len(relay.calls) == 1
 
 
+def test_cached_quiz_cannot_bypass_invalidated_summary_acceptance():
+    notes = FakeNotes()
+    client, _, relay, adapter = make_client(notes=notes)
+    assert organize(client).json()["status"] == "completed"
+    notes.ready = False
+    result = organize(client).json()
+    assert result["status"] == "blocked" and "课堂笔记" in result["reason"]
+    assert len(relay.calls) == len(adapter.calls) == 1
+
+
+def test_revised_accepted_summary_does_not_reuse_old_quiz_questions():
+    class RevisedNotes(FakeNotes):
+        text = "第一版已验收总结"
+        def for_scope(self, *, course_title, lecture_titles):
+            return [{"title": lecture_titles[0], "source": "已验收课堂总结", "notes": self.text}]
+    notes = RevisedNotes()
+    client, _, relay, adapter = make_client(notes=notes)
+    assert organize(client).json()["status"] == "completed"
+    notes.text = "第二版已验收总结"
+    result = organize(client).json()
+    assert result["status"] == "completed" and result["reused"] is False
+    assert len(relay.calls) == len(adapter.calls) == 2
+    assert notes.text in relay.calls[-1]["prompt"]
+
+
 def test_insufficient_points_blocks_before_agent_relay_or_create():
     relay = FakeRelay(balance=4.0)
     dispatched: list[dict] = []
@@ -233,24 +258,27 @@ def test_second_trigger_is_rejected_while_organize_job_is_running():
     assert second.json()["status"] == "blocked"
 
 
-def test_relay_llm_uses_existing_operation_system_user_contract(monkeypatch):
+def test_relay_quiz_job_preserves_operation_system_user_contract(monkeypatch):
+    import httpx
     captured = {}
 
     class Response:
-        status_code = 200
+        status_code = 202
 
         def json(self):
-            return {"content": "{}", "points_charged": 1.25}
+            return {"job_id": "a" * 32, "status": "queued"}
 
     def fake_post(url, **kwargs):
         captured.update(kwargs)
         return Response()
 
     monkeypatch.setattr(platform.httpx, "post", fake_post)
+    monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200, json={
+        "job_id": "a" * 32, "status": "succeeded", "content": "{}", "points_charged": 1.25}))
     settings = SimpleNamespace(platform_token="session-token",
         cloud_transcribe_url="https://relay.example/v1/transcribe", llm_timeout=30)
     result = platform.llm("quiz", "PROMPT", settings)
-    assert set(captured["json"]) == {"operation", "system", "user"}
+    assert set(captured["json"]) == {"operation", "system", "user", "idempotency_key"}
     assert captured["json"]["operation"] == "quiz"
     assert captured["json"]["user"] == "PROMPT"
     assert result["points_charged"] == 1.25

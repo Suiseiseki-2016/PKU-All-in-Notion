@@ -1,6 +1,6 @@
 [project]
 name = "pku-course-sync"
-version = "0.1.23"
+version = "0.1.55"
 description = "Daily sync of PKU Teaching Network course materials and lecture recordings"
 requires-python = ">=3.11"
 dependencies = [
@@ -36,6 +36,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 dev-browser = ["pytest>=8.0", "playwright>=1.55"]
+# Local account-service contract tests import the actual service adapters.
+# Keep their SDKs explicit and out of the student runtime dependencies.
+dev-service = [
+    "oss2>=2.19.1",
+    "dashscope>=1.27.6",
+    "argon2-cffi>=25.1",
+    "python-multipart>=0.0.9",
+]
 local-asr = ["faster-whisper>=1.0"]
 
 [project.scripts]

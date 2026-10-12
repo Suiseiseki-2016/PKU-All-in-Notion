@@ -246,6 +246,7 @@ def create_app(
     exercise_job_gate: ExerciseJobGate | None = None,
     update_service=None,
     notion_opener=None,
+    submission_fence_factory=None,
 ) -> FastAPI:
     """Build the panel app; every piece is injectable for tests.
 
@@ -322,7 +323,13 @@ def create_app(
                        and not getattr(settings, "notion_token", ""))
     add_recording_routes(app, recording_manager, demo_connection=demo_connection)
     from .assignment_workflow import add_assignment_routes
-    add_assignment_routes(app, recording_manager)
+    add_assignment_routes(app, recording_manager, fence_factory=submission_fence_factory)
+    from .campus_quiz import CampusQuizService
+    from .campus_quiz_api import add_campus_quiz_routes
+    from .campus_quiz_grading import CampusQuizGrading
+    app.state.campus_quiz_service = CampusQuizService(settings, platform_service)
+    app.state.campus_quiz_grading = CampusQuizGrading(settings, platform_service, app.state.campus_quiz_service)
+    add_campus_quiz_routes(app, app.state.campus_quiz_service, exercise_job_gate, app.state.campus_quiz_grading)
 
     @app.get("/recordings")
     def recordings_page() -> RedirectResponse:
@@ -339,7 +346,10 @@ def create_app(
 
     @app.get("/api/status")
     def status_json() -> dict:
-        return _status_payload(settings, runner)
+        value = _status_payload(settings, runner)
+        owner = exercise_job_gate.current()
+        value["exercise_job"] = {"state": "running" if owner else "idle", "kind": owner or ""}
+        return value
 
     def _platform_http(exc) -> HTTPException:
         status = int(getattr(exc, "status_code", None) or 400)
@@ -443,6 +453,8 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict:
-        return {"ok": True}
+        import os
+        instance_id = os.environ.get("PKU_PANEL_INSTANCE_ID")
+        return {"ok": True, **({"instance_id": instance_id} if instance_id else {})}
 
     return app

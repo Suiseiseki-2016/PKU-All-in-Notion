@@ -12,6 +12,9 @@ FAKE_AUTH_EMAIL = "demo@example.com"
 
 
 class RealPlatformBridge:
+    durable_metered_jobs = True
+    operation_context_supported = True
+
     def __init__(self, settings):
         self._settings = settings
         self._profile_synced = False
@@ -37,6 +40,7 @@ class RealPlatformBridge:
 
         result = login(email, password, self._settings)
         result["profile_sync"] = sync_account_profile(self._settings)
+        result["catalog_sync"] = self._sync_catalog()
         self._profile_synced = True
         return result
 
@@ -44,6 +48,8 @@ class RealPlatformBridge:
         from ..platform import logout
 
         result = logout(self._settings)
+        from ..catalog_snapshots import activate_account
+        activate_account(self._settings)
         self._profile_synced = False
         return result
 
@@ -58,8 +64,16 @@ class RealPlatformBridge:
             and result.get("email_verified")
         ):
             result["profile_sync"] = sync_account_profile(self._settings)
+            result["catalog_sync"] = self._sync_catalog()
             self._profile_synced = True
         return result
+
+    def _sync_catalog(self) -> dict:
+        from .. import catalog_snapshots as catalog
+        try:
+            return catalog.pull(self._settings)
+        except catalog.CatalogUnavailable:
+            return {"available": False, "status": "read_only"}
 
     def forgot_password(self, email: str) -> dict:
         from ..platform import forgot_password
@@ -69,13 +83,13 @@ class RealPlatformBridge:
         from ..platform import resend_verification
         return resend_verification(email, self._settings)
 
-    def quiz(self, prompt: str) -> dict:
+    def quiz(self, prompt: str, *, operation_context=None) -> dict:
         from ..platform import llm
-        return llm("quiz", prompt, self._settings)
+        return llm("quiz", prompt, self._settings, operation_context=operation_context)
 
-    def grade(self, prompt: str) -> dict:
+    def grade(self, prompt: str, *, operation_context=None) -> dict:
         from ..platform import llm
-        return llm("grade", prompt, self._settings)
+        return llm("grade", prompt, self._settings, operation_context=operation_context)
 
 
 class FakePlatformBridge:

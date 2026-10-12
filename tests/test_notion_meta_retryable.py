@@ -12,6 +12,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from test_notion_shared_request_cooldown import coherent_retry_clock as coherent_retry_clock
+
 import notion_meta_fake as fake
 
 from pku_sync import notion

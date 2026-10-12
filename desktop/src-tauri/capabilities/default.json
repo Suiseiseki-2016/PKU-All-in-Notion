@@ -3,7 +3,11 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:8791", "http://127.0.0.1:8792", "http://127.0.0.1:8793"]
+  },
   "permissions": [
-    "core:default"
+    "core:default",
+    "allow-save-reviewed-draft"
   ]
 }

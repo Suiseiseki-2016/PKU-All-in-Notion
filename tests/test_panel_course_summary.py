@@ -62,6 +62,18 @@ def _campus(root):
         "title": "第一次书面作业", "content_id": "_1714169_1", "source": "content-tree",
         "due_at": "2026-10-01 23:30", "instructions": "答案与代码打包", "files": [],
     }], ensure_ascii=False), "utf-8")
+    # Success cases exercise confirmed account metadata, not the former
+    # loophole that allowed a local-only/read-only course to publish.
+    from pku_sync import catalog_snapshots as catalog
+    from pku_sync.models import Course
+    catalog.activate_account(SimpleNamespace(data_dir=root, platform_token="platform"))
+    course = Course(**json.loads((folder / "course.json").read_text("utf-8")))
+    assignments = json.loads((folder / "assignments" / "index.json").read_text("utf-8"))
+    catalog.save_cache(root, {"revision": 1, "snapshot": catalog.build_snapshot(
+        course, recordings, [], assignments, [])})
+    catalog.read_status(root, False, "reading")
+    catalog.course_read_status(root, "campus-1", True, "complete")
+    catalog.read_status(root, True, "complete")
     return folder
 
 

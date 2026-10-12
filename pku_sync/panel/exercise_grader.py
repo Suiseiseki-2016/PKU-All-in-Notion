@@ -116,6 +116,9 @@ class RealGradingPageAdapter:
         self._wrong_answer_database = None
         self._wrong_answer_title_property = ""
 
+    def client_context(self):
+        return get_client(self.settings)
+
     def preflight_wrong_answer_database(self) -> None:
         """Resolve identity and real title property before any relay charge."""
         # Resolve against the current directory generation for every grading
@@ -127,7 +130,7 @@ class RealGradingPageAdapter:
         except Exception as exc:
             reason = getattr(exc, "message", str(exc))
             raise GradeBlocked(reason or "\u9519\u9898\u6570\u636e\u5e93\u4e0d\u53ef\u7528\uff0c\u8bf7\u5237\u65b0\u76ee\u5f55\u5e76\u68c0\u67e5 Notion \u8bbe\u7f6e\u3002") from exc
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             schema = client.get_database(identity.id)
         properties = schema.get("properties") if isinstance(schema, dict) else None
         title_names = [
@@ -147,7 +150,7 @@ class RealGradingPageAdapter:
         return self._wrong_answer_database, self._wrong_answer_title_property
 
     def read_for_grading(self, target: GradeTarget) -> GradingInput:
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             blocks = client.list_children(target.page_id)
         prompt, unanswered = _grading_prompt(target, blocks)
         marker = _find_marker(blocks)
@@ -168,7 +171,7 @@ class RealGradingPageAdapter:
         )
 
     def verify_parent(self, target: GradeTarget) -> None:
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             page = client.get_page(target.page_id)
         parent = page.get("parent") if isinstance(page, dict) else None
         parent_id = (parent or {}).get("page_id") if isinstance(parent, dict) else None
@@ -183,7 +186,7 @@ class RealGradingPageAdapter:
 
     def _write_result(self, target: GradeTarget, *, content: str, score: float, graded_at: str, update: bool) -> None:
         rendered = markdown_to_blocks(_result_markdown(content, score=score, graded_at=graded_at))
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             existing = client.list_children(target.page_id)
             marker = _find_marker(existing)
             if marker is None and update:
@@ -217,7 +220,7 @@ class RealGradingPageAdapter:
                                        marker=result_marker)
         )
         if append_plan is None:
-            with get_client(self.settings) as client:
+            with self.client_context() as client:
                 existing = client.list_children(target.page_id)
                 if _find_complete_operation(existing, operation_id, content=content, score=score,
                                             graded_at=graded_at, marker=result_marker) is not None:
@@ -227,7 +230,7 @@ class RealGradingPageAdapter:
                 _append_and_verify(client, target.page_id, rendered, rendered)
             return
         plan = _validated_append_plan(append_plan, rendered)
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             existing = client.list_children(target.page_id)
             action, owned = _result_append_action(
                 existing, plan, operation_id=operation_id, marker=result_marker, regrade=regrade
@@ -256,7 +259,7 @@ class RealGradingPageAdapter:
 
     def verify_result(self, target: GradeTarget, *, operation_id: str, content: str,
                       score: float, graded_at: str, result_marker: str) -> bool:
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             blocks = client.list_children(target.page_id)
         return _find_complete_operation(
             blocks, operation_id, content=content, score=score,
@@ -267,7 +270,7 @@ class RealGradingPageAdapter:
                             content: str | None = None, score: float | None = None,
                             graded_at: str = "", result_marker: str = GRADE_MARKERS[0]) -> list[str]:
         """Return the exact stale app-owned block identities to retire."""
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             existing = client.list_children(target.page_id)
         current = (
             _find_complete_operation(existing, operation_id, content=content, score=score,
@@ -280,7 +283,7 @@ class RealGradingPageAdapter:
 
     def archive_result_block(self, target: GradeTarget, *, block_id: str) -> None:
         """Archive one planned block, reconciling an ambiguous response by reread."""
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             if not any(str(block.get("id") or "") == block_id for block in client.list_children(target.page_id)):
                 return
             _archive_block_reconciled(client, target.page_id, block_id)
@@ -298,7 +301,7 @@ class RealGradingPageAdapter:
         if self.verify_wrong_answer(target, question, key=key, operation_id=operation_id):
             return
         title = _wrong_answer_row_title(target, question, key)
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             try:
                 client.create_database_row(
                     identity.id, {title_property: prop_title(title)}, retry=False
@@ -319,7 +322,7 @@ class RealGradingPageAdapter:
             return False
         identity, _title_property = self._wrong_answer_target()
         title = _wrong_answer_row_title(target, question, key)
-        with get_client(self.settings) as client:
+        with self.client_context() as client:
             rows = client.query_database(
                 identity.id,
                 filter={"property": self._wrong_answer_title_property,
@@ -485,6 +488,9 @@ class ExerciseGrader:
                 "result_marker": grading_input.result_marker if grading_input.result_marker in GRADE_MARKERS else GRADE_MARKERS[0],
                 "result_contract": grading_input.result_contract,
             }
+            if getattr(self.page_adapter, "validate_grade_result", None) is not None:
+                intent["source_prompt"] = grading_input.prompt
+                intent['durable_protocol'] = 1 if getattr(self.relay, 'durable_metered_jobs', False) is True else 0
             # A configured record store is the durable boundary. Legacy
             # injected test/services without one keep their in-memory behavior.
             durable = getattr(self.directory_service, "grading_record_store", None) is not None
@@ -551,6 +557,10 @@ class ExerciseGrader:
             self._pending[target.page_id] = dict(intent)
             raise GradeBlocked("\u4e91\u7aef\u6ca1\u6709\u8fd4\u56de\u6709\u6548\u7684\u7528\u91cf\u7ed3\u7b97\uff0c\u8bf7\u91cd\u8bd5\u3002")
         remaining = float(before) - float(charge) if isinstance(before, (int, float)) else None
+        if intent.get('phase') == PHASE_RELAY_STARTED:
+            # The original settlement already reduced the account balance.
+            # Recovery must not subtract its receipt a second time.
+            remaining = _authoritative_balance(self.relay, None, 0)
         charged = dict(started, phase=PHASE_RELAY_SUCCEEDED,
                        content=result.get("content"), points_charged=float(charge),
                        points_remaining=remaining, result_page_url=target.page_url,
@@ -578,6 +588,15 @@ class ExerciseGrader:
         if phase == PHASE_INTENT:
             return self._invoke_relay_from_intent(target, grading_input, record)
         if phase == PHASE_RELAY_STARTED:
+            if (record.get('durable_protocol') == 1
+                    and getattr(self.relay, 'durable_metered_jobs', False) is True
+                    and isinstance(record.get('source_prompt'), str)
+                    and record.get('answer_fingerprint') == grading_input.answer_fingerprint):
+                from dataclasses import replace
+                frozen = replace(grading_input, prompt=record['source_prompt'])
+                result = self._invoke_relay_from_intent(target, frozen, record)
+                result['recovered_from_relay'] = True
+                return result
             # No settlement is knowable in the relay-commit/client-crash
             # interval. Do not replay or fabricate zero-charge settlement.
             raise GradeBlocked("\u65e0\u6cd5\u786e\u8ba4\u4e91\u7aef\u8bf7\u6c42\u662f\u5426\u5df2\u7ed3\u7b97\uff0c\u8bf7\u8054\u7cfb\u7ba1\u7406\u5458\u6838\u5bf9\u540e\u518d\u91cd\u8bd5\u3002")
@@ -588,7 +607,13 @@ class ExerciseGrader:
             score = record.get("score")
             if phase == PHASE_RELAY_SUCCEEDED:
                 response_contract = _result_contract_version(content)
-                if record.get("result_contract") == GRADE_RESULT_CONTRACT_VERSION or response_contract is not None:
+                validate = getattr(self.page_adapter, "validate_grade_result", None)
+                if validate is not None:
+                    validated = validate(content, source_prompt=record.get("source_prompt") or grading_input.prompt)
+                    content = json.dumps(validated, ensure_ascii=False, separators=(",", ":"))
+                    record["content"] = content
+                    score = validated["score"]
+                elif record.get("result_contract") == GRADE_RESULT_CONTRACT_VERSION or response_contract is not None:
                     validated = _validate_grade_result(content)
                     content = json.dumps(validated, ensure_ascii=False, separators=(",", ":"))
                     record["content"] = content
@@ -969,6 +994,8 @@ def _parse_grade_results(content: Any) -> list[dict[str, Any]]:
             "register_wrong": score <= 0,
             "wrong_answer_key": str(row.get("wrong_answer_key") or f"{number}"),
         })
+        if value.get("schema") == "native-learning-quiz":
+            parsed[-1].update(feedback=row.get("feedback", ""), student_answer=row.get("student_answer", ""))
     return parsed
 
 

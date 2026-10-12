@@ -19,6 +19,140 @@ def settings(tmp_path):
     )
 
 
+@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902"])
+def test_notes_explicit_cloud_model_binds_payload_key_and_lost_enqueue(monkeypatch, tmp_path, model):
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    s.notes_model = model
+    sent = []
+    job_id = "f" * 32
+    def post(url, **kwargs):
+        sent.append(kwargs["json"])
+        if len(sent) == 1:
+            raise httpx.ReadTimeout("accepted response lost")
+        return httpx.Response(202, json={"job_id": job_id, "status": "queued"})
+    monkeypatch.setattr(platform, "_post", post)
+    monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200,
+        json={"job_id": job_id, "status": "succeeded", "content": "候选", "points_charged": .01}))
+    monkeypatch.setattr(platform.time, "sleep", lambda _: None)
+    assert platform.llm("notes", "原文", s, system="逐句核验")["content"] == "候选"
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert sent[0]["model"] == model
+    assert sent[0]["idempotency_key"] == platform._llm_job_key("notes", "逐句核验", "原文", model=model)
+    assert sent[0]["idempotency_key"] != platform._llm_job_key("notes", "逐句核验", "原文")
+    assert platform._llm_payload_hash("notes", "逐句核验", "原文", model=model) != platform._llm_payload_hash("notes", "逐句核验", "原文")
+
+
+def test_notes_model_failures_keep_attempt_state_in_exact_model_namespace(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    sent = []
+    monkeypatch.setattr(platform, "_post", lambda *a, **kw: (sent.append(kw["json"]),
+        httpx.Response(202, json={"job_id": "e" * 32}))[1])
+    monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200,
+        json={"job_id": "e" * 32, "status": "failed", "error_status": 402}))
+    for model in ("qwen3.7-plus", "qwen3.5-flash", "qwen3.7-plus"):
+        s.notes_model = model
+        with pytest.raises(platform.PlatformError):
+            platform.llm("notes", "原文", s, system="核验")
+    assert len({row["idempotency_key"] for row in sent}) == 3
+    for model, attempt in (("qwen3.7-plus", 2), ("qwen3.5-flash", 1)):
+        digest = platform._llm_payload_hash("notes", "核验", "原文", model=model)
+        assert json.loads((tmp_path / ".llm-jobs" / f"{digest}.json").read_text("utf8")) == {"attempt": attempt}
+    assert not (tmp_path / ".llm-jobs" / f'{platform._llm_payload_hash("notes", "核验", "原文")}.json').exists()
+
+
+@pytest.mark.parametrize("model", ["qwen/unknown", " qwen3.7-plus", 42])
+def test_notes_unknown_explicit_cloud_model_rejected_before_any_post_or_state(monkeypatch, tmp_path, model):
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    s.notes_model = model
+    monkeypatch.setattr(platform, "_post", lambda *a, **kw: pytest.fail("invalid model submitted"))
+    monkeypatch.setattr(platform, "_llm_job_state_path", lambda *a, **kw: pytest.fail("invalid model touched state"))
+    with pytest.raises(platform.PlatformError, match="模型"):
+        platform.llm("notes", "原文", s)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_notes_plus_budget_is_full_system_and_user_before_any_post_or_state(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    s.notes_model = "qwen3.7-plus"
+    monkeypatch.setattr(platform, "_post", lambda *a, **kw: pytest.fail("oversize model submitted"))
+    monkeypatch.setattr(platform, "_llm_job_state_path", lambda *a, **kw: pytest.fail("oversize model touched state"))
+    with pytest.raises(platform.PlatformError, match="30000"):
+        platform.llm("notes", "原" * 29999, s, system="系统")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("model", [None, "", "qwen/qwen3.5-397b-a17b"])
+def test_notes_legacy_model_keeps_original_wire_and_keys(monkeypatch, tmp_path, model):
+    import hashlib
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    s.notes_model = model
+    legacy = hashlib.sha256(json.dumps({"operation": "notes", "system": "核验", "user": "原文"},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    key = hashlib.sha256(f"{legacy}:0".encode("ascii")).hexdigest()[:32]
+    sent = []
+    monkeypatch.setattr(platform, "_post", lambda *a, **kw: (sent.append(kw["json"]),
+        httpx.Response(202, json={"job_id": "e" * 32}))[1])
+    monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200,
+        json={"job_id": "e" * 32, "status": "succeeded", "content": "原正文", "points_charged": .01}))
+    assert platform.llm("notes", "原文", s, system="核验")["content"] == "原正文"
+    assert sent == [{"operation": "notes", "system": "核验", "user": "原文", "idempotency_key": key}]
+    assert platform._llm_payload_hash("notes", "核验", "原文", model=None) == legacy
+    assert platform._llm_job_key("notes", "核验", "原文", model=None) == key
+
+
+def test_notes_plus_exact_budget_and_other_operations_keep_legacy_contract(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = "opaque-token"
+    s.notes_model = "qwen3.7-plus"
+    sent = []
+    monkeypatch.setattr(platform, "_post", lambda *a, **kw: (sent.append(kw["json"]),
+        httpx.Response(202, json={"job_id": "e" * 32}))[1])
+    monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200,
+        json={"job_id": "e" * 32, "status": "succeeded", "content": "候选", "points_charged": .01}))
+    platform.llm("notes", "原" * 29999, s, system="核")
+    assert sent[-1]["model"] == "qwen3.7-plus"
+    s.notes_model = "unknown"
+    platform.llm("quiz", "题目", s, system="核验")
+    assert sent[-1] == {"operation": "quiz", "system": "核验", "user": "题目",
+                       "idempotency_key": platform._llm_job_key("quiz", "核验", "题目")}
+
+
+def test_qa_job_lost_enqueue_preserves_context_and_existing_key(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = 'opaque-token'
+    context = {'purpose': 'assignment-requirements', 'course_id': '_101_1', 'content_id': '_42_1'}
+    posted = []
+    job_id = 'd' * 32
+    def post(url, **kwargs):
+        posted.append(kwargs['json'])
+        assert url.endswith('/v1/llm/jobs')
+        if len(posted) == 1:
+            raise httpx.ReadTimeout('accepted response lost')
+        return httpx.Response(202, json={'job_id': job_id, 'status': 'queued'})
+    monkeypatch.setattr(platform, '_post', post)
+    monkeypatch.setattr(platform, '_get', lambda *args, **kwargs: httpx.Response(200,
+        json={'job_id': job_id, 'status': 'succeeded', 'content': 'result', 'points_charged': .01}))
+    monkeypatch.setattr(platform.time, 'sleep', lambda _: None)
+    assert platform.llm('qa', 'official requirement', s, system='extract', operation_context=context)['content'] == 'result'
+    assert len(posted) == 2 and posted[0] == posted[1]
+    assert posted[0]['operation_context'] == context
+    assert posted[0]['idempotency_key'] == platform._llm_job_key('qa', 'extract', 'official requirement')
+
+
+def test_secret_or_unbounded_operation_context_never_sent(monkeypatch, tmp_path):
+    s = settings(tmp_path)
+    s.platform_token = 'opaque-token'
+    monkeypatch.setattr(platform, '_post', lambda *args, **kwargs: pytest.fail('invalid context sent'))
+    for context in ({'token': 'secret'}, {'source_id': 'https://signed.example?a=secret'}, {'purpose': 'a' * 161}):
+        with pytest.raises(platform.PlatformError, match='源身份无效'):
+            platform.llm('quiz', 'prompt', s, operation_context=context)
+
+
 def test_activate_writes_only_local_platform_settings(tmp_path, monkeypatch):
     s = settings(tmp_path)
     monkeypatch.setattr(platform, "env_file_path", lambda _: tmp_path / ".env")
@@ -90,6 +224,32 @@ def test_cloud_request_retries_direct_when_proxy_transport_fails(monkeypatch):
         "method": "GET",
         "url": "https://relay.example/v1/profile",
     }
+
+
+@pytest.mark.parametrize('method', ['POST', 'PUT'])
+@pytest.mark.parametrize('error', [httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError])
+def test_write_transport_error_does_not_implicitly_repeat_mutation(monkeypatch, method, error):
+    sent = []
+    failure = error('write outcome is unknown')
+    def write(url, **kwargs):
+        sent.append((method, url, kwargs))
+        raise failure
+    monkeypatch.setattr(platform.httpx, method.lower(), write)
+    class DirectClient:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def request(self, method, url, **kwargs):
+            sent.append((method, url, kwargs))
+            return httpx.Response(200, json={'ok': True})
+    monkeypatch.setattr(platform.httpx, 'Client', DirectClient)
+    with pytest.raises(error) as caught:
+        platform._request(method, 'https://relay.example/v1/catalog/_123_1/observations', json={})
+    assert caught.value is failure
+    assert len(sent) == 1
 
 
 def test_notes_job_retries_lost_enqueue_with_same_idempotency_key(monkeypatch, tmp_path):

@@ -92,6 +92,8 @@ def test_login_surfaces_relay_detail_and_status(tmp_path, monkeypatch):
 
 
 def test_panel_login_reconciles_account_profile(tmp_path, monkeypatch):
+    from pku_sync import catalog_snapshots
+    monkeypatch.setattr(catalog_snapshots, "pull", lambda settings: {"status": "pulled", "courses": 0})
     s = settings(tmp_path)
     monkeypatch.setattr(
         platform,
@@ -118,6 +120,8 @@ def test_panel_login_reconciles_account_profile(tmp_path, monkeypatch):
 
 
 def test_existing_panel_session_reconciles_profile_once(tmp_path, monkeypatch):
+    from pku_sync import catalog_snapshots
+    monkeypatch.setattr(catalog_snapshots, "pull", lambda settings: {"status": "pulled", "courses": 0})
     s = settings(tmp_path, platform_token="session")
     calls = []
     monkeypatch.setattr(

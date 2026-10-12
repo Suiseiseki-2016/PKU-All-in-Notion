@@ -1,15 +1,17 @@
-"""Additive coverage for refresh/read snapshot atomicity."""
+"""Directory refresh failure, retry, and concurrent snapshot regressions."""
 
 from __future__ import annotations
 
 import threading
 
 import pytest
+from fastapi.testclient import TestClient
 
 import pku_sync.panel.directory as directory_module
 from pku_sync.panel.directory import DirectoryApiError, DirectoryService
 from pku_sync.panel.fake_directory import PanelDirectoryProvider
 from pku_sync.panel.fake_workspace import COURSE_NET, NET_L1, build_panel_workspace
+from pku_sync.panel.webapi import create_app
 
 
 class FailOnRefreshProvider:
@@ -25,6 +27,35 @@ class FailOnRefreshProvider:
 
     def resolve_launch(self, data, target_id, *, course_id=None):
         return self._inner.resolve_launch(data, target_id, course_id=course_id)
+
+
+def test_failed_refresh_invalidates_material_snapshot_until_successful_retry():
+    service = DirectoryService(FailOnRefreshProvider())
+    client = TestClient(create_app(directory_service=service))
+
+    assert client.get("/api/directory").status_code == 200
+    assert client.get(
+        f"/api/courses/{COURSE_NET}/materials",
+        params={"view": "lecture", "lecture_id": NET_L1},
+    ).status_code == 200
+
+    failed_refresh = client.get("/api/directory")
+    assert failed_refresh.status_code == 503
+    assert client.get("/api/sync/state").json()["state"] == "error"
+
+    stale_read = client.get(
+        f"/api/courses/{COURSE_NET}/materials",
+        params={"view": "lecture", "lecture_id": NET_L1},
+    )
+    assert stale_read.status_code == 503
+
+    recovered = client.get("/api/directory")
+    assert recovered.status_code == 200
+    restored_read = client.get(
+        f"/api/courses/{COURSE_NET}/materials",
+        params={"view": "lecture", "lecture_id": NET_L1},
+    )
+    assert restored_read.status_code == 200
 
 
 def test_material_read_cannot_finish_from_snapshot_after_refresh_enters_error(monkeypatch):

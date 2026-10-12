@@ -74,6 +74,7 @@ class Assignment(BaseModel):
     course_id: str
     title: str
     content_id: str = ""
+    source_id: str = ""  # calendar-native identity when there is no content node
     due_at: str = ""
     source: str = ""  # "content-tree" or "calendar"
     instructions: str = ""
@@ -83,6 +84,7 @@ class Assignment(BaseModel):
 
 class Recording(BaseModel):
     course_id: str
+    source_id: str = ""
     title: str
     recorded_at: str = ""  # "2026-09-09 08:00:00" as shown by Blackboard
     teacher: str = ""

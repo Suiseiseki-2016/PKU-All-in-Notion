@@ -98,11 +98,15 @@ def test_student_ui_loads_zero_external_assets():
     assert f'src="{STUDENT_UI_PATH}/app.js"' in assets["page"]
 
 
-def test_student_ui_has_no_answer_or_editor_surface():
+def test_student_ui_has_only_bounded_past_paper_reference_input():
     assets = served_assets(make_client())
     for name, text in assets.items():
-        assert "textarea" not in text.lower(), name
         assert "contenteditable" not in text.lower(), name
+    # Native quizzes accept student reference text; answers still live in
+    # Notion. Allow only this explicitly labelled, bounded reference input.
+    assert assets["js"].count("<textarea ") == 1
+    assert '<textarea data-campus-quiz-paper maxlength="20000"' in assets["js"]
+    assert "学生上传的参考材料，不代表教学网正式要求。" in assets["js"]
     # redeem / legacy activation keep one plain text code field; auth uses
     # email + password inputs instead of free-form answer editors
     assert 'type="email"' in assets["js"]
@@ -242,3 +246,40 @@ def test_engineering_panel_is_untouched_and_links_to_the_student_ui(tmp_path):
     assert page.status_code == 200
     assert "PKU All in Notion 状态面板" in page.text  # engineering panel intact
     assert STUDENT_UI_PATH in page.text  # discoverable student surface
+
+
+def test_responsive_navigation_and_accessibility_contract():
+    """One asset read covers the former three small accessibility tests."""
+    assets = served_assets(make_client())
+    page, css, script = assets["page"], assets["css"], assets["js"]
+    for expected in (
+        ".sidebar { display: none; }", "html { min-width: 320px; }",
+        "overflow-wrap: anywhere", ".course-card", "flex-direction: column",
+        ".material-row", "flex-wrap: wrap", ".exercise-toolbar, .exercise-row",
+        "min-height: 44px", "button:focus-visible", "select:focus-visible",
+    ):
+        assert expected in css, expected
+    for expected in (
+        'class="mobile-overview"', 'data-action="open-dashboard"',
+        'aria-label="', 'aria-current="page"', 'aria-pressed="',
+        'aria-busy="true" aria-live="polite" role="status"',
+        'class="exercise-status ', "row.status_label",
+    ):
+        assert expected in script, expected
+    assert '<div id="app" aria-live="polite"></div>' in page
+
+
+def test_material_processing_and_association_statuses_stay_distinct():
+    """Check mapping and styling together, using the existing asset helper."""
+    assets = served_assets(make_client())
+    script, css = assets["js"], assets["css"]
+    start = script.index("function materialRow(")
+    row = script[start : script.index("\n  }", start) + len("\n  }")]
+    for label, style in (
+        ("待阅读", "reading"), ("重点", "focus"),
+        ("待确认", "pending"), ("已索引", "indexed"),
+    ):
+        assert f'"{label}": "{style}"' in row, label
+        assert f".status-badge.{style}" in css, style
+    assert 'item.status === "已索引" ? "indexed" : "pending"' not in row
+    assert ".assoc.pending" in css

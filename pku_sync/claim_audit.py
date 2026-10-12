@@ -505,7 +505,8 @@ def audit_chapter(
         return {"status": "unverified", "reason": "chapter_claim_limit",
                 "assertions": assertions, "verdicts": []}
     blocks = [
-        {"id": str(row.get("block_id") or ""), "text": str(row.get("text") or "")[:220]}
+        {"id": str(row.get("block_id") or ""), "text": str(row.get("text") or "")[:220],
+         **{key: row[key] for key in ("start", "end") if key in row}}
         for row in evidence_blocks if row.get("block_id") and row.get("text")
     ]
     source_pages = _prioritize_cited_source_pages(
@@ -523,8 +524,9 @@ def audit_chapter(
             row["text"] = row["text"][:remaining]
             remaining -= len(row["text"])
     evidence = {row["id"]: row["text"] for row in [*blocks, *pages]}
+    audit_protocol = "source-time-metadata-v2"
     signature = hashlib.sha256(json.dumps(
-        {"policy": POLICY, "model": model, "assertions": assertions,
+        {"policy": POLICY, "audit_protocol": audit_protocol, "model": model, "assertions": assertions,
          "blocks": blocks, "pages": pages}, ensure_ascii=False,
         sort_keys=True).encode("utf-8")).hexdigest()
     cached: dict = {}
@@ -545,6 +547,14 @@ def audit_chapter(
     system = (
         "你是独立的课堂笔记事实核验员。逐条核验 claims 中整句的所有事实、关系、数字、"
         "正负号、单位、否定、时间和归属。只能依据给出的自动转写 blocks 与匹配课件 pages。"
+        "blocks 中已有的 start/end 是原始录像秒数元数据，不是老师逐字说出的文本；"
+        "timestamp、录像时间引用和独立的‘（回看 MM:SS）’指引是数值来源定位元数据。"
+        "把 MM:SS 或 HH:MM:SS 换算成秒，仅按所指 block 的 floor(start)–ceil(end) 区间核验定位，"
+        "不得要求这些时间标签或‘回看’字样逐字出现于转写 text。"
+        "纯定位指引也必须对应实际时段的 block 并附其逐字引句；缺时间字段、时段不匹配或定位含混"
+        "必须判 unsupported 或 uncertain，不得补造时间。"
+        "正文语义、条件、否定和因果关系仍须完整获证据支持；时间定位正确不代表正文事实正确。"
+        "每个 evidence.quote 仍只能逐字复制对应 text，不可附造 timestamp/start/end 或回看指引。"
         "课件事实不可冒充老师口述。课件页存在不等于支持整句；引句必须真的包含支持关系。"
         "自动转写可能把相邻术语混在一起；若 block 对同一概念同时说出两个不同名称，"
         "或与课件的分类冲突，不能仅凭字面相似就判 supported。"
@@ -581,12 +591,13 @@ def audit_chapter(
 
     for offset in range(0, len(assertions), MAX_CLAIMS_PER_CALL):
         batch = assertions[offset:offset + MAX_CLAIMS_PER_CALL]
+        batch_issue_start = len(validation_issues)
         payload = {"claims": batch, "neighbor_claims": assertions[max(0, offset - 2):offset]
                    + assertions[offset + len(batch):offset + len(batch) + 2],
                    "blocks": blocks, "pages": pages}
         user = json.dumps(payload, ensure_ascii=False)
         batch_signature = hashlib.sha256(json.dumps(
-            {"policy": POLICY, "model": model, "system": system, "user": user},
+            {"policy": POLICY, "audit_protocol": audit_protocol, "model": model, "system": system, "user": user},
             ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         saved = accepted_batches.get(batch_signature)
         pending_repair_rows = None
@@ -732,6 +743,7 @@ def audit_chapter(
                                 raise
                     except (ValueError, TypeError) as exc:
                         issue = ""
+                        subset_answer = {}
                         invalid_response_excerpt = str(subset_raw)[:20000]
                         validation_issues.extend(batch_issues)
                         # Keep the original batch issues so the focused
@@ -1000,6 +1012,12 @@ def audit_chapter(
                         batch_relabels.append(relabel)
             if issue:
                 break
+        if not issue and not batch_issues:
+            # A complete fresh batch has passed the unchanged quote/schema
+            # validator. Retire only earlier failed attempts for this batch;
+            # incomplete, invalid, or exceptional retries exit above and keep
+            # their diagnostics. A valid negative verdict still fails below.
+            del validation_issues[batch_issue_start:]
         verdicts.extend(rows)
         validation_issues.extend(batch_issues)
         relabeled_evidence.extend(batch_relabels)

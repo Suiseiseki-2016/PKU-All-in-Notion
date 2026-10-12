@@ -15,19 +15,82 @@ from pku_sync.models import Recording
 from pku_sync.panel import recordings_api
 from pku_sync.media import write_notes
 from pku_sync.notion import markdown_to_blocks
+from pku_sync import note_editor
 
 
-def test_published_note_format_gate_catches_leaked_inline_markup():
+def model_response(body, *, complete=True, uncertainties=None):
+    return json.dumps({"note": body, "complete": complete,
+                       "uncertainties": uncertainties or []}, ensure_ascii=False)
+
+
+def save_reviewed_note(directory, cfg, body, transcript, *, sources=None,
+                       complete=True, uncertainties=None, target=None):
+    """Exercise the real review/cache protocol with an offline provider."""
+    target = target or directory / "notes.md"
+    assert not target.exists()
+    (directory / "transcript.json").write_text(json.dumps(transcript), "utf-8")
+    note_editor.write_notes(transcript, target, cfg, "第一讲",
+                           source_context=sources,
+                           ask=lambda *_: model_response(body, complete=complete,
+                                                         uncertainties=uncertainties))
+    return target
+
+
+def test_markdown_converter_builds_native_note_blocks():
     sample = "## 课堂重点\n*提示*：$a=1$\n- **结论**：`AES`\n| 项目 | 说明 |\n| --- | --- |\n| A | 内容 |\n"
     rendered = markdown_to_blocks(sample)
-    assert recordings_api._note_format_issues(rendered) == []
     assert [block["type"] for block in rendered] == [
         "heading_2", "paragraph", "bulleted_list_item", "table"
     ]
-    leaked = {"type": "bulleted_list_item", "bulleted_list_item": {
-        "rich_text": [{"type": "text", "text": {"content": "结论：$a=1$"}}]
-    }}
-    assert recordings_api._note_format_issues([leaked]) == ["raw inline Markdown"]
+
+
+@pytest.mark.parametrize("readback_change", ["none", "missing_block", "equation"])
+def test_literal_markup_publishes_and_actual_readback_loss_fails(
+        tmp_path, monkeypatch, readback_change):
+    """Syntax examples are content; a remote write losing them is a real failure."""
+    import copy
+    from pku_sync import notion
+    from pku_sync.panel import note_images, note_videos
+
+    key, directory = setup_index(tmp_path)
+    directory.mkdir()
+    (directory / "notes.md").write_text(
+        "# 语法示例\n\n正文中的代码 `$a=1$`、`**强调**` 和 `|` 应保留；公式为 $b=2$。", "utf-8")
+    state = {"blocks": [], "archived": []}
+
+    class Notion:
+        def __init__(self, token): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def list_child_pages(self, page_id): return []
+        def create_page(self, parent, title, *, children, retry):
+            state["blocks"] = copy.deepcopy(children)
+            if readback_change == "missing_block":
+                state["blocks"].pop()
+            elif readback_change == "equation":
+                equation = next(part for part in state["blocks"][-1]["paragraph"]["rich_text"]
+                                if part.get("type") == "equation")
+                equation["equation"]["expression"] = "b=3"
+            return {"id": "c" * 32, "url": "https://www.notion.so/new"}
+        def list_children(self, page_id):
+            return state["blocks"] if page_id == "c" * 32 else []
+        def archive_page(self, page_id, *, retry):
+            state["archived"].append(page_id)
+
+    monkeypatch.setattr(notion, "NotionClient", Notion)
+    monkeypatch.setattr(note_images, "publish_note_images", lambda *_, **kwargs: 0)
+    monkeypatch.setattr(note_videos, "publish_note_videos", lambda *_, **kwargs: 0)
+    job = recordings_api.find_job(tmp_path, key)
+    if readback_change != "none":
+        with pytest.raises(ValueError, match="回读内容与本次提交不一致"):
+            recordings_api.publish_notes(job, "lecture-page", "notion")
+        assert state["archived"] == ["c" * 32]
+        assert not (directory / "published-note-version.json").exists()
+    else:
+        assert recordings_api.publish_notes(job, "lecture-page", "notion").endswith("new")
+        assert state["archived"] == []
+        assert (directory / "published-note-version.json").exists()
+    assert "`$a=1$`" in (directory / "notes.md").read_text("utf-8")
 
 
 def setup_index(root: Path) -> tuple[str, Path]:
@@ -134,6 +197,8 @@ class Directory:
 def wait_done(manager):
     for _ in range(100):
         result = manager.state()
+        if result["state"] == "idle" and result.get("background_sync", {}).get("state"):
+            result = result["background_sync"]
         if result["state"] != "running":
             return result
         time.sleep(.01)
@@ -258,10 +323,9 @@ def test_selected_recording_generates_once_then_retry_only_publishes(tmp_path, m
     def fake_process(job, _settings, *, include_keyframes=True, progress=None, direct_oss=False, **kwargs):
         assert include_keyframes is True
         calls["process"] += 1
-        (job.directory / "notes.md").write_text("# 笔记\n- 内容", "utf-8")
-        (job.directory / "transcript.json").write_text(json.dumps({"segments": [
+        save_reviewed_note(job.directory, _settings, "# 笔记\n- 内容", {"segments": [
             {"start": 0, "end": 10, "text": "内容"}
-        ]}), "utf-8")
+        ]})
         frames = job.directory / "keyframes"
         frames.mkdir()
         (frames / "frame_0000_00m00s.jpg").write_bytes(b"frame")
@@ -284,7 +348,7 @@ def test_selected_recording_generates_once_then_retry_only_publishes(tmp_path, m
     assert calls == {"process": 1, "publish": 2}
 
 
-def test_existing_partial_note_is_not_published(tmp_path, monkeypatch):
+def test_existing_unreviewed_note_stops_before_download_or_publication(tmp_path, monkeypatch):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     original = "# 第一讲\n\n## 00:00–02:00\n\n- 已有内容\n"
@@ -293,8 +357,9 @@ def test_existing_partial_note_is_not_published(tmp_path, monkeypatch):
         {"start": 0, "end": 600, "text": "课堂内容"}
     ]}), "utf-8")
     monkeypatch.setattr(recordings_api, "publish_notes", lambda *args: pytest.fail("partial note published"))
+    monkeypatch.setattr("pku_sync.auth.get_session", lambda **kwargs: pytest.fail("campus login started"))
     job = recordings_api.find_job(tmp_path, key)
-    with pytest.raises(ValueError, match="暂不发布到 Notion"):
+    with pytest.raises(ValueError, match="尚无可读取的整理保存记录"):
         recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(job, "lecture-page")
     assert (directory / "notes.md").read_text("utf-8") == original
 
@@ -317,7 +382,7 @@ def test_publish_gate_blocks_unsynced_assignments_before_notion_write(tmp_path, 
                                      "lecture-page", "notion")
 
 
-def test_publish_gate_blocks_old_note_with_source_conflict_and_keeps_file(tmp_path, monkeypatch):
+def test_publish_gate_preserves_legacy_note_without_review_record(tmp_path, monkeypatch):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     note = directory / "notes.md"
@@ -338,7 +403,7 @@ def test_publish_gate_blocks_old_note_with_source_conflict_and_keeps_file(tmp_pa
          "text": "The EMBRYONIC STAGE 胚胎期 （2-8 weeks）"}
     ])
     monkeypatch.setattr(notion, "NotionClient", lambda *args: pytest.fail("Notion opened"))
-    with pytest.raises(ValueError, match="第四周是胚胎期的起始阶段"):
+    with pytest.raises(ValueError, match="尚无可读取的整理保存记录"):
         recordings_api.publish_notes(recordings_api.find_job(tmp_path, key),
                                      "lecture-page", "notion")
     assert note.read_text("utf-8") == original
@@ -348,10 +413,9 @@ def test_publish_gate_allows_no_matched_slides_when_assignments_are_synced(tmp_p
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     note = directory / "notes.md"
-    note.write_text("# 第一讲\n\n## 课堂内容\n\n内容。\n\n*已整理至录像 10:00。*", "utf-8")
-    (directory / "transcript.json").write_text(json.dumps({"segments": [
+    save_reviewed_note(directory, settings(tmp_path), "内容。", {"segments": [
         {"start": 0, "end": 600, "text": "内容"}
-    ]}), "utf-8")
+    ]})
     from pku_sync.panel import campus_catalog
     monkeypatch.setattr(campus_catalog, "campus_course", lambda *args: {
         "assignments_status": "available", "synced_at": datetime.now(timezone.utc).isoformat()})
@@ -388,18 +452,17 @@ def test_publish_gate_rejects_stale_assignment_snapshot(tmp_path, monkeypatch):
         recordings_api.find_job(tmp_path, key), note))
 
 
-def test_publish_gate_rejects_slide_only_rsa_correction_of_uncertain_speech(tmp_path):
+def test_publish_gate_preserves_contextual_uncertainty_without_rac_keyword_rejection(tmp_path):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     note = directory / "notes.md"
-    note.write_text("# 第一讲\n\n## 课堂内容\n\n课件列出 RSA 公钥算法。"
-                    "\n\n*已整理至录像 10:00。*", "utf-8")
-    (directory / "transcript.json").write_text(json.dumps({"segments": [
+    save_reviewed_note(directory, settings(tmp_path), "课件列出 RSA 公钥算法，老师说的术语需回看。", {"segments": [
         {"start": 0, "end": 600, "text": "三位作者设计了公钥算法，rac算法。"}
-    ]}), "utf-8")
-    issues = "；".join(recordings_api.note_publish_issues(
-        recordings_api.find_job(tmp_path, key), note))
-    assert "录像 00:00 附近" in issues and "尚未听音核实" in issues
+    ]}, complete=False, uncertainties=["转写中的 RAC 是否指 RSA，需回看原音。"])
+    original = note.read_bytes()
+    assert recordings_api.note_publish_issues(recordings_api.find_job(tmp_path, key), note) == []
+    assert note.read_bytes() == original
+    assert json.loads(note_editor.report_path(note).read_text("utf-8"))["content_complete"] is False
 
 
 def test_stale_catalog_is_refreshed_instead_of_blocking_the_note(tmp_path, monkeypatch):
@@ -520,25 +583,22 @@ def test_failed_catalog_refresh_stops_with_a_clear_reason(tmp_path, monkeypatch)
     assert "IAAA login timed out" not in done["error"]
 
 
-@pytest.mark.parametrize("body, expected", [
-    ("## 0:00–10:00\n\n概念列表。", "自然段落"),
-    ("本课程没有作业。", "未查到的课业"),
+@pytest.mark.parametrize("body", [
+    "## 0:00–10:00\n\n概念列表。",
+    "老师举例说‘本课程没有作业’，用它说明否定命题。",
 ])
-def test_publish_gate_rejects_mechanical_or_unsupported_note_claims(
-        tmp_path, monkeypatch, body, expected):
+def test_publish_gate_does_not_classify_reviewed_prose_by_headings_or_negative_phrases(
+        tmp_path, monkeypatch, body):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     note = directory / "notes.md"
-    note.write_text("# 第一讲\n\n## 课堂内容\n\n" + body
-                    + "\n\n*已整理至录像 10:00。*", "utf-8")
-    (directory / "transcript.json").write_text(json.dumps({"segments": [
-        {"start": 0, "end": 600, "text": "课堂内容"}
-    ]}), "utf-8")
+    save_reviewed_note(directory, settings(tmp_path), body, {"segments": [
+        {"start": 0, "end": 600, "text": "老师举例讲解概念与否定命题。"}
+    ]})
     from pku_sync.panel import campus_catalog
     monkeypatch.setattr(campus_catalog, "campus_course", lambda *args: {
         "assignments_status": "available", "synced_at": datetime.now(timezone.utc).isoformat()})
-    assert expected in "；".join(recordings_api.note_publish_issues(
-        recordings_api.find_job(tmp_path, key), note))
+    assert recordings_api.note_publish_issues(recordings_api.find_job(tmp_path, key), note) == []
 
 
 def test_existing_note_without_transcript_cannot_use_student_publish_flow(tmp_path, monkeypatch):
@@ -551,26 +611,48 @@ def test_existing_note_without_transcript_cannot_use_student_publish_flow(tmp_pa
             recordings_api.find_job(tmp_path, key), "lecture-page")
 
 
-def test_pipeline_passes_date_matched_sources_to_note_writer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved_strategy", [None, "transcript", "topics"])
+def test_pipeline_passes_date_matched_sources_to_note_writer(tmp_path, monkeypatch, saved_strategy):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     (directory / "video.mp4").write_bytes(b"fixture")
-    from pku_sync import pipeline
+    from pku_sync import pipeline, media, transcript_notes
     observed = {}
-    monkeypatch.setattr(pipeline, "transcribe", lambda *args, **kwargs: {
-        "segments": [{"start": 0, "end": 10, "text": "课堂内容"}]
-    })
+    transcript={"segments": [{"start": 0, "end": 10, "text": "课堂内容"}]}
+    sources=[{"title": "9月24日课件.pdf", "status": "readable", "text": "概念"}]
+    cfg=settings(tmp_path); cfg.platform_token="offline"; cfg.notes_model="qwen3.5-flash"
+    cfg.delete_video_after_processing=False
+    model_calls=[]
+    def fake_model(*args):
+        from pku_sync import knowledge_workflow
+        model_calls.append(args)
+        if args[3]==knowledge_workflow.PLAN_SYSTEM:
+            return json.dumps({'units':[{'title':'本讲','first_segment':0,
+                'reference_segments':[],'courseware_indices':[0]}]})
+        if args[3]==knowledge_workflow.MERGE_SYSTEM:
+            return json.dumps({'sections':[{'title':'本讲','first_unit':0,
+                'last_unit':0,'body':'课堂整理正文。'}]})
+        return '课堂整理正文。'
+    monkeypatch.setattr(media,'_recovery_llm',fake_model)
+    monkeypatch.setattr(pipeline, "transcribe", lambda *args, **kwargs: transcript)
+    if saved_strategy:
+        media.write_notes(transcript,[],directory/"notes.md",cfg,"第一讲",
+                          strategy=saved_strategy,source_context=sources)
+    saved={path:path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+    first_calls=len(model_calls)
     monkeypatch.setattr(pipeline, "collect_note_sources", lambda course_dir, day, title, **kwargs: (
         observed.update({"course_dir": course_dir, "day": day, "title": title})
-        or [{"title": "9月24日课件.pdf", "status": "readable", "text": "概念"}]
+        or sources
     ))
-    monkeypatch.setattr(pipeline, "write_notes", lambda *args, **kwargs: (
-        observed.update({"source_context": kwargs["source_context"]}) or args[2]
-    ))
-    result = pipeline.process_job(recordings_api.find_job(tmp_path, key), settings(tmp_path), include_keyframes=False)
-    assert result.notes
-    assert observed["day"] == "2026-09-24"
-    assert observed["source_context"][0]["title"] == "9月24日课件.pdf"
+    result = pipeline.process_job(recordings_api.find_job(tmp_path, key), cfg, include_keyframes=False)
+    assert result.notes and result.errors==[]
+    if saved_strategy:
+        assert observed=={} and len(model_calls)==first_calls
+        assert all(path.read_bytes()==raw for path,raw in saved.items())
+    else:
+        assert observed["day"] == "2026-09-24" and len(model_calls)==1
+    assert note_editor.review_record_issues(directory/"notes.md",transcript,sources)==[]
+    assert json.loads(transcript_notes.report_path(directory/"notes.md").read_text("utf-8"))["sources_sha256"]==note_editor.fingerprint(sources)
 
 
 @pytest.mark.parametrize("transcribed,errors,expected", [
@@ -595,11 +677,9 @@ def test_publish_existing_results_never_redownloads_video_for_optional_clips(
         tmp_path, monkeypatch):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
-    (directory / "transcript.json").write_text(json.dumps({
+    save_reviewed_note(directory, settings(tmp_path), "课堂内容。", {
         "segments": [{"start": 0, "end": 10, "text": "课堂内容"}]
-    }), "utf-8")
-    (directory / "notes.md").write_text(
-        "# 第一讲\n\n## 课堂内容\n\n课堂内容。\n\n*已整理至录像 00:10。*", "utf-8")
+    })
     (directory / "keyframes").mkdir()
     (directory / "keyframes" / "index.json").write_text(
         json.dumps({"keyframes": [{"timestamp": 1, "file": "frame.jpg"}]}), "utf-8")
@@ -634,6 +714,7 @@ def test_cloud_notes_use_relay_without_local_ai_key(tmp_path, monkeypatch):
     assert write_notes(transcript, [], note, settings_obj, "第一讲") == note
     assert "考试重点" in note.read_text("utf-8")
     assert seen[0][0] == "notes" and "数据结构会考" in seen[0][1]
+    assert len(seen) == 1 and "文字整理" in seen[0][2]
 
     note.unlink()
     monkeypatch.setattr(platform, "llm", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("vendor failed")))
@@ -641,9 +722,18 @@ def test_cloud_notes_use_relay_without_local_ai_key(tmp_path, monkeypatch):
     assert "考试重点" in note.read_text("utf-8")
     note.unlink()
     transcript["segments"][0]["text"] = "新的课堂内容"
-    with pytest.raises(RuntimeError, match="可稍后重试"):
+    from pku_sync.note_editor import report_path
+    receipt = report_path(note).read_bytes()
+    with pytest.raises(RuntimeError, match="原文件保留"):
         write_notes(transcript, [], note, settings_obj, "第一讲")
+    assert not note.exists() and report_path(note).read_bytes() == receipt
+    # A deliberate regeneration stages a new output. Deleting the failed
+    # commit must not silently reinterpret its old paid receipt as new work.
+    fresh_note = tmp_path / "regenerated.md"
+    with pytest.raises(RuntimeError, match="vendor failed"):
+        write_notes(transcript, [], fresh_note, settings_obj, "第一讲")
     assert not note.exists()
+    assert not fresh_note.exists() and report_path(note).read_bytes() == receipt
 
 
 def test_cloud_note_retry_reuses_completed_windows(tmp_path, monkeypatch):
@@ -657,21 +747,22 @@ def test_cloud_note_retry_reuses_completed_windows(tmp_path, monkeypatch):
     fail_second = {True}
 
     def fake_llm(operation, prompt, cfg, *, system):
-        calls.append(prompt)
-        if "第二段" in prompt and fail_second:
+        payload = json.loads(prompt)
+        calls.append(payload)
+        if payload["part"] == 2 and fail_second:
             raise platform.PlatformError("云端服务暂时不可用")
-        return {"content": "- 整理：" + ("第二段" if "第二段" in prompt else "第一段"),
+        return {"content": "- 整理：" + ("第二段" if payload["part"] == 2 else "第一段"),
                 "points_charged": 0.1}
 
     monkeypatch.setattr(platform, "llm", fake_llm)
     note = tmp_path / "notes.md"
-    with pytest.raises(RuntimeError, match="第 2 章笔记生成失败"):
+    with pytest.raises(platform.PlatformError, match="云端服务暂时不可用"):
         write_notes(transcript, [], note, settings_obj, "课程")
     assert not note.exists()
     fail_second.clear()
     calls.clear()
     write_notes(transcript, [], note, settings_obj, "课程")
-    assert len(calls) == 1 and "第二段" in calls[0]
+    assert len(calls) == 1 and all(call["part"] == 2 for call in calls)
     assert "第一段" in note.read_text("utf-8")
     assert "第二段" in note.read_text("utf-8")
 
@@ -706,13 +797,60 @@ def test_notion_child_page_is_reused_instead_of_duplicated(tmp_path, monkeypatch
     from pku_sync.panel import note_images
     image_targets = []
     monkeypatch.setattr(note_images, "publish_note_images",
-                        lambda client, note_id, root: image_targets.append(note_id) or 0)
+                        lambda client, note_id, root, **kwargs: image_targets.append(note_id) or 0)
     monkeypatch.setattr(notion, "NotionClient", Notion)
     first = recordings_api.publish_notes(job, "lecture-page", "notion")
     second = recordings_api.publish_notes(job, "lecture-page", "notion")
     assert first == second
     assert state["created"] == 1
     assert image_targets == ["a" * 32, "a" * 32]
+    from pku_sync.panel.summary_acceptance import document_fingerprint, status
+    version = json.loads((directory / "published-note-version.json").read_text("utf-8"))
+    assert version["note_id"] == "a" * 32
+    assert version["lecture_id"] == "lecture-page"
+    assert version["notes_sha256"] == status(job)["notes_sha256"]
+    assert version["remote_sha256"] == document_fingerprint(Notion("notion"), "a" * 32)
+
+
+@pytest.mark.parametrize("missing_body", [False, True])
+def test_inserted_classroom_media_does_not_break_body_readback_or_page_reuse(
+        tmp_path, monkeypatch, missing_body):
+    import copy
+    from pku_sync import notion
+    from pku_sync.panel import note_images, note_videos
+    key, directory = setup_index(tmp_path)
+    directory.mkdir()
+    (directory / "notes.md").write_text("# 第一讲\n\n课堂正文。", "utf-8")
+    state = {"blocks": [], "pages": [], "created": 0, "archived": []}
+    class Notion:
+        def __init__(self, token): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def list_child_pages(self, page_id): return state["pages"]
+        def list_children(self, page_id): return state["blocks"] if page_id == "a" * 32 else []
+        def create_page(self, parent, title, *, children, retry):
+            state["blocks"] = copy.deepcopy(children)
+            state["pages"] = [{"id": "a" * 32, "title": title}]
+            state["created"] += 1
+            return {"id": "a" * 32, "url": "https://www.notion.so/" + "a" * 32}
+        def archive_page(self, page_id, *, retry): state["archived"].append(page_id)
+    def insert_media(*_, **kwargs):
+        if not any(block["type"] == "image" for block in state["blocks"]):
+            state["blocks"].insert(1, {"type": "image", "image": {"caption": [
+                {"type": "text", "text": {"content": "课堂画面 00:20 · 来自课程录像"}}]}})
+            if missing_body: state["blocks"].pop()
+    monkeypatch.setattr(notion, "NotionClient", Notion)
+    monkeypatch.setattr(note_images, "publish_note_images", insert_media)
+    monkeypatch.setattr(note_videos, "publish_note_videos", lambda *_, **kwargs: 0)
+    job = recordings_api.find_job(tmp_path, key)
+    if missing_body:
+        with pytest.raises(ValueError, match="回读内容与本次提交不一致"):
+            recordings_api.publish_notes(job, "lecture-page", "notion")
+        assert state["archived"] == ["a" * 32]
+    else:
+        first = recordings_api.publish_notes(job, "lecture-page", "notion")
+        assert recordings_api.publish_notes(job, "lecture-page", "notion") == first
+        assert state["created"] == 1 and state["archived"] == []
 
 
 @pytest.mark.parametrize("change", ["none", "due", "link", "body"])
@@ -721,7 +859,7 @@ def test_existing_note_assignment_snapshot_revision_preserves_annotations(
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     (directory / "notes.md").write_text(
-        "# 课堂笔记\n\n- 与本讲明确关联的课件文件：已核对\n- 内容", "utf-8")
+        "# 课堂笔记\n\n- 课件可对照本讲原件\n- 内容", "utf-8")
     job = recordings_api.find_job(tmp_path, key)
     from pku_sync import notion
     from pku_sync.panel import note_images
@@ -747,6 +885,8 @@ def test_existing_note_assignment_snapshot_revision_preserves_annotations(
              "text": {"link": {"url": "https://example.edu/new"}}}
         ]}},
     ]
+    old.append(recordings_api._plain_note_block(
+        "回看提示：请结合本讲原录像核对待核事项；课件不能替代老师的实际讲述。"))
     old.extend(notion.markdown_to_blocks((directory / "notes.md").read_text("utf-8")))
     old.append(recordings_api._plain_note_block("我的批注：保留这段"))
     if change == "due":
@@ -754,7 +894,7 @@ def test_existing_note_assignment_snapshot_revision_preserves_annotations(
     elif change == "link":
         old[2]["paragraph"]["rich_text"][0]["text"]["link"]["url"] = "https://example.edu/old"
     elif change == "body":
-        old[len(source)]["heading_1"]["rich_text"][0]["text"]["content"] = "旧版课堂笔记"
+        old[len(source) + 1]["heading_1"]["rich_text"][0]["text"]["content"] = "旧版课堂笔记"
 
     created = []
     pages = [{"id": "a" * 32,
@@ -777,7 +917,7 @@ def test_existing_note_assignment_snapshot_revision_preserves_annotations(
             pytest.fail("existing annotated note must not be archived")
 
     monkeypatch.setattr(notion, "NotionClient", Notion)
-    monkeypatch.setattr(note_images, "publish_note_images", lambda *args: 0)
+    monkeypatch.setattr(note_images, "publish_note_images", lambda *args, **kwargs: 0)
     url = recordings_api.publish_notes(job, "lecture-page", "notion")
     if change == "none":
         assert not created
@@ -816,8 +956,7 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
     assert not list(directory.glob("notes.rebuild-*.md"))
 
     def fresh_notes(transcript, frames, target, config, title, **kwargs):
-        target.write_text("# 新版笔记\n\n*已整理至录像 0:10。*", "utf-8")
-        return target
+        return save_reviewed_note(target.parent, config, "# 新版笔记", transcript, target=target)
     monkeypatch.setattr(media, "write_notes", fresh_notes)
     monkeypatch.setattr(recordings_api, "publish_notes",
                         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Notion 不可用")))
@@ -837,7 +976,8 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
     assert not list(directory.glob("notes.rebuild-*.md"))
 
 
-def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monkeypatch):
+@pytest.mark.parametrize('notes_strategy', [None, 'topics'])
+def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monkeypatch, notes_strategy):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     old = "# 原有笔记\n\n*已整理至录像 0:10。*"
@@ -850,8 +990,8 @@ def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monke
                         lambda *args, **kwargs: ([], []))
     monkeypatch.setattr(note_sources, "collect_note_sources", lambda *args, **kwargs: [])
     def fresh_notes(transcript, frames, target, config, title, **kwargs):
-        target.write_text("# 更好的笔记\n\n*已整理至录像 0:10。*", "utf-8")
-        return target
+        assert getattr(config,'notes_strategy','transcript') == (notes_strategy or 'transcript')
+        return save_reviewed_note(target.parent, config, "# 更好的笔记", transcript, target=target)
     monkeypatch.setattr(media, "write_notes", fresh_notes)
     seen = []
     def publish(job, lecture_id, token, **kwargs):
@@ -861,12 +1001,56 @@ def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monke
     monkeypatch.setattr(recordings_api, "publish_notes", publish)
     from pku_sync.panel import notion_home
     monkeypatch.setattr(notion_home, "saved_home", lambda root: {"id": "home"})
-    url = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(
-        recordings_api.find_job(tmp_path, key), "a" * 32, regenerate=True)
+    shared_settings = settings(tmp_path)
+    url = recordings_api.RecordingWorkManager(shared_settings, Directory())._process(
+        recordings_api.find_job(tmp_path, key), "a" * 32, regenerate=True, notes_strategy=notes_strategy)
+    assert getattr(shared_settings,'notes_strategy','transcript') == 'transcript'
     assert url.endswith("new-note")
     assert "更好的笔记" in (directory / "notes.md").read_text("utf-8")
     assert [path.read_text("utf-8") for path in directory.glob("notes.previous-*.md")] == [old]
-    assert seen == [(True, "# 更好的笔记\n\n*已整理至录像 0:10。*")]
+    assert seen == [(True, (directory / "notes.md").read_text("utf-8"))]
+    assert note_editor.review_record_issues(directory / "notes.md", json.loads(
+        (directory / "transcript.json").read_text("utf-8"))) == []
+
+
+@pytest.mark.parametrize("failure_stage", ["note", "publication-marker"])
+def test_failed_local_rebuild_commit_never_deletes_original_recording(
+        tmp_path, monkeypatch, failure_stage):
+    from pku_sync import lecture_source_download, note_sources, media
+    from pku_sync.panel import note_videos
+    key, directory = setup_index(tmp_path)
+    directory.mkdir()
+    old = "原笔记必须保留。"
+    (directory / "notes.md").write_text(old, "utf-8")
+    (directory / "transcript.json").write_text(json.dumps({"segments": [
+        {"start": 0, "end": 10, "text": "课堂内容。"}]}), "utf-8")
+    (directory / "video.mp4").write_bytes(b"original-recording")
+    cfg = settings(tmp_path)
+    cfg.delete_video_after_processing = True
+    monkeypatch.setattr(lecture_source_download, "prepare_lesson_sources", lambda *a, **k: ([], []))
+    monkeypatch.setattr(note_sources, "collect_note_sources", lambda *a, **k: [])
+    monkeypatch.setattr(media, "write_notes", lambda transcript, frames, target, config, title, **kw:
+                        save_reviewed_note(directory, config, "新版笔记。", transcript, target=target))
+    monkeypatch.setattr(recordings_api, "publish_notes", lambda *a, **kw: "https://www.notion.so/new")
+    cleanup_checks = []
+    monkeypatch.setattr(note_videos, "video_publication_complete",
+                        lambda *a, **kw: cleanup_checks.append(kw) or True)
+    original_replace = Path.replace
+    def replace(path, target):
+        if ((failure_stage == "note" and path.name.startswith("notes.rebuild-") and path.suffix == ".md")
+                or (failure_stage == "publication-marker" and path.name == "notion-publication.json.tmp")):
+            raise OSError("isolated local commit failed")
+        return original_replace(path, target)
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(OSError, match="local commit failed"):
+        recordings_api.RecordingWorkManager(cfg, Directory())._process(
+            recordings_api.find_job(tmp_path, key), "lecture-page", regenerate=True)
+    assert (directory / "video.mp4").read_bytes() == b"original-recording"
+    assert cleanup_checks == []
+    if failure_stage == "note":
+        assert (directory / "notes.md").read_text("utf-8") == old
+    else:
+        assert [p.read_text("utf-8") for p in directory.glob("notes.previous-*.md")] == [old]
 
 
 def test_revision_creates_distinct_notion_page_without_archiving_old(tmp_path, monkeypatch):
@@ -888,11 +1072,11 @@ def test_revision_creates_distinct_notion_page_without_archiving_old(tmp_path, m
             created.append((title, children))
             return {"id": "c" * 32, "url": "https://www.notion.so/new"}
         def list_children(self, page_id):
-            return notion.markdown_to_blocks(staged.read_text("utf-8")) if page_id == "c" * 32 else []
+            return created[0][1] if page_id == "c" * 32 else []
         def archive_page(self, page_id, *, retry=True):
             pytest.fail("old note must not be archived")
     monkeypatch.setattr(notion, "NotionClient", Notion)
-    monkeypatch.setattr(note_images, "publish_note_images", lambda *args: 0)
+    monkeypatch.setattr(note_images, "publish_note_images", lambda *args, **kwargs: 0)
     assert recordings_api.publish_notes(job, "lecture-page", "notion",
                                         note_path=staged, revision=True).endswith("new")
     assert len(created) == 1 and created[0][0].startswith("更新笔记 · ")
@@ -937,7 +1121,7 @@ def test_published_note_starts_with_nearby_formal_homework_and_native_safe_links
         def list_children(self, page_id):
             return captured if page_id == "c" * 32 else []
     monkeypatch.setattr(notion, "NotionClient", Notion)
-    monkeypatch.setattr(note_images, "publish_note_images", lambda *args: 0)
+    monkeypatch.setattr(note_images, "publish_note_images", lambda *args, **kwargs: 0)
     url = recordings_api.publish_notes(recordings_api.find_job(tmp_path, key),
                                        "lecture-page", "notion")
     assert url.endswith("new")
@@ -1113,7 +1297,8 @@ def test_course_exercises_use_stable_notion_parent_identity(tmp_path):
         }
         assert {row["id"] for row in response["items"]} == expected
 
-def test_campus_confirmation_creates_target_before_processing(tmp_path, monkeypatch):
+@pytest.mark.parametrize('notes_strategy', [None, 'topics'])
+def test_campus_confirmation_creates_target_before_processing(tmp_path, monkeypatch, notes_strategy):
     key, _ = setup_index(tmp_path)
     (tmp_path / "notion-learning-home.json").write_text(json.dumps({
         "id": "home", "parent_id": "oauth-template", "url": "https://notion.so/home"
@@ -1127,9 +1312,20 @@ def test_campus_confirmation_creates_target_before_processing(tmp_path, monkeypa
     with pytest.raises(ValueError, match="不属于当前"):
         manager.start_campus_process(key, "different-course")
     assert calls == []
-    manager.start_campus_process(key, "course-1")
+    app=FastAPI(); recordings_api.add_recording_routes(app,manager)
+    client=TestClient(app)
+    endpoint=f'/api/campus/courses/course-1/recordings/{key}/process'
+    assert client.post(endpoint,json={'notes_strategy':'unknown'}).status_code==422
+    assert calls==[]
+    choices=[]
+    original=manager._process
+    def process(*args,**kwargs):
+        choices.append(kwargs.get('notes_strategy')); return original(*args,**kwargs)
+    monkeypatch.setattr(manager,'_process',process)
+    assert client.post(endpoint,json={'notes_strategy':notes_strategy}).status_code==200
     assert wait_done(manager)["state"] == "done"
     assert calls == ["target", ("process", "lecture")]
+    assert choices==[notes_strategy]
 
 
 def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monkeypatch):
@@ -1138,12 +1334,24 @@ def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monke
         "id": "home", "parent_id": "parent", "url": "https://app.notion.com/home"
     }), "utf-8")
     calls = []
-    def fake_index(_settings, stage, progress):
+    def fake_index(_settings, stage, progress, course_id="", on_course_confirmed=None):
         setup_index(tmp_path)
+        from pku_sync import catalog_snapshots as catalog
+        from pku_sync.models import Course
+        catalog.activate_account(_settings)
+        course = Course(course_id="course-1", name="测试课程")
+        envelope = {"revision": 1, "snapshot": catalog.build_snapshot(
+            course, [job.recording for job in recordings_api.collect_jobs(tmp_path)], [], [], [])}
+        catalog.save_cache(tmp_path, envelope)
+        catalog.read_status(tmp_path, False, "reading")
+        catalog.course_read_status(tmp_path, "course-1", True, "complete")
+        catalog.read_status(tmp_path, True, "complete")
         stage("读取教学网课程")
         progress(1, 1, "courses", 0)
         calls.append("campus")
-    def fake_catalog(root, token, stage, progress, item_progress=None):
+        if on_course_confirmed:
+            on_course_confirmed("course-1", envelope)
+    def fake_catalog(root, token, stage, progress, item_progress=None, *, settings=None, course_id=""):
         assert root == tmp_path and token == "notion"
         assert calls == ["campus"]
         stage("建立 Notion 课程页")
@@ -1168,15 +1376,21 @@ def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monke
                 "urls": ["https://app.notion.com/summary"], "failures": []}
     monkeypatch.setattr(course_summary, "publish_course_summaries", fake_summaries)
     manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["course-1"])
     manager.start_sync()
     done = wait_done(manager)
-    assert calls == ["campus", "notion", "summary"]
-    assert done["state"] == "done" and done["notion_synced"] is True
-    assert done["stage"] == "课程与 Notion 页面已更新，并已生成课程总结"
-    assert done["summary_created"] == 1
-    assert done["result_urls"] == ["https://app.notion.com/summary"]
-    assert done["stage_index"] == 2 and done["stage_total"] == 2
+    assert calls == ["campus", "notion"]
+    assert done["state"] == "done" and done["scope"] == "background"
+    row = done["course_results"][0]
+    assert row["projection_state"] == "confirmed"
+    assert row["summary_created"] == 0 and row["summary_existing"] == 0
     assert done["progress_percent"] == 100 and done["progress_remaining"] == 0
+    # The previous summary outcome is retained in the explicitly requested action.
+    manager.start_course_summaries("course-1")
+    explicit = wait_done(manager)
+    assert calls == ["campus", "notion", "summary"]
+    assert explicit["summary_created"] == 1
+    assert explicit["result_urls"] == ["https://app.notion.com/summary"]
     assert not list(tmp_path.rglob("video.mp4"))
 
 
@@ -1185,10 +1399,9 @@ def test_local_notes_publish_then_course_button_has_lecture_link(tmp_path, monke
     from pku_sync.panel.campus_catalog import campus_course
     key, directory = setup_index(tmp_path)
     directory.mkdir()
-    (directory / "notes.md").write_text("# 已转写的笔记", "utf-8")
-    (directory / "transcript.json").write_text(json.dumps({"segments": [
+    save_reviewed_note(directory, settings(tmp_path), "# 已转写的笔记", {"segments": [
         {"start": 0, "end": 10, "text": "已转写的内容"}
-    ]}), "utf-8")
+    ]})
     frames = directory / "keyframes"
     frames.mkdir()
     (frames / "frame_0000_00m00s.jpg").write_bytes(b"frame")
@@ -1224,6 +1437,30 @@ def test_local_notes_publish_then_course_button_has_lecture_link(tmp_path, monke
     assert lesson["notion_lecture_url"] == done["lecture_url"]
     assert lesson["notion_note_url"] == note_url
     assert calls == ["failed", "published"]
+
+    # Switching to the additive home must retain the exact old publication
+    # marker so the original remote note can still be found for rollback.
+    from pku_sync.catalog_schema import fingerprint
+    from pku_sync import catalog_snapshots
+    from pku_sync.panel import notion_workspace
+    previous = (directory / "notion-publication.json").read_bytes()
+    old_home = (tmp_path / "notion-learning-home.json").read_bytes()
+    catalog_snapshots.activate_account(manager.settings)
+    notion_workspace._save(notion_workspace.manifest_path(tmp_path), {
+        "schema": 2, "active": True, "id": "new-home", "parent_id": "parent",
+        "url": "https://www.notion.so/new-home",
+        "account_namespace": fingerprint({"session": manager.settings.platform_token}),
+    })
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args, **kwargs: "c" * 32)
+    new_note = "https://www.notion.so/" + "d" * 32
+    monkeypatch.setattr(recordings_api, "publish_notes", lambda *_: new_note)
+    manager.start_campus_process(key, "course-1", reuse_existing=True)
+    switched = wait_done(manager)
+    assert switched["state"] == "done" and switched["result_url"] == new_note
+    backups = list(directory.glob("notion-publication.legacy-*.json"))
+    assert len(backups) == 1 and backups[0].read_bytes() == previous
+    assert (tmp_path / "notion-learning-home.json").read_bytes() == old_home
+    assert json.loads((directory / "notion-publication.json").read_text("utf-8"))["home_id"] == "new-home"
 
 
 def test_campus_material_download_resolves_fresh_url_and_rejects_other_host(tmp_path, monkeypatch):
@@ -1343,6 +1580,9 @@ def test_demo_notion_connection_is_labeled_without_claiming_real_pages(tmp_path)
 
 def test_existing_home_still_lists_destinations_and_move_route(tmp_path, monkeypatch):
     from pku_sync.panel import notion_home
+    from pku_sync import platform
+    monkeypatch.setattr(platform, '_fetch_account_profile',
+                        lambda _: {'status':'ready', 'revision':1, 'profile':{}})
 
     notion_home._save_home(tmp_path, {"id": "home", "parent_id": "old-parent",
                                       "url": "https://notion.so/home"})
@@ -1368,13 +1608,14 @@ def test_cancel_sync_stops_before_next_course_and_preserves_completed_index(tmp_
     import threading
     entered = threading.Event()
     release = threading.Event()
-    def fake_sync(settings, stage, progress):
+    def fake_sync(settings, stage, progress, course_id="", on_course_confirmed=None):
         stage("读取第一门课程")
         entered.set()
         assert release.wait(5)
         stage("读取第二门课程")
     monkeypatch.setattr(recordings_api, "sync_recording_index", fake_sync)
     manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["course-1", "course-2"])
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager)
     client = TestClient(app)

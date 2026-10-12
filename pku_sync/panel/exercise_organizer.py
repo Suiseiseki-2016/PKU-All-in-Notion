@@ -191,8 +191,9 @@ def normalize_course_title(name: str) -> str:
 
 
 class LocalNotesProvider:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, *, settings=None):
         self.data_dir = Path(data_dir)
+        self.settings = settings
 
     def _local_course_names(self, jobs) -> set[str]:
         """Every local course name that could own a scope's notes.
@@ -240,15 +241,33 @@ class LocalNotesProvider:
             stage, _ = recording_stage(job)
             if job.course_name not in matched or stage != "notes_ready":
                 continue
+            from .summary_acceptance import status as summary_status
+            acceptance = summary_status(job)
+            if not acceptance["accepted"]:
+                continue
             if wanted and job.recording.title.strip() not in wanted:
                 continue
+            if self.settings is not None:
+                from .summary_acceptance import published_status
+                if acceptance.get("schema") != 2 or not acceptance.get("note_id"):
+                    continue
+                with get_client(self.settings) as client:
+                    remote = published_status(client, acceptance["note_id"], acceptance["source_id"])
+                if (not remote["accepted"] or remote.get("notes_sha256") != acceptance["notes_sha256"]
+                        or remote.get("remote_sha256") != acceptance.get("remote_sha256")):
+                    continue
             path = job.directory / "notes.md"
             try:
-                text = path.read_text("utf-8")
-            except OSError:
+                raw = path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != acceptance["notes_sha256"]:
+                    continue
+                text = raw.decode("utf-8")
+            except (OSError, UnicodeError):
                 continue
             if text.strip():
-                notes.append({"title": job.recording.title, "source": "课堂录像笔记", "notes": text[:MAX_NOTE_CHARS]})
+                notes.append({"title": job.recording.title, "source": "已验收课堂总结",
+                              "source_id": acceptance["source_id"],
+                              "notes_sha256": acceptance["notes_sha256"], "notes": text[:MAX_NOTE_CHARS]})
         return notes
 
 
@@ -261,10 +280,13 @@ class RealPageAdapter:
             return client.create_page(parent_page_id, title, children=children)
 
 
-def _scope_key(course_id: str, lecture_ids: list[str], *, e2e_mode: bool = False) -> str:
+def _scope_key(course_id: str, lecture_ids: list[str], *, e2e_mode: bool = False,
+               source_fingerprint: str = "") -> str:
     scope: list[Any] = [course_id, sorted(set(lecture_ids))]
     if e2e_mode:
         scope.append({"mode": "e2e"})
+    if source_fingerprint:
+        scope.append({"sources": source_fingerprint})
     raw = json.dumps(scope, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -358,18 +380,6 @@ class ExerciseOrganizer:
         clean_lectures = sorted({item.strip() for item in lecture_ids if item and item.strip()})
         if not clean_lectures:
             raise OrganizeBlocked(400, "请至少选择一个已有课堂笔记的讲次。")
-        key = _scope_key(clean_course, clean_lectures, e2e_mode=e2e_mode)
-        previous = self.record_store.get(key)
-        if previous:
-            self.directory_service.register_exercise(_entity_from_record(previous))
-            return _result(previous, points_charged=0, points_remaining=_balance(self.relay), reused=True)
-
-        balance = _balance(self.relay)
-        if not isinstance(balance, (int, float)):
-            raise OrganizeBlocked(503, "暂时无法读取 AI 点余额，请稍后重试。")
-        if balance < ESTIMATE_MAX_POINTS:
-            raise OrganizeBlocked(402, "AI 点不足，至少需要保留 5 AI 点才能开始整理。")
-
         data = self.directory_service.ensure_loaded()
         course = next((item for item in data.courses if item.id == clean_course), None)
         if course is None:
@@ -381,6 +391,24 @@ class ExerciseOrganizer:
                                               lecture_titles=[item.title for item in lectures])
         if not notes:
             raise OrganizeBlocked(400, "所选范围没有可用课堂笔记，请先完成讲次整理。")
+
+        # Resolve currently accepted sources before any cache lookup. Reusing
+        # a previous question set must not bypass invalidated acceptance or
+        # quietly attach old questions to a newly reviewed note version.
+        canonical_notes = sorted(json.dumps(note, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":")) for note in notes)
+        source_fingerprint = hashlib.sha256("\n".join(canonical_notes).encode("utf-8")).hexdigest()
+        key = _scope_key(clean_course, clean_lectures, e2e_mode=e2e_mode,
+                         source_fingerprint=source_fingerprint)
+        previous = self.record_store.get(key)
+        if previous:
+            self.directory_service.register_exercise(_entity_from_record(previous))
+            return _result(previous, points_charged=0, points_remaining=_balance(self.relay), reused=True)
+        balance = _balance(self.relay)
+        if not isinstance(balance, (int, float)):
+            raise OrganizeBlocked(503, "暂时无法读取 AI 点余额，请稍后重试。")
+        if balance < ESTIMATE_MAX_POINTS:
+            raise OrganizeBlocked(402, "AI 点不足，至少需要保留 5 AI 点才能开始整理。")
 
         target = {"operation": "quiz", "course_id": course.id,
                   "course_name": course.title, "lecture_ids": clean_lectures,
@@ -421,6 +449,7 @@ class ExerciseOrganizer:
             record = {"id": page["id"], "url": page["url"], "title": title,
                       "course": course.title, "parent": course.id,
                       "scope": " / ".join(item.title for item in lectures),
+                      "source_fingerprint": source_fingerprint,
                       "updated": page.get("last_edited_time", "")}
             self.record_store.put(key, record)
             self.directory_service.register_exercise(_entity_from_record(record))
@@ -454,7 +483,7 @@ def make_organizer_service(settings, directory_service, relay):
         directory_service=directory_service,
         relay=relay,
         page_adapter=RealPageAdapter(settings),
-        notes_provider=LocalNotesProvider(settings.data_dir),
+        notes_provider=LocalNotesProvider(settings.data_dir, settings=settings),
         e2e_enabled=bool(getattr(settings, "exercise_e2e_enabled", False)),
         record_store=JsonOrganizeRecordStore(
             Path(settings.data_dir) / "panel" / "organized_exercises.json"
