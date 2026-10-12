@@ -184,7 +184,7 @@ def test_worker_cannot_issue_a_mutation(tmp_path):
 def test_cancellation_joins_readers_and_stops_followup_identity_current_or_queued_courses(linked, monkeypatch):
     settings, envelopes, calls, _, _ = linked
     original = catalog._call
-    started, release = threading.Event(), threading.Event()
+    started = threading.Event()
     lock = threading.Lock()
     count = 0
     failure = RuntimeError("explicit cancel")
@@ -196,7 +196,12 @@ def test_cancellation_joins_readers_and_stops_followup_identity_current_or_queue
                 count += 1
                 if count == 4:
                     started.set()
-            assert release.wait(3)
+            # Hold these reads until cancellation has actually been observed
+            # by the coordinator. A fixed timer can release them before that
+            # happens on a busy Windows runner, allowing legitimate pre-cancel
+            # identity reads and invalidating the test's ordering premise.
+            stop = platform._read_worker_stop.get()
+            assert stop is not None and stop.wait(5)
         return original(settings, method, course, suffix, body)
 
     def cancel():
@@ -204,19 +209,13 @@ def test_cancellation_joins_readers_and_stops_followup_identity_current_or_queue
             raise failure
 
     monkeypatch.setattr(catalog, "_call", blocked)
-    timer = threading.Timer(.2, release.set)
-    timer.start()
-    try:
-        with pytest.raises(RuntimeError) as caught:
-            with receipts.prepared_cohort(), receipts.prepared_read_phase(settings, envelopes, check_cancel=cancel):
-                pytest.fail("canceled preparation cannot enter the body")
-        assert caught.value is failure
-        assert count == 4
-        assert all(method == "GET" and course == "projection-protocol" for method, course, _, _ in calls)
-        assert not any(thread.name.startswith("catalog-read") for thread in threading.enumerate())
-    finally:
-        release.set()
-        timer.join()
+    with pytest.raises(RuntimeError) as caught:
+        with receipts.prepared_cohort(), receipts.prepared_read_phase(settings, envelopes, check_cancel=cancel):
+            pytest.fail("canceled preparation cannot enter the body")
+    assert caught.value is failure
+    assert count == 4
+    assert all(method == "GET" and course == "projection-protocol" for method, course, _, _ in calls)
+    assert not any(thread.name.startswith("catalog-read") for thread in threading.enumerate())
 
 
 def test_phase_rejects_different_cohort_operation_before_any_mutation(linked):
