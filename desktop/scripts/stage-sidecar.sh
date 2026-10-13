@@ -111,20 +111,21 @@ if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
 else
   uv venv "$RUNTIME" --python 3.11 --relocatable --clear --link-mode copy
 fi
-if [[ -d "$REPO_ROOT/dist" ]] && compgen -G "$REPO_ROOT/dist/pku_course_sync-"*-py3-none-any.whl >/dev/null; then
-  WHEEL="$(ls -1t "$REPO_ROOT"/dist/pku_course_sync-*-py3-none-any.whl | head -1)"
-  if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
-    uv pip install --system --break-system-packages --python "$RUNTIME/bin/python" "$WHEEL"
-  else
-    uv pip install --python "$RUNTIME/bin/python" "$WHEEL"
-  fi
-else
-  if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
-    uv pip install --system --break-system-packages --python "$RUNTIME/bin/python" -e "$REPO_ROOT"
-  else
-    uv pip install --python "$RUNTIME/bin/python" -e "$REPO_ROOT"
-  fi
+# Build this checkout, then install only the runtime dependencies in uv.lock.
+# A same-version wheel or an unconstrained pip resolve can drift from the
+# revision checked by CI and the published source tag.
+uv build --wheel "$REPO_ROOT"
+VERSION="$("$RUNTIME/bin/python" -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["project"]["version"])' "$REPO_ROOT/pyproject.toml")"
+WHEEL="$REPO_ROOT/dist/pku_course_sync-${VERSION}-py3-none-any.whl"
+REQUIREMENTS="$RUNTIME/.bundle-requirements.txt"
+uv export --project "$REPO_ROOT" --locked --no-dev --no-emit-project \
+  --format requirements.txt --output-file "$REQUIREMENTS" >/dev/null
+INSTALL_ARGS=(--python "$RUNTIME/bin/python")
+if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
+  INSTALL_ARGS+=(--system --break-system-packages)
 fi
+uv pip install "${INSTALL_ARGS[@]}" --require-hashes -r "$REQUIREMENTS"
+uv pip install "${INSTALL_ARGS[@]}" --no-deps "$WHEEL"
 "$RUNTIME/bin/python" -m pku_sync --help >/dev/null
 echo ok > "$RUNTIME/.bundle-ok"
 if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
