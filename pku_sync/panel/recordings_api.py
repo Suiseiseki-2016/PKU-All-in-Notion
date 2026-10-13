@@ -426,6 +426,20 @@ def sync_recording_index(settings, stage: Callable[[str], None], progress=None,
             _portal_status_write(catalog.read_status, root, False, "reading")
         directory_reservation = _reserve_course_directories(root, courses)
         course_directories = directory_reservation.__enter__()
+        # A first-time account has no older course card to fall back to.
+        # Save discovered identity only, without asserting successful reads or
+        # granting publication authority, so a failed course remains retryable.
+        for course in courses:
+            folder = course_directories[course.course_id]
+            path = folder / "course.json"
+            if not path.exists():
+                folder.mkdir(parents=True, exist_ok=True)
+                placeholder = {**course.model_dump(), "snapshot_complete": False,
+                    **{section + "_status": "not_synced" for section in
+                       ("recordings", "materials", "assignments", "announcements")}}
+                temporary = path.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(placeholder, ensure_ascii=False), "utf-8")
+                temporary.replace(path)
         try:
             deadlines_by_course = fetch_deadlines(client)
             calendar_available = True
@@ -1242,6 +1256,13 @@ class RecordingWorkManager:
                         row.update(state="interrupted", retryable=True)
                         raise
                     result = {"state": "failed", "error": str(exc)}
+                except Exception as exc:
+                    self._background_check()
+                    failure_id = uuid.uuid4().hex[:8].upper()
+                    logger.error("background course failed course=%s failure_id=%s type=%s",
+                                 row["course_id"], failure_id, type(exc).__name__)
+                    result = {"state": "failed", "failure_id": failure_id,
+                              "error": "这门课更新失败，已继续处理其他课程；登录状态不受影响。"}
                 with self._lock:
                     row.update(state=result["state"], metadata_state="confirmed" if result.get("catalog_updated") == 1 else "unconfirmed",
                                projection_state="confirmed" if result.get("notion_synced") else "failed" if result.get("catalog_updated") == 1 and result["state"] == "failed" else "not_read",

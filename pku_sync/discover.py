@@ -92,7 +92,8 @@ def select_courses(courses: list[Course], settings) -> list[Course]:
     target = settings.course_term or current_term(picked)
     if not target:
         return picked
-    return [c for c in picked if term_of(c) == target or not c.code]
+    # A different course-code format is unknown, not proof of a past term.
+    return [c for c in picked if term_of(c) == target or not term_of(c)]
 
 
 def _from_rest(client: httpx.Client) -> list[Course]:
@@ -103,16 +104,24 @@ def _from_rest(client: httpx.Client) -> list[Course]:
     resp.raise_for_status()
     courses: list[Course] = []
     for membership in resp.json().get("results", []):
-        course = membership.get("course") or {}
-        course_id = course.get("id") or membership.get("courseId") or ""
-        if not course_id:
+        if not isinstance(membership, dict):
             continue
+        course = membership.get("course") or {}
+        if not isinstance(course, dict):
+            continue
+        course_id = course.get("id") or membership.get("courseId") or ""
+        if not isinstance(course_id, str) or not course_id:
+            continue
+        term = course.get("term")
+        term = term.get("name", "") if isinstance(term, dict) else term
+        def text(value):
+            return value if isinstance(value, str) else ""
         courses.append(
             Course(
                 course_id=course_id,
-                name=course.get("name") or course_id,
-                code=course.get("courseId", ""),
-                term=(course.get("term") or {}).get("name", ""),
+                name=text(course.get("name")) or course_id,
+                code=text(course.get("courseId")),
+                term=text(term),
                 source="rest",
             )
         )

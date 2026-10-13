@@ -92,6 +92,7 @@ def test_registration_verification_and_notion_connection_in_edge():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.set_viewport_size({"width": 800, "height": 560})
@@ -182,6 +183,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/")
             page.evaluate("(copy) => { window.PANEL_COPY = copy; }", PANEL_COPY)
@@ -291,10 +293,12 @@ def test_notion_preview_opens_browser_and_returns_to_old_library():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.get_by_role("heading", name="我的课程").wait_for()
             assert page.locator('[data-action="open-course"]').count() == 0
+            page.locator('.sidebar-more > summary').click()
             page.locator('.sidebar [data-action="open-library"]').click()
             page.locator('[data-action="open-course"]').first.click()
             page.locator('[data-action="select-lecture"]').first.click()
@@ -323,6 +327,7 @@ def test_sidebar_stays_put_while_right_content_scrolls():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.set_content(markup)
             before = page.locator(".sidebar").bounding_box()
             page.mouse.move(800, 350)
@@ -405,6 +410,7 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.locator(".sidebar").get_by_text(PANEL_COPY["account"]["unverified"], exact=True).wait_for()
@@ -529,6 +535,7 @@ def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monk
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.locator('[data-action="open-campus-course"][data-course="campus-one"]').wait_for()
@@ -682,10 +689,12 @@ def test_materials_only_course_and_demo_notice_in_edge(tmp_path):
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1100, "height": 760})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             card = page.locator(".course-card")
             card.wait_for()
+            card.locator('.course-meta-details > summary').click()
             assert "…1540_1" in card.inner_text()
             assert "_101540_1" not in card.inner_text()
             assert "LONG-COURSE-CODE-2026" not in card.inner_text()
@@ -693,6 +702,9 @@ def test_materials_only_course_and_demo_notice_in_edge(tmp_path):
             assert page.locator(".campus-setup .setup-steps li").count() == 4
             assert page.get_by_text("Notion 演示连接").count() == 0
             assert page.locator(".campus-setup").get_by_text("演示模式", exact=False).count() == 1
+            assert page.get_by_role('heading', name='连接设置', exact=True).is_visible()
+            assert page.locator('.course-card').count() == 0
+            page.locator('.sidebar [data-action="open-dashboard"]').click()
             card.get_by_role("button", name="查看课程").click()
             page.locator('.campus-centers').wait_for()
             assert page.get_by_text("这门课程暂时没有录像").is_visible()
@@ -784,6 +796,7 @@ def test_handbook_requirements_visible_when_formal_assignment_index_is_empty(tmp
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1100, "height": 1700})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             card = page.locator(".course-card")
@@ -848,6 +861,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.on("dialog", lambda dialog: dialog.accept())
             page.goto("http://panel.test/")
@@ -925,7 +939,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
             assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
             page.locator('[data-action="campus-course-home"]').click()
             assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
-            assert page.locator('.campus-centers a').count() == 4
+            assert page.locator('.campus-centers a').count() == 3
             page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;

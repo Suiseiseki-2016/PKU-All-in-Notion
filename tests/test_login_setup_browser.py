@@ -41,6 +41,7 @@ def ui():
     with playwright.sync_playwright() as driver:
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         page = browser.new_page(viewport={"width": 1100, "height": 760})
+        page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
         page.route("http://panel.test/**", serve)
         page.goto("http://panel.test/app")
         page.locator("#auth-email").wait_for()

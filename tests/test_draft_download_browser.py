@@ -15,8 +15,10 @@ def panel():
     with sync_playwright() as driver:
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         page = browser.new_page()
+        page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
         try:
-            page.set_content('<div id="app"></div><div id="toast"></div>')
+            page.route('http://panel.test/', lambda route: route.fulfill(body='<div id="app"></div><div id="toast"></div>', content_type='text/html'))
+            page.goto('http://panel.test/')
             page.evaluate('copy => {window.PANEL_COPY = copy;}', PANEL_COPY)
             page.add_script_tag(content=script)
             page.evaluate('''() => {
@@ -77,7 +79,7 @@ def test_account_settings_reads_current_workspace_after_directory_update(panel):
     link = panel.locator('.home-setup-ready [data-action="campus-open-home"]')
     link.wait_for(state='visible')
     assert link.get_attribute('data-url') == 'https://www.notion.so/' + 'b' * 32
-    assert panel.locator('.campus-settings').get_attribute('open') is not None
+    assert panel.get_by_role('heading', name='连接设置', exact=True).is_visible()
 
 
 def test_download_double_click_shares_preflight_then_uses_exact_preview_hash(panel):

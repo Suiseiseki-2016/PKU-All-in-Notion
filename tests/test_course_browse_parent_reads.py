@@ -21,6 +21,7 @@ def test_course_navigation_does_not_read_full_notion_tree_and_settings_coalesces
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             def serve(route):
                 path = route.request.url.split('panel.test')[-1]
                 if path == '/':

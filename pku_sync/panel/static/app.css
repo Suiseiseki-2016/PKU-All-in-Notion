@@ -25,6 +25,33 @@
   --focus: 0 0 0 3px rgba(61, 135, 106, .26);
 }
 
+.welcome-screen { max-width: 1080px; margin: 0 auto; padding: 48px 32px; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; gap: 36px; }
+.welcome-intro { max-width: 700px; }
+.welcome-intro h1 { font-size: clamp(28px, 4vw, 46px); line-height: 1.3; margin-bottom: 18px; letter-spacing: -.03em; }
+.welcome-intro p, .welcome-footer p { color: var(--muted); margin-bottom: 0; }
+.welcome-steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.welcome-steps li { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; }
+.welcome-number { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--mint); color: var(--green-deep); font-weight: 700; margin-bottom: 22px; }
+.welcome-steps h2 { font-size: 18px; margin-bottom: 10px; }
+.welcome-steps p { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.8; }
+.welcome-footer { display: grid; gap: 22px; }
+.welcome-footer p { max-width: 680px; font-size: 13px; }
+.welcome-footer > div { display: flex; gap: 12px; flex-wrap: wrap; }
+.sidebar-more { margin: 14px 0; color: var(--muted); font-size: 13px; }
+.sidebar-more summary { cursor: pointer; padding: 8px 12px; }
+.sidebar-more button { border: 0; background: transparent; padding: 12px; color: var(--muted); }
+.course-list-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.course-count { color: var(--muted); font-size: 14px; }
+.course-meta-details { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.course-meta-details summary { cursor: pointer; width: fit-content; padding: 4px 0; }
+.course-meta-details[open] { margin-bottom: 10px; }
+@media (max-width: 680px) {
+  .welcome-screen { padding: 28px 20px; gap: 26px; }
+  .welcome-steps { grid-template-columns: 1fr; gap: 12px; }
+  .welcome-steps li { padding: 20px; }
+  .welcome-number { margin-bottom: 12px; }
+}
+
 * { box-sizing: border-box; }
 html { min-width: 320px; }
 body {
@@ -1176,7 +1203,7 @@ h1, h2, h3, p { margin-top: 0; }
 .campus-centers { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
 .campus-centers a { padding: 10px 16px; border: 1px solid #cad9d0; border-radius: 10px; color: var(--green-deep); background: white; text-decoration: none; font-weight: 700; }
 .campus-centers a:hover, .campus-centers a:focus-visible { background: #edf5ef; }
-.campus-centers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.campus-centers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .campus-centers a { display: flex; align-items: center; justify-content: space-between; padding: 22px 18px; }
 .campus-lesson-pages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .campus-lesson-page { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; background: white; border: 1px solid var(--line); border-radius: 14px; }

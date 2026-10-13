@@ -1499,24 +1499,41 @@ def _catalog_authority(data_dir: Path, settings, course_ids=None, *, verified_st
                 before_existing_projection()
     for envelope in envelopes:
         join_before_existing_receipt(envelope)
-    from ..projection_receipts import prepared_cohort, prepared_read_phase
-    with prepared_cohort(verified_steps=verified_steps, tracked_mutations=tracked_mutations) as cohort:
-        with prepared_read_phase(settings, envelopes, check_cancel=check_cancel), ExitStack() as stack:
-            for envelope in envelopes:
-                if check_cancel:
-                    check_cancel()
-                # A receipt appearing after preflight still cannot overlap
-                # reads. A late wait may expire the original TTL and fail;
-                # it must never renew or relax that freshness boundary.
-                join_before_existing_receipt(envelope)
-                stack.enter_context(catalog.projection(settings, envelope))
-            for envelope in envelopes:
-                catalog.save_cache(data_dir, envelope)
-            cohort.begin()
-            if check_cancel:
-                check_cancel()
-            yield frozenset(envelope["snapshot"]["course_id"] for envelope in envelopes)
-            cohort.complete()
+    from ..projection_receipts import PreparedReadExpired, prepared_cohort, prepared_read_phase
+    with ExitStack() as stack:
+        from .. import platform
+        stack.enter_context(platform.request_scope())
+        binding = catalog._read_binding(settings)
+        for prefetch in (True, False):
+            try:
+                with ExitStack() as admission:
+                    cohort = admission.enter_context(prepared_cohort(
+                        verified_steps=verified_steps, tracked_mutations=tracked_mutations))
+                    if prefetch:
+                        admission.enter_context(prepared_read_phase(settings, envelopes, check_cancel=check_cancel))
+                    for envelope in envelopes:
+                        if check_cancel:
+                            check_cancel()
+                        if catalog._read_binding(settings) != binding:
+                            raise catalog.CatalogUnavailable('账号或连接已变化，请重新读取课程。')
+                        join_before_existing_receipt(envelope)
+                        admission.enter_context(catalog.projection(settings, envelope))
+                    stack.enter_context(admission.pop_all())
+                break
+            except PreparedReadExpired:
+                if not prefetch:
+                    raise
+                # The failed admission has released every known permit before
+                # this new phase. Discard all prefetched evidence and perform
+                # the original fresh serial checks. Never extend the TTL, retry
+                # a changed snapshot, or replay the writer body below.
+        for envelope in envelopes:
+            catalog.save_cache(data_dir, envelope)
+        cohort.begin()
+        if check_cancel:
+            check_cancel()
+        yield frozenset(envelope["snapshot"]["course_id"] for envelope in envelopes)
+        cohort.complete()
 
 
 def sync_catalog(data_dir: Path, token: str, stage=None, progress=None,

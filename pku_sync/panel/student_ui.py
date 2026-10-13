@@ -56,8 +56,7 @@ AUTH_COPY = {
         "eyebrow": "PKU · 学习工作台",
         "title_lines": ["把每一堂课，", "变成可复习的知识。"],
         "lead": (
-            "注册产品账号后登录，连接 Notion，再兑换额度。"
-            "邮箱验证完成前可以查看状态，但不能兑换或使用云端转写与 AI。"
+            "连接教学网与 Notion，把课程资料和课堂笔记放在一起。"
         ),
         "note": "产品账号与校园网账号、Notion 身份相互独立。",
     },
@@ -71,7 +70,7 @@ AUTH_COPY = {
     "login": {
         "eyebrow": "产品账号",
         "title": "登录学习空间",
-        "subtitle": "使用注册邮箱和密码登录。未验证邮箱也可登录查看状态。",
+        "subtitle": "使用产品账号的邮箱和密码。",
         "submit": "登录",
         "submitting": "正在登录…",
         "switch_register": "没有账号？注册",
@@ -463,13 +462,26 @@ LAUNCH_COPY = {
 }
 
 PANEL_COPY = {
+    "welcome": {
+        "eyebrow": "开始你的学习空间",
+        "title": "课程有条理，复习更轻松。",
+        "description": "在这里查看教学网课程、作业和资料，把课堂录像整理成 Notion 笔记。",
+        "steps": [
+            {"title": "登录学习空间", "body": "用邮箱注册或登录，并完成邮件验证。"},
+            {"title": "连接课程与笔记", "body": "连接教学网与 Notion，选择笔记保存位置。"},
+            {"title": "从一门课开始", "body": "更新课程，查看作业与资料，按需整理课堂笔记。"},
+        ],
+        "note": "整理录像会使用转写与 AI 额度。可随时从「使用引导」重看步骤。",
+        "start": "开始设置",
+        "skip": "我已了解，直接进入",
+    },
     "brand": {
         "mark": "PKU",
         "name": "All in Notion",
         "note": "学习工作台",
         "title": "PKU All in Notion",
     },
-    "nav": {"label": "主导航", "kicker": "学习空间", "dashboard": "总览"},
+    "nav": {"label": "主导航", "kicker": "学习空间", "dashboard": "我的课程"},
     "update": {
         "version": "Version {version}",
         "desktop_managed": "桌面版启动后会检查更新；发现新版本时会提示安装。",
