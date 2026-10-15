@@ -70,8 +70,18 @@ def test_network_scope_is_exact_and_does_not_expire_login_or_mutate_other_course
 
 def test_actual_owned_nonlistening_proxy_has_system_refusal():
     boundary = AccountFaultBoundary(SimpleNamespace(config={}, actions=[], network=[]))
+    observed = []
+    error_chain = boundary._error_chain
+    def capture(exc):
+        value = error_chain(exc)
+        observed.append(value)
+        return value
+    boundary._error_chain = capture
     try:
-        proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
+        try:
+            proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
+        except ResourceBlocked:
+            pytest.fail('Actual proxy exception types and OS codes: ' + repr(observed))
         assert proof['failure_observed'] is True
         assert any(row['errno'] in {10061, 111, errno.ECONNREFUSED} or row['winerror'] == 10061 for row in proof['error_chain'])
     finally:
