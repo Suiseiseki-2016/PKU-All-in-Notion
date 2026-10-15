@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager, ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+import errno
 import json
 import re
 import socket
@@ -252,7 +253,7 @@ class AccountFaultBoundary:
                                        content=body, headers=headers)
                     except httpx.TransportError as exc:
                         proof['error_chain'] = self._error_chain(exc)
-                        proof['failure_observed'] = any(row['errno'] in {10061, 111}
+                        proof['failure_observed'] = any(row['errno'] in {10061, 111, errno.ECONNREFUSED}
                             or row['winerror'] == 10061 for row in proof['error_chain'])
             if not proof['failure_observed']:
                 raise ResourceBlocked('proxy_failure_not_observed')

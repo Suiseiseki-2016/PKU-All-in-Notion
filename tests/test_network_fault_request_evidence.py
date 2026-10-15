@@ -1,6 +1,7 @@
 """Developer protocol checks; these never count as native E2E evidence."""
 from contextlib import nullcontext
 import hashlib
+import errno
 from types import SimpleNamespace
 
 import httpx
@@ -72,7 +73,30 @@ def test_actual_owned_nonlistening_proxy_has_system_refusal():
     try:
         proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
         assert proof['failure_observed'] is True
-        assert any(row['errno'] in {10061, 111} or row['winerror'] == 10061 for row in proof['error_chain'])
+        assert any(row['errno'] in {10061, 111, errno.ECONNREFUSED} or row['winerror'] == 10061 for row in proof['error_chain'])
+    finally:
+        boundary.close()
+
+
+@pytest.mark.parametrize('native_errno,observed_errno,passed', [
+    (61, 61, True), (111, 111, True), (10061, 10061, True),
+    (61, 13, False), (111, 61, False),
+])
+def test_proxy_requires_platform_connection_refusal(monkeypatch, native_errno, observed_errno, passed):
+    from product_e2e import fault_boundary
+    monkeypatch.setattr(fault_boundary.errno, 'ECONNREFUSED', native_errno)
+    class Upstream:
+        def request(self, *args, **kwargs):
+            raise httpx.ConnectError('developer transport fixture') from OSError(observed_errno, 'developer refusal fixture')
+    monkeypatch.setattr(fault_boundary.httpx, 'Client', lambda **kwargs: nullcontext(Upstream()))
+    boundary = AccountFaultBoundary(SimpleNamespace(config={}, actions=[], network=[]))
+    try:
+        if passed:
+            proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
+            assert proof['failure_observed'] is True
+        else:
+            with pytest.raises(ResourceBlocked, match='proxy_failure_not_observed'):
+                boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
     finally:
         boundary.close()
 
