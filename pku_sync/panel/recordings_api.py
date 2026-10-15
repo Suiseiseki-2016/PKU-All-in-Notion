@@ -33,12 +33,10 @@ logger = logging.getLogger(__name__)
 _PORTAL_STATUS_LOCK = threading.RLock()
 _ACTIVE_COURSE_DIRECTORIES = {}
 
-
 def _portal_status_write(write, *args, **kwargs):
     # Only the local ledger read/replace is atomic; no remote request is locked.
     with _PORTAL_STATUS_LOCK:
         return write(*args, **kwargs)
-
 
 @contextmanager
 def _reserve_course_directories(root, courses):
@@ -59,7 +57,6 @@ def _reserve_course_directories(root, courses):
                 if _ACTIVE_COURSE_DIRECTORIES.get(key) is owner:
                     _ACTIVE_COURSE_DIRECTORIES.pop(key)
 
-
 class _CourseWrites:
     def __init__(self):
         self.lock = threading.RLock()
@@ -78,8 +75,6 @@ class _CourseWrites:
             if self.owners.get((account, course_id)) is owner:
                 self.owners.pop((account, course_id))
 
-
-
 def _disk_space_failure(exc: BaseException) -> bool:
     """Classify typed local storage failures without exposing private messages."""
     seen = set()
@@ -94,25 +89,14 @@ def _disk_space_failure(exc: BaseException) -> bool:
         exc = exc.__cause__ or exc.__context__
     return False
 
-
 class CampusCredentials(BaseModel):
     username: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=1, max_length=300)
-
 
 class CourseRefreshRequest(BaseModel):
     course_id: str = Field(default="", max_length=120)
     scope: str = ""
     resume: bool = False
-
-
-class OrganizeRequest(BaseModel):
-    course_id: str
-    lecture_id: str
-    direct_oss: bool = False
-    regenerate: bool = False
-    notes_strategy: Literal["transcript", "topics"] | None = None
-
 
 class CampusProcessRequest(BaseModel):
     direct_oss: bool = False
@@ -121,34 +105,26 @@ class CampusProcessRequest(BaseModel):
     notes_strategy: Literal["transcript", "topics"] | None = None
 
 
-class CourseSourceRequest(BaseModel):
-    campus_course_id: str
-
 class HomeRequest(BaseModel):
     parent_page_id: str
     replace_existing: bool = False
-
 
 class SummaryAcceptanceRequest(BaseModel):
     notes_sha256: str = Field(min_length=64, max_length=64)
     confirmed: bool = False
 
-
 class MaterialMatchRequest(BaseModel):
     lecture_id: str = ""
     ignore: bool = False
 
-
 class ExistingNotionLink(BaseModel):
     url: str
-
 
 class TermReviewConfirmation(BaseModel):
     segment_index: int
     transcript_sha256: str
     confirmed_spoken_term: str
     confirmed: bool = False
-
 
 @dataclass
 class Work:
@@ -184,7 +160,6 @@ class Work:
     def as_dict(self) -> dict:
         return vars(self).copy()
 
-
 def _unexpected_process_failure(stage: str) -> str:
     """Name the failed product step without exposing exception details."""
     stage = stage.strip() or "准备任务"
@@ -200,7 +175,6 @@ def _unexpected_process_failure(stage: str) -> str:
         return "提取课堂画面时中断；文字转写和笔记会保留，请重试补充课堂画面。"
     return f"任务在“{stage}”阶段中断；已生成的本地文件会保留，请稍后重试。"
 
-
 def recording_id(job: RecordingJob) -> str:
     from ..catalog_snapshots import recording_source_id
     try:
@@ -210,12 +184,10 @@ def recording_id(job: RecordingJob) -> str:
     identity = "\n".join((job.recording.course_id, source))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
-
 def legacy_recording_id(job: RecordingJob) -> str:
     identity = "\n".join((job.recording.course_id, job.recording.recorded_at,
                           job.recording.title, job.course_dir.name))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-
 
 def publication_matches_job(job: RecordingJob, publication: dict) -> bool:
     from ..catalog_snapshots import recording_source_id
@@ -246,12 +218,10 @@ def publication_matches_job(job: RecordingJob, publication: dict) -> bool:
                 and note_path.endswith(note_id) and version.get("lecture_id")
                 and version["lecture_id"] == publication.get("lecture_id"))
 
-
 def find_job(data_dir: Path, key: str) -> RecordingJob | None:
     matches = [job for job in collect_jobs(data_dir)
                if key in {recording_id(job), legacy_recording_id(job)}]
     return matches[0] if len(matches) == 1 else None
-
 
 def _saved_keyframes(directory: Path) -> list[dict]:
     """Frames already extracted for this recording, if any.
@@ -266,7 +236,6 @@ def _saved_keyframes(directory: Path) -> list[dict]:
     rows = payload.get("keyframes")
     return rows if isinstance(rows, list) else []
 
-
 def list_recordings(data_dir: Path) -> list[dict]:
     rows = []
     for job in collect_jobs(data_dir):
@@ -279,7 +248,6 @@ def list_recordings(data_dir: Path) -> list[dict]:
         })
     return rows
 
-
 def _safe_attachment_path(url: str) -> str:
     """Keep only stable campus WebDAV paths; discard signed or external URLs."""
     if not isinstance(url, str) or "\\" in url:
@@ -290,7 +258,6 @@ def _safe_attachment_path(url: str) -> str:
     if not parts.path.startswith("/bbcswebdav/") or ".." in parts.path.split("/"):
         return ""
     return parts.path
-
 
 def _confirmation_snapshot(course, read, deadlines):
     from .. import catalog_snapshots as catalog
@@ -316,13 +283,12 @@ def _confirmation_snapshot(course, read, deadlines):
         "files": [asset.filename for asset in item.attachments]} for item in read.notices]
     return catalog.build_snapshot(course, read.recordings, material_rows, assignment_rows, notice_rows)
 
-
 def _confirm_source_replacement(settings, client, course, observation, snapshot, stage):
     from .. import catalog_snapshots as catalog
     from ..discover import discover_courses, select_courses
     from ..materials import fetch_deadlines, fetch_announcements, walk_materials
     from ..recordings import list_recordings as fetch_recordings
-    from ..tui_data import read_course_metadata
+    from ..course_data import read_course_metadata
     stage(f"再次完整核对教学网目录，清理云端过时条目：{course.name}")
     base = catalog.current(settings, course.course_id)
     confirmation = catalog.begin_observation(settings, course.course_id)
@@ -346,7 +312,6 @@ def _confirm_source_replacement(settings, client, course, observation, snapshot,
     return {'observation_id': confirmation['observation_id'],
             'base_snapshot_sha256': catalog.fingerprint(base['snapshot']),
             'snapshot_sha256': catalog.fingerprint(confirmed)}
-
 
 def sync_recording_index(settings, stage: Callable[[str], None], progress=None,
                          course_id: str = "", on_course_confirmed=None) -> None:
@@ -449,7 +414,7 @@ def sync_recording_index(settings, stage: Callable[[str], None], progress=None,
             calendar_available = False
         if progress:
             progress(0, len(courses), "courses", 0)
-        from ..tui_data import read_course_metadata
+        from ..course_data import read_course_metadata
         metadata = read_course_metadata(
             client, [course.course_id for course in courses],
             recordings_fn=fetch_recordings, materials_fn=walk_materials,
@@ -634,23 +599,11 @@ def sync_recording_index(settings, stage: Callable[[str], None], progress=None,
             directory_reservation.__exit__(None, None, None)
         client.close()
 
-
-def _target_lecture(directory_service, course_id: str, lecture_id: str) -> dict:
-    try:
-        directory = directory_service.ensure_loaded()
-    except Exception as exc:
-        raise ValueError("无法读取 Notion 讲次目录，请先重新连接或同步。") from exc
-    for lecture in directory.lectures_by_course.get(course_id, []):
-        if lecture.id == lecture_id and lecture.url:
-            return {"id": lecture.id}
-    raise ValueError("请选择已就绪且属于该课程的 Notion 讲次页。")
-
 def _plain_note_block(text: str, *, kind: str = "paragraph") -> dict:
     """Preserve campus wording as plain Notion text, including math syntax."""
     rich = [{"type": "text", "text": {"content": text[i:i + 1800]}}
             for i in range(0, len(text), 1800)] or [{"type": "text", "text": {"content": ""}}]
     return {"object": "block", "type": kind, kind: {"rich_text": rich}}
-
 
 def formal_assignment_blocks(job: RecordingJob) -> list[dict]:
     """Official nearby course assignments, clearly separate from lecture notes."""
@@ -774,7 +727,6 @@ def formal_assignment_blocks(job: RecordingJob) -> list[dict]:
     blocks.append(_plain_note_block("课程目录读取：" + str(course.get("synced_at_label") or "未记录") + "。"))
     return blocks
 
-
 def assignment_snapshot_issue(course: dict, *, now: datetime | None = None) -> str | None:
     """Require a recently refreshed official assignment index at publication."""
     raw = str(course.get("synced_at") or "")
@@ -791,7 +743,6 @@ def assignment_snapshot_issue(course: dict, *, now: datetime | None = None) -> s
         return "教学网正式作业目录已超过 24 小时未刷新；请到「我的课程」点击「更新课程目录」后再发布。"
     return None
 
-
 def assignment_catalog_publish_issues(job: RecordingJob) -> list[str]:
     from .campus_catalog import campus_course
 
@@ -803,7 +754,6 @@ def assignment_catalog_publish_issues(job: RecordingJob) -> list[str]:
         return ["教学网正式作业目录尚未完整同步；请到「我的课程」更新课程目录后再整理。"]
     issue = assignment_snapshot_issue(course)
     return [issue] if issue else []
-
 
 def note_publish_issues(job: RecordingJob, note_path: Path) -> list[str]:
     """Check publication state and bound review records, never prose patterns."""
@@ -822,7 +772,6 @@ def note_publish_issues(job: RecordingJob, note_path: Path) -> list[str]:
     issues.extend(review_record_issues(note_path, transcript))
     issues.extend(assignment_catalog_publish_issues(job))
     return issues
-
 
 def _note_rich_signature(rich: list[dict]) -> tuple:
     """Normalize transport convenience fields, retaining text, links and styles."""
@@ -847,7 +796,6 @@ def _note_rich_signature(rich: list[dict]) -> tuple:
             spans.append((kind, value, link, style))
     return tuple(spans)
 
-
 def _note_source_signature(block: dict) -> tuple:
     """Compare submitted content and formatting without judging its meaning."""
     kind = block.get("type") or ""
@@ -858,7 +806,6 @@ def _note_source_signature(block: dict) -> tuple:
     if "cells" in body:
         attributes["cells"] = [_note_rich_signature(cell) for cell in body["cells"]]
     return kind, _note_rich_signature(body.get("rich_text") or []), json.dumps(attributes, ensure_ascii=False, sort_keys=True)
-
 
 def _note_blocks_match(saved: list[dict], submitted: list[dict], client=None, *, exact=False) -> bool:
     """Verify text and nested cells, permitting the app's top-level media inserts."""
@@ -890,7 +837,6 @@ def _note_blocks_match(saved: list[dict], submitted: list[dict], client=None, *,
         return False
     return index == len(submitted)
 
-
 def _recording_note_stamp(title: str, original_title: str, revision_base: str) -> str | None:
     """Return a sortable revision stamp for a note owned by this recording."""
     if title == original_title:
@@ -899,7 +845,6 @@ def _recording_note_stamp(title: str, original_title: str, revision_base: str) -
     if match and title[:match.start()] == revision_base[:100 - len(match.group(0))]:
         return match.group(1)
     return None
-
 
 def publish_notes(job: RecordingJob, lecture_id: str, notion_token: str, *,
                   note_path: Path | None = None, revision: bool = False) -> str:
@@ -988,11 +933,9 @@ def publish_notes(job: RecordingJob, lecture_id: str, notion_token: str, *,
         temporary.replace(marker)
         return url
 
-
 class RecordingWorkManager:
-    def __init__(self, settings, directory_service):
+    def __init__(self, settings):
         self.settings = settings
-        self.directory_service = directory_service
         self._lock = threading.RLock()
         self._cancel_sync = threading.Event()
         self._work: Work | None = None
@@ -1095,7 +1038,7 @@ class RecordingWorkManager:
             client.close()
 
     def _background_worker(self):
-        child = RecordingWorkManager(copy(getattr(self, "_background_settings", self.settings)), self.directory_service)
+        child = RecordingWorkManager(copy(getattr(self, "_background_settings", self.settings)))
         child._writes = self._writes
         child._owner_check = self._background_check if self._background else lambda: None
         return child
@@ -1680,25 +1623,6 @@ class RecordingWorkManager:
         marker.touch()
         return f"/api/recordings/{key}/video"
 
-    def start_process(self, key: str, course_id: str, lecture_id: str, direct_oss: bool = False,
-                      regenerate: bool = False, notes_strategy: str | None = None) -> dict:
-        job = find_job(Path(self.settings.data_dir), key)
-        if job is None:
-            raise ValueError("找不到这条录像，请重新同步录音索引。")
-        if not getattr(self.settings, "platform_token", ""):
-            raise ValueError("请先登录并完成邮箱验证。")
-        if not getattr(self.settings, "notion_token", ""):
-            raise ValueError("请先连接 Notion。")
-        from .course_recordings import source_course
-
-        _, selected_source, _ = source_course(Path(self.settings.data_dir), self.directory_service, course_id)
-        if not selected_source or job.recording.course_id != selected_source:
-            raise ValueError("这条录像不属于当前课程，请先确认教学网课程来源。")
-        target = _target_lecture(self.directory_service, course_id, lecture_id)
-        return self._start("process", key, lambda: self._process_after_refresh(
-            job, target["id"], direct_oss=direct_oss, regenerate=regenerate,
-            **({"notes_strategy":notes_strategy} if notes_strategy is not None else {})), course_id=job.recording.course_id)
-
     def _refresh_stale_catalog(self, job: RecordingJob) -> None:
         """Renew an outdated campus snapshot instead of refusing to publish.
 
@@ -1770,10 +1694,8 @@ class RecordingWorkManager:
             if not reuse_existing:
                 self._refresh_stale_catalog(job)
             self._stage("准备 Notion 课程与讲次页")
-            from .notion_workspace import saved_workspace
             with self._projection_stage():
-                lecture_id = (ensure_recording_target(root, self.settings.notion_token, job, settings=self.settings)
-                              if saved_workspace(root) else ensure_recording_target(root, self.settings.notion_token, job))
+                lecture_id = ensure_recording_target(root, self.settings.notion_token, job, settings=self.settings)
             return self._process(
                 job,
                 lecture_id,
@@ -2029,7 +1951,6 @@ class RecordingWorkManager:
                 self._work.lecture_url = publication["lecture_url"]
         return note_url
 
-
 def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_connection: bool = False) -> None:
     credentials_lock = threading.Lock()
     @app.get("/api/campus/courses")
@@ -2212,7 +2133,7 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
 
     @app.get("/api/campus/notion/parents")
     def notion_parents_endpoint(selected_only: bool = False) -> dict:
-        from .notion_home import available_parents, saved_home, legacy_home
+        from .notion_home import available_parents, saved_home
         token = getattr(manager.settings, "notion_token", "")
         if not token:
             detail = ("演示模式只模拟 Notion 连接，不会读取真实页面；请退出演示模式后授权 Notion。"
@@ -2235,7 +2156,7 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                     pages = (available_parents(token) if home_sync['status'] in
                              {'notion_reconnect_required', 'notion_home_archived', 'notion_home_changed'} else [])
                     return {'pages': pages, 'home': None, 'workspace': None,
-                            'legacy_home': legacy_home(root), 'home_sync': home_sync}
+                            'home_sync': home_sync}
             workspace = saved_workspace(root)
             if selected_only and workspace:
                 # Routine startup reads the exact configured destination.
@@ -2248,56 +2169,27 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                     _verify_home(client.get_page(workspace['id']), workspace['id'], workspace['parent_id'])
                     parent = _verify_selected_parent(client, workspace['parent_id'])
                 return {'pages': [{'id': parent['id'], 'title': _title(parent), 'url': parent.get('url', '')}],
-                        'home': saved_home(root), 'legacy_home': legacy_home(root), 'workspace': workspace,
+                        'home': saved_home(root), 'workspace': workspace,
                         'home_sync': home_sync}
             if workspace.get("active"):
                 read_projection(manager.settings)
             home = saved_home(Path(manager.settings.data_dir))
             from .notion_workspace import saved_workspace
-            from .notion_home import legacy_home
             return {"pages": available_parents(token), "home": home,
-                    "legacy_home": legacy_home(Path(manager.settings.data_dir)),
                     "workspace": saved_workspace(Path(manager.settings.data_dir)), 'home_sync': home_sync}
         except Exception as exc:
             logger.exception("Notion parent listing failed")
             raise HTTPException(status_code=502, detail="Notion 页面暂时无法读取，请稍后重试。") from exc
 
-    @app.post("/api/campus/notion/home")
-    def notion_home_endpoint(body: HomeRequest) -> dict:
-        from .notion_home import create_home
-        token = getattr(manager.settings, "notion_token", "")
-        if not token:
-            raise HTTPException(status_code=409, detail="请先连接 Notion。")
-        try:
-            home = create_home(Path(manager.settings.data_dir), token, body.parent_page_id)
-            from ..platform import publish_account_profile
-            home["profile_sync"] = publish_account_profile(manager.settings)
-            from .campus_catalog import campus_courses
-            if campus_courses(Path(manager.settings.data_dir))["courses"]:
-                if manager.state().get("state") == "running":
-                    home["task"] = manager.state()
-                else:
-                    home["task"] = manager.start_catalog_sync()
-            return home
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception("Notion learning home creation failed")
-            raise HTTPException(status_code=502, detail="学习主页没有创建成功，请稍后重试。") from exc
-
-    @app.post("/api/campus/notion/home/move")
+    @app.post("/api/campus/notion/workspace/move")
     def notion_home_move_endpoint(body: HomeRequest) -> dict:
-        from .notion_home import move_home, saved_home
+        from .notion_workspace import move_workspace
         token = getattr(manager.settings, "notion_token", "")
         if not token:
             raise HTTPException(status_code=409, detail="请先连接 Notion。")
         try:
-            root = Path(manager.settings.data_dir)
-            home = (move_home(root, token, body.parent_page_id, settings=manager.settings)
-                    if saved_home(root).get("schema") == 2 else move_home(root, token, body.parent_page_id))
-            from ..platform import publish_account_profile
-            home["profile_sync"] = ({"available": True, "status": "pushed", "revision": home["profile_revision"]}
-                                    if home.get("schema") == 2 else publish_account_profile(manager.settings))
+            home = move_workspace(manager.settings, body.parent_page_id)
+            home["profile_sync"] = {"available": True, "status": "pushed", "revision": home["profile_revision"]}
             return home
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2341,29 +2233,6 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         except Exception as exc:
             logger.exception("Notion summary acceptance verification failed")
             raise HTTPException(status_code=502, detail="Notion 验收未能验证，请稍后重试。") from exc
-
-    @app.get("/api/courses/{course_id}/recordings")
-    def course_recordings(course_id: str) -> dict:
-        from .course_recordings import rows_for_course
-
-        try:
-            payload = rows_for_course(Path(manager.settings.data_dir), manager.directory_service, course_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        payload["campus_configured"] = bool(getattr(manager.settings, "pku_username", "") and getattr(manager.settings, "pku_password", ""))
-        payload["demo_connection"] = demo_connection
-        return payload
-
-    @app.post("/api/courses/{course_id}/recording-source")
-    def recording_source(course_id: str, body: CourseSourceRequest) -> dict:
-        from .course_recordings import choose_source, rows_for_course
-
-        try:
-            root = Path(manager.settings.data_dir)
-            choose_source(root, manager.directory_service, course_id, body.campus_course_id)
-            return rows_for_course(root, manager.directory_service, course_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/recordings/credentials")
     def credentials(body: CampusCredentials) -> dict:
@@ -2442,7 +2311,12 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             return manager.background_state()
         if scope:
             raise HTTPException(status_code=400, detail="未知任务范围。")
-        return manager.state()
+        value = manager.state()
+        gate = getattr(app.state, "exercise_job_gate", None)
+        if gate is not None:
+            owner = gate.current()
+            value["exercise_job"] = {"state": "running" if owner else "idle", "kind": owner or ""}
+        return value
 
     @app.post("/api/campus/notion/sync")
     def notion_catalog_sync(body: CourseRefreshRequest | None = None) -> dict:
@@ -2536,12 +2410,3 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         filename = safe_name(f"{job.recording.date}_{job.recording.title}", "recording") + ".mp4"
         return FileResponse(job.video, media_type="video/mp4", filename=filename,
                             content_disposition_type="inline")
-
-    @app.post("/api/recordings/{key}/process")
-    def process(key: str, body: OrganizeRequest) -> dict:
-        try:
-            return manager.start_process(key, body.course_id, body.lecture_id,
-                                         direct_oss=body.direct_oss, regenerate=body.regenerate,
-                                         **({"notes_strategy":body.notes_strategy} if body.notes_strategy is not None else {}))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc

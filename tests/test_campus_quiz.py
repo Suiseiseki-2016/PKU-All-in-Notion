@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from pku_sync.panel import campus_quiz
-from pku_sync.panel.exercise_organizer import OrganizeBlocked
+from pku_sync.panel.quiz_contract import OrganizeBlocked
 
 
 class Client:

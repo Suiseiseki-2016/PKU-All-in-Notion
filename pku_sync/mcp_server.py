@@ -53,12 +53,6 @@ def list_recording_status(course_id: str = "") -> list[dict]:
     return _tools().recording_status(course_id)
 
 
-@mcp.tool()
-def get_daily_status(max_chars: int = 30_000) -> dict:
-    """Return the latest deterministic daily log and generated local summary."""
-    return _tools().daily_status(max_chars)
-
-
 def main() -> None:
     mcp.run(transport="stdio")
 

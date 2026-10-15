@@ -11,9 +11,10 @@ playwright = pytest.importorskip('playwright.sync_api')
 
 def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
     configured = False
+    synced = False
     writes = []
     def serve(route):
-        nonlocal configured
+        nonlocal configured, synced
         path = urlsplit(route.request.url).path
         status, body = 200, {}
         if path == '/app':
@@ -29,11 +30,17 @@ def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
             body = {'active': True, 'available': True, 'email': 'new@example.test',
                     'email_verified': True, 'llm_points_remaining': 10, 'transcribe_seconds_remaining': 600}
         elif path == '/api/campus/courses':
-            body = {'campus_configured': configured, 'courses': [], 'notion_home': None}
+            body = {'campus_configured': configured, 'courses':
+                [{'id': 'fixture-course', 'title': '测试课程', 'synced_at': '2026-10-14'}] if synced else [], 'notion_home': None}
         elif path == '/api/connection':
             body = {'state': 'connected', 'connected': True}
         elif path == '/api/recordings/task':
             body = {'state': 'idle'}
+            if synced:
+                body['background_sync'] = {'scope': 'background', 'kind': 'sync', 'state': 'done', 'id': 'sync'}
+        elif path == '/api/recordings/sync':
+            synced = True
+            body = {'scope': 'background', 'kind': 'sync', 'state': 'running', 'id': 'sync'}
         elif path == '/api/directory':
             body = {'courses': [], 'exercises': []}
         elif path == '/api/campus/notion/parents':
@@ -59,7 +66,9 @@ def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
             page.locator('#recording-password').fill('fixture-password')
             page.locator('[data-action="recording-save-credentials"]').click()
             playwright.expect(page.locator('[data-action="recording-edit-credentials"]')).to_be_visible()
+            page.locator('.campus-setup [data-action="recording-sync"]').click()
             create = page.locator('[data-action="campus-create-workspace"]')
+            playwright.expect(create).to_be_enabled()
             create.click()
             playwright.expect(page.locator('.home-setup-error')).to_contain_text('登录状态不受影响')
             playwright.expect(create).to_be_enabled()
@@ -74,6 +83,6 @@ def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
             playwright.expect(page.locator('[data-action="recording-edit-credentials"]')).to_be_visible()
             page.locator('[data-action="campus-create-workspace"]').click()
             playwright.expect(page.locator('.home-setup-error')).to_contain_text('登录状态不受影响')
-            assert writes == ['/api/recordings/credentials', '/api/campus/notion/workspace', '/api/campus/notion/workspace']
+            assert writes == ['/api/recordings/credentials', '/api/recordings/sync', '/api/campus/notion/workspace', '/api/campus/notion/workspace']
         finally:
             browser.close()

@@ -27,10 +27,8 @@ PANEL_PORTS = (8791, 8792, 8793)
 # the exact string: it names the three approved ports and the recovery action.
 PANEL_PORTS_BUSY_MESSAGE = "本地面板端口 8791、8792、8793 都被占用：关闭占用端口的应用后重试。"
 
-
 class PanelPortError(RuntimeError):
     """The panel cannot bind any approved loopback port."""
-
 
 def _open_socket(port: int) -> socket.socket:
     """Bind ``127.0.0.1:port`` exclusively; OSError when the port is taken."""
@@ -57,11 +55,9 @@ def _open_socket(port: int) -> socket.socket:
     sock.listen(socket.SOMAXCONN)
     return sock
 
-
 def panel_port_candidates(preferred: int) -> tuple[int, ...]:
     """The fallback chain: ``preferred`` first, then the rest in approved order."""
     return (preferred,) + tuple(p for p in PANEL_PORTS if p != preferred)
-
 
 def bind_panel(preferred: int = PANEL_PORTS[0]) -> tuple[socket.socket, int]:
     """Bind 127.0.0.1 to the first available approved panel port.

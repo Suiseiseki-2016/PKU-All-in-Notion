@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 
 from fastapi import Body, FastAPI, HTTPException
 
-
 def is_notion_url(url: str) -> bool:
     if not isinstance(url, str) or len(url) > 4096:
         return False
@@ -29,10 +28,8 @@ def is_notion_url(url: str) -> bool:
         return False
     return host in {"notion.so", "notion.site", "app.notion.com"} or host.endswith((".notion.so", ".notion.site"))
 
-
 def _open_system_browser(url: str) -> bool:
     return webbrowser.open(url, new=2)
-
 
 def add_external_navigation_routes(
     app: FastAPI, opener: Callable[[str], bool] | None = None

@@ -13,10 +13,8 @@ from ..notion import NotionClient, markdown_to_blocks
 _WINDOW = re.compile(r"^(\d+):(\d{2})[–-](\d+):(\d{2})$")
 _CAPTION_PREFIX = "课堂画面 "
 
-
 class NoteFrameError(RuntimeError):
     """The original video could not supply a missing note-window picture."""
-
 
 def _text(block: dict) -> str:
     kind = block.get("type") or ""
@@ -25,10 +23,8 @@ def _text(block: dict) -> str:
         for part in (block.get(kind) or {}).get("rich_text") or []
     )
 
-
 def _seconds(minutes: str, seconds: str) -> int:
     return int(minutes) * 60 + int(seconds)
-
 
 def _visual_score(path: Path) -> float:
     """Prefer legible slide views over blank screens and distant classroom shots."""
@@ -43,7 +39,6 @@ def _visual_score(path: Path) -> float:
     edges = float(np.mean(cv2.Canny(gray, 50, 150) > 0))
     contrast = float(np.std(gray)) / 255
     return 2 * bright + 6 * edges + contrast
-
 
 def _frames(directory: Path) -> list[dict]:
     folder = directory / "keyframes"
@@ -72,7 +67,6 @@ def _frames(directory: Path) -> list[dict]:
                      "timestamp": stamp, "score": score})
     return sorted(rows, key=lambda row: row["timestamp"])
 
-
 def _choose(frames: list[dict], start: int, end: int) -> dict | None:
     midpoint = (start + end) / 2
     inside = [row for row in frames if start <= row["timestamp"] < end]
@@ -81,7 +75,6 @@ def _choose(frames: list[dict], start: int, end: int) -> dict | None:
                    abs(row["timestamp"] - midpoint) / max(end - start, 1) * 0.25)
     before = [row for row in frames if row["timestamp"] < start and start - row["timestamp"] <= 300]
     return before[-1] if before else None
-
 
 def _sample_window(video: Path, folder: Path, start: float, end: float) -> list[dict]:
     """Seek original frames for a window missed by slide-change extraction.
@@ -135,7 +128,6 @@ def _sample_window(video: Path, folder: Path, start: float, end: float) -> list[
             capture.release()
     return rows
 
-
 def _window_frame(frames, start, end, directory):
     """Only a saved original note window may trigger local supplemental frames."""
     if directory is not None and not any(start <= row["timestamp"] < end for row in frames):
@@ -147,7 +139,6 @@ def _window_frame(frames, start, end, directory):
                 raise NoteFrameError("课堂画面保存失败；文字笔记已保留，请重试。") from exc
             return _choose(sampled, start, end)
     return _choose(frames, start, end)
-
 
 def _organized_placements(blocks, frames, notes_path, body_offset, directory=None):
     """Use saved original packet times and block positions, not prose matching."""
@@ -196,7 +187,6 @@ def _organized_placements(blocks, frames, notes_path, body_offset, directory=Non
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError):
         return None
-
 
 def _topic_placements(blocks, frames, notes_path, body_offset, directory=None):
     """Optional heading time labels locate pictures; prose is never graded.
@@ -249,7 +239,6 @@ def _topic_placements(blocks, frames, notes_path, body_offset, directory=None):
     except (OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError):
         return None
 
-
 def _knowledge_placements(blocks, frames, notes_path, body_offset, directory=None):
     """Use verified source intervals and exact body offsets, not model labels."""
     from ..knowledge_workflow import POLICIES, saved_sections
@@ -286,7 +275,6 @@ def _knowledge_placements(blocks, frames, notes_path, body_offset, directory=Non
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError, RuntimeError):
         return None
-
 
 def publish_note_images(notion: NotionClient, note_id: str, directory: Path, *, notes_path: Path | None = None,
                         body_offset: int | None = None) -> int:

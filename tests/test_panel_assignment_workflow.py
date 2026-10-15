@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from pku_sync.config import Settings
 from pku_sync.panel import assignment_workflow
 from pku_sync.panel.connection import build_fake_connection_service
-from pku_sync.panel.fake_directory import build_fake_directory
+
 from pku_sync.panel.platform_bridge import FakePlatformBridge
 from pku_sync.panel.webapi import create_app
 
@@ -67,11 +67,8 @@ def _client(tmp_path, monkeypatch, fence_factory=FakeSubmissionPermit):
     monkeypatch.setattr(assignment_workflow, "NotionClient", Notion)
     settings = Settings(_env_file=None, data_dir=tmp_path, pku_username="student",
                         pku_password="secret", notion_token="notion", platform_token="session")
-    directory = build_fake_directory()
-    app = create_app(settings=settings, runner=NoopRunner(), directory_service=directory,
-                     connection_service=build_fake_connection_service(),
-                     platform_service=FakePlatformBridge(activated=True),
-                     submission_fence_factory=fence_factory)
+    directory = None
+    app = create_app(settings=settings, connection_service=build_fake_connection_service(), platform_service=FakePlatformBridge(activated=True), submission_fence_factory=fence_factory)
     return TestClient(app)
 
 

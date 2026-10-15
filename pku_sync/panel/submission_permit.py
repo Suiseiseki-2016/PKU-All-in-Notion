@@ -4,7 +4,6 @@ from urllib.parse import quote, urlencode
 from .. import catalog_snapshots as catalog
 from .assignment_workflow import PreparationError, _requirements, _verified_saved_receipt
 
-
 class SubmissionPermit:
     def __init__(self, settings, metadata, assignment, save):
         self.settings, self.metadata, self.assignment, self.save = settings, metadata, assignment, save

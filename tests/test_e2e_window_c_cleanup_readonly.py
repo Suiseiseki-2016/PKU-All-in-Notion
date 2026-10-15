@@ -1,6 +1,6 @@
 """Window C scratch-cleanup hardening: read-only organize_failures captures.
 
-Local deterministic check for the Windows fix in scripts/e2e_window_c.py: the
+Local deterministic check for the Windows fix in scripts/cleanup_scratch_selftest.py: the
 runner's scratch teardown must remove a tree that contains an organizer
 parse-failure capture (panel/organize_failures/quiz-parse-*.txt, written
 chmod 0444 by persist_parse_failure, i.e. FILE_ATTRIBUTE_READONLY on Windows)
@@ -26,7 +26,7 @@ def _run_cleanup_selftest(output: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable,
-            "scripts/e2e_window_c.py",
+            "scripts/cleanup_scratch_selftest.py",
             "cleanup-selftest",
             "--out",
             str(output),

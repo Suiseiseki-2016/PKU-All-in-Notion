@@ -346,7 +346,7 @@ def test_explicit_rebuild_is_new_work_but_publication_retry_reuses_paid_stages(t
             raise RuntimeError("Notion unavailable")
         return "https://notion.example/new-note"
     monkeypatch.setattr(recordings_api, "publish_notes", publish)
-    manager = recordings_api.RecordingWorkManager(cfg, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(cfg)
     with pytest.raises(ValueError, match="原笔记及旧页面均已保留"):
         manager._process(job, "lecture", regenerate=True)
     assert target.read_bytes() == original and len(calls) == 2
@@ -395,7 +395,7 @@ def test_actual_rebuild_promotes_bound_review_or_restores_original_files(tmp_pat
         if destination == target and path.name.startswith("notes.rebuild-"):
             raise OSError("local promotion interrupted")
         return original_replace(path, destination)
-    manager = recordings_api.RecordingWorkManager(cfg, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(cfg)
     if local_commit_failure:
         monkeypatch.setattr(Path, "replace", fail_promotion)
         with pytest.raises(OSError, match="local promotion interrupted"):

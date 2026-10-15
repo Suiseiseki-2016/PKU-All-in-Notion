@@ -16,6 +16,8 @@ from pku_sync.panel import recordings_api
 from pku_sync.media import write_notes
 from pku_sync.notion import markdown_to_blocks
 from pku_sync import note_editor
+from pku_sync.catalog_schema import fingerprint
+from tests.retired_data_support import seed_old_home
 
 
 def model_response(body, *, complete=True, uncertainties=None):
@@ -117,7 +119,7 @@ def test_term_review_requires_source_audio_and_preserves_original(tmp_path, monk
     ]}, ensure_ascii=False), "utf-8")
     (directory / "notes.md").write_text("旧笔记", "utf-8")
     app = FastAPI()
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     recordings_api.add_recording_routes(app, manager)
     client = TestClient(app)
     route = f"/api/campus/courses/course-1/recordings/{key}/term-review"
@@ -170,7 +172,7 @@ def test_unrelated_rac_term_is_not_presented_as_rsa(tmp_path):
     ]}, ensure_ascii=False), "utf-8")
     (directory / "video.mp4").write_bytes(b"cached-source-audio")
     app = FastAPI()
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     recordings_api.add_recording_routes(app, manager)
     client = TestClient(app)
     route = f"/api/campus/courses/course-1/recordings/{key}/term-review"
@@ -211,7 +213,7 @@ def wait_done(manager):
     ("catalog", "建立 Notion 课程与讲次页", "Notion 课程目录暂时无法更新"),
 ])
 def test_catalog_transport_failure_names_the_failed_step(tmp_path, kind, stage, expected):
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     manager._work = recordings_api.Work(kind=kind, stage=stage)
     def failed():
         raise RuntimeError("private transport error")
@@ -234,7 +236,7 @@ def test_catalog_transport_failure_names_the_failed_step(tmp_path, kind, stage, 
 ])
 def test_unexpected_process_failure_names_stage_and_keeps_details_private(
         tmp_path, stage, expected):
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     manager._work = recordings_api.Work(kind="process", stage=stage)
 
     def failed():
@@ -250,7 +252,7 @@ def test_unexpected_process_failure_names_stage_and_keeps_details_private(
 
 def test_list_never_exposes_campus_media_url_or_secret(tmp_path):
     key, _ = setup_index(tmp_path)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager)
     result = TestClient(app).get("/api/recordings")
@@ -278,7 +280,7 @@ def test_download_only_keeps_video_and_serves_a_safe_file(tmp_path, monkeypatch)
         job.video.write_bytes(b"video-bytes")
         return SimpleNamespace(path=job.video)
     monkeypatch.setattr(recordings_api, "download_job", fake_download)
-    manager = recordings_api.RecordingWorkManager(cfg, Directory())
+    manager = recordings_api.RecordingWorkManager(cfg)
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager)
     client = TestClient(app)
@@ -301,17 +303,6 @@ def test_download_only_keeps_video_and_serves_a_safe_file(tmp_path, monkeypatch)
     assert (directory / "video.mp4").exists()
 
 
-def test_invalid_or_foreign_notion_target_never_starts_processing(tmp_path):
-    key, _ = setup_index(tmp_path)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
-    app = FastAPI()
-    recordings_api.add_recording_routes(app, manager)
-    client = TestClient(app)
-    assert client.post(f"/api/recordings/{key}/process",
-                       json={"course_id": "other-course", "lecture_id": "lecture-page"}).status_code == 400
-    assert client.post("/api/recordings/unknown/process",
-                       json={"course_id": "course-page", "lecture_id": "lecture-page"}).status_code == 400
-    assert manager.state() == {"state": "idle"}
 
 
 def test_selected_recording_generates_once_then_retry_only_publishes(tmp_path, monkeypatch):
@@ -341,9 +332,9 @@ def test_selected_recording_generates_once_then_retry_only_publishes(tmp_path, m
 
     monkeypatch.setattr(recordings_api, "process_job", fake_process)
     monkeypatch.setattr(recordings_api, "publish_notes", fake_publish)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     for _ in (1, 2):
-        manager.start_process(key, "course-page", "lecture-page")
+        manager._start("process", key, lambda: manager._process(recordings_api.find_job(tmp_path, key), "lecture-page"), course_id="course-1")
         assert wait_done(manager)["state"] == "done"
     assert calls == {"process": 1, "publish": 2}
 
@@ -360,7 +351,7 @@ def test_existing_unreviewed_note_stops_before_download_or_publication(tmp_path,
     monkeypatch.setattr("pku_sync.auth.get_session", lambda **kwargs: pytest.fail("campus login started"))
     job = recordings_api.find_job(tmp_path, key)
     with pytest.raises(ValueError, match="尚无可读取的整理保存记录"):
-        recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(job, "lecture-page")
+        recordings_api.RecordingWorkManager(settings(tmp_path))._process(job, "lecture-page")
     assert (directory / "notes.md").read_text("utf-8") == original
 
 
@@ -472,8 +463,8 @@ def test_stale_catalog_is_refreshed_instead_of_blocking_the_note(tmp_path, monke
     metadata = json.loads(metadata_path.read_text("utf-8"))
     metadata["synced_at"] = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     metadata_path.write_text(json.dumps(metadata), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
     }), "utf-8")
     from pku_sync.panel import notion_home
     refreshed = []
@@ -486,8 +477,8 @@ def test_stale_catalog_is_refreshed_instead_of_blocking_the_note(tmp_path, monke
         metadata_path.write_text(json.dumps(metadata), "utf-8")
 
     monkeypatch.setattr(recordings_api, "sync_recording_index", fake_refresh)
-    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args: "lecture-1")
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args, **kwargs: "lecture-1")
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     monkeypatch.setattr(manager, "_process", lambda *args, **kwargs: "https://notion.so/note")
     started = manager.start_campus_process(key, "course-1")
     assert started["state"] == "running"
@@ -503,8 +494,8 @@ def test_stale_catalog_without_campus_accounts_still_reports_the_gate(tmp_path, 
     metadata = json.loads(metadata_path.read_text("utf-8"))
     metadata["synced_at"] = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     metadata_path.write_text(json.dumps(metadata), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
     }), "utf-8")
     from pku_sync.panel import notion_home
     monkeypatch.setattr(notion_home, "ensure_recording_target",
@@ -513,7 +504,7 @@ def test_stale_catalog_without_campus_accounts_still_reports_the_gate(tmp_path, 
                         lambda *args, **kwargs: pytest.fail("campus read without credentials"))
     no_credentials = SimpleNamespace(**{**vars(settings(tmp_path)),
                                         "pku_username": "", "pku_password": ""})
-    manager = recordings_api.RecordingWorkManager(no_credentials, Directory())
+    manager = recordings_api.RecordingWorkManager(no_credentials)
     monkeypatch.setattr(manager, "_process", lambda *args, **kwargs: pytest.fail("AI processing started"))
     with pytest.raises(ValueError, match="超过 24 小时"):
         manager.start_campus_process(key, "course-1")
@@ -528,15 +519,15 @@ def test_publish_existing_skips_campus_refresh_and_credentials(tmp_path, monkeyp
     (directory / "keyframes").mkdir()
     (directory / "keyframes" / "index.json").write_text(
         '{"keyframes": [{"file": "frame.jpg", "timestamp": 0}]}', "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
     }), "utf-8")
     no_campus = SimpleNamespace(**{
         **vars(settings(tmp_path)), "pku_username": "", "pku_password": ""
     })
     from pku_sync.panel import notion_home
-    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *_: "lecture-1")
-    manager = recordings_api.RecordingWorkManager(no_campus, Directory())
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args, **kwargs: "lecture-1")
+    manager = recordings_api.RecordingWorkManager(no_campus)
     monkeypatch.setattr(
         manager,
         "_refresh_stale_catalog",
@@ -566,15 +557,15 @@ def test_failed_catalog_refresh_stops_with_a_clear_reason(tmp_path, monkeypatch)
     metadata = json.loads(metadata_path.read_text("utf-8"))
     metadata["synced_at"] = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     metadata_path.write_text(json.dumps(metadata), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
     }), "utf-8")
     from pku_sync.panel import notion_home
     monkeypatch.setattr(notion_home, "ensure_recording_target",
                         lambda *args: pytest.fail("Notion opened after a failed refresh"))
     monkeypatch.setattr(recordings_api, "sync_recording_index",
                         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("IAAA login timed out")))
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     monkeypatch.setattr(manager, "_process", lambda *args, **kwargs: pytest.fail("AI processing started"))
     manager.start_campus_process(key, "course-1")
     done = wait_done(manager)
@@ -607,7 +598,7 @@ def test_existing_note_without_transcript_cannot_use_student_publish_flow(tmp_pa
     (directory / "notes.md").write_text("# 旧笔记", "utf-8")
     monkeypatch.setattr(recordings_api, "publish_notes", lambda *args: pytest.fail("published"))
     with pytest.raises(ValueError, match="缺少这节课的转写"):
-        recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(
+        recordings_api.RecordingWorkManager(settings(tmp_path))._process(
             recordings_api.find_job(tmp_path, key), "lecture-page")
 
 
@@ -665,8 +656,8 @@ def test_recording_error_identifies_failed_stage(tmp_path, monkeypatch, transcri
     (directory / "video.mp4").write_bytes(b"fixture")
     monkeypatch.setattr(recordings_api, "process_job",
                         lambda job, cfg, **kwargs: SimpleNamespace(notes=False, transcribed=transcribed, errors=errors))
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
-    manager.start_process(key, "course-page", "lecture-page")
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
+    manager._start("process", key, lambda: manager._process(recordings_api.find_job(tmp_path, key), "lecture-page"), course_id="course-1")
     state = wait_done(manager)
     assert state["state"] == "failed"
     assert expected in state["error"]
@@ -683,15 +674,15 @@ def test_publish_existing_results_never_redownloads_video_for_optional_clips(
     (directory / "keyframes").mkdir()
     (directory / "keyframes" / "index.json").write_text(
         json.dumps({"keyframes": [{"timestamp": 1, "file": "frame.jpg"}]}), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://notion.so/home"
     }), "utf-8")
 
     monkeypatch.setattr("pku_sync.panel.note_videos.needs_video_clips", lambda *_: True)
     monkeypatch.setattr(recordings_api, "download_job",
                         lambda *_args, **_kwargs: pytest.fail("video was redownloaded"))
     monkeypatch.setattr(recordings_api, "publish_notes", lambda *_args, **_kwargs: "https://notion.so/note")
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     job = recordings_api.find_job(tmp_path, key)
 
     result = manager._process(job, "lecture-page", reuse_existing=True)
@@ -950,7 +941,7 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
     monkeypatch.setattr(media, "write_notes", failed_notes)
     job = recordings_api.find_job(tmp_path, key)
     with pytest.raises(ValueError, match="新版笔记没有完成.*原笔记保留"):
-        recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(
+        recordings_api.RecordingWorkManager(settings(tmp_path))._process(
             job, "lecture-page", regenerate=True)
     assert (directory / "notes.md").read_text("utf-8") == old
     assert not list(directory.glob("notes.rebuild-*.md"))
@@ -961,7 +952,7 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
     monkeypatch.setattr(recordings_api, "publish_notes",
                         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Notion 不可用")))
     with pytest.raises(ValueError, match="原笔记及旧页面均已保留"):
-        recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(
+        recordings_api.RecordingWorkManager(settings(tmp_path))._process(
             job, "lecture-page", regenerate=True)
     assert (directory / "notes.md").read_text("utf-8") == old
     assert not list(directory.glob("notes.rebuild-*.md"))
@@ -970,7 +961,7 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
         _ for _ in ()).throw(ValueError(
             "笔记暂不能作为完整课程笔记发布：教学网正式作业目录尚未完整同步；请刷新课程目录后再发布。")))
     with pytest.raises(ValueError, match="正式作业目录尚未完整同步.*原笔记及旧页面均已保留"):
-        recordings_api.RecordingWorkManager(settings(tmp_path), Directory())._process(
+        recordings_api.RecordingWorkManager(settings(tmp_path))._process(
             job, "lecture-page", regenerate=True)
     assert (directory / "notes.md").read_text("utf-8") == old
     assert not list(directory.glob("notes.rebuild-*.md"))
@@ -1002,7 +993,7 @@ def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monke
     from pku_sync.panel import notion_home
     monkeypatch.setattr(notion_home, "saved_home", lambda root: {"id": "home"})
     shared_settings = settings(tmp_path)
-    url = recordings_api.RecordingWorkManager(shared_settings, Directory())._process(
+    url = recordings_api.RecordingWorkManager(shared_settings)._process(
         recordings_api.find_job(tmp_path, key), "a" * 32, regenerate=True, notes_strategy=notes_strategy)
     assert getattr(shared_settings,'notes_strategy','transcript') == 'transcript'
     assert url.endswith("new-note")
@@ -1043,7 +1034,7 @@ def test_failed_local_rebuild_commit_never_deletes_original_recording(
         return original_replace(path, target)
     monkeypatch.setattr(Path, "replace", replace)
     with pytest.raises(OSError, match="local commit failed"):
-        recordings_api.RecordingWorkManager(cfg, Directory())._process(
+        recordings_api.RecordingWorkManager(cfg)._process(
             recordings_api.find_job(tmp_path, key), "lecture-page", regenerate=True)
     assert (directory / "video.mp4").read_bytes() == b"original-recording"
     assert cleanup_checks == []
@@ -1243,70 +1234,28 @@ def test_desktop_navigation_and_manual_page_are_available(tmp_path):
     client = TestClient(create_app(settings=Settings(_env_file=None, data_dir=tmp_path)))
     script = client.get("/app/app.js").text
     assert 'data-action="open-recordings"' not in script
-    assert 'data-action="course-tab"' in script
-    assert 'recording-process' in script
+    assert '"open-campus-course"' in script
+    assert '"campus-process"' in script
     page = client.get("/recordings", follow_redirects=False)
-    assert page.status_code == 307
-    assert page.headers["location"] == "/app"
+    assert page.status_code == 404
 
 
 
-def test_course_page_shows_only_its_recordings_and_remembers_source(tmp_path):
-    from pku_sync.panel.course_recordings import choose_source, rows_for_course
-
-    key, _ = setup_index(tmp_path)
-    other = tmp_path / "另一门课"
-    (other / "recordings").mkdir(parents=True)
-    (other / "course.json").write_text(json.dumps({"course_id": "course-2", "name": "另一门课"}), "utf-8")
-    second = Recording(course_id="course-2", title="第二讲", recorded_at="2026-09-25 09:00:00")
-    (other / "recordings" / "index.json").write_text(json.dumps([second.model_dump()]), "utf-8")
-
-    first_view = rows_for_course(tmp_path, Directory(), "course-page")
-    assert first_view["selected_campus_course_id"] == "course-1"
-    assert [row["id"] for row in first_view["items"]] == [key]
-
-    choose_source(tmp_path, Directory(), "course-page", "course-2")
-    second_view = rows_for_course(tmp_path, Directory(), "course-page")
-    assert second_view["selected_campus_course_id"] == "course-2"
-    assert [row["title"] for row in second_view["items"]] == ["第二讲"]
-    assert "password" not in json.dumps(second_view).lower()
 
 
-def test_cross_course_recording_cannot_publish_to_current_course(tmp_path):
-    key, _ = setup_index(tmp_path)
-    other = tmp_path / "另一门课"
-    (other / "recordings").mkdir(parents=True)
-    (other / "course.json").write_text(json.dumps({"course_id": "course-2", "name": "另一门课"}), "utf-8")
-    (other / "recordings" / "index.json").write_text("[]", "utf-8")
-    from pku_sync.panel.course_recordings import choose_source
-    choose_source(tmp_path, Directory(), "course-page", "course-2")
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
-    with pytest.raises(ValueError, match="不属于当前课程"):
-        manager.start_process(key, "course-page", "lecture-page")
-    assert manager.state() == {"state": "idle"}
 
 
-def test_course_exercises_use_stable_notion_parent_identity(tmp_path):
-    from pku_sync.panel.fake_directory import build_fake_directory
-    service = build_fake_directory()
-    payload = service.load()
-    for course in payload["courses"]:
-        response = service.course_exercises(course["id"])
-        expected = {
-            item.id for item in service.ensure_loaded().exercises_by_course.get(course["id"], [])
-        }
-        assert {row["id"] for row in response["items"]} == expected
 
 @pytest.mark.parametrize('notes_strategy', [None, 'topics'])
 def test_campus_confirmation_creates_target_before_processing(tmp_path, monkeypatch, notes_strategy):
     key, _ = setup_index(tmp_path)
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "oauth-template", "url": "https://notion.so/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "oauth-template", "url": "https://notion.so/home"
     }), "utf-8")
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     from pku_sync.panel import notion_home
     calls = []
-    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args: (calls.append("target") or "lecture"))
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args, **kwargs: (calls.append("target") or "lecture"))
     monkeypatch.setattr(manager, "_process", lambda job, lecture_id, **kwargs: (calls.append(("process", lecture_id)) or "https://notion.so/note"))
     assert calls == []
     with pytest.raises(ValueError, match="不属于当前"):
@@ -1330,9 +1279,22 @@ def test_campus_confirmation_creates_target_before_processing(tmp_path, monkeypa
 
 def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monkeypatch):
     from pku_sync.panel import notion_home
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://app.notion.com/home"
+    from pku_sync.panel import notion_workspace
+    home_id, parent_id = "a" * 32, "b" * 32
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": home_id, "parent_id": parent_id, "url": "https://app.notion.com/home"
     }), "utf-8")
+    class Notion:
+        def __init__(self, token): assert token == "notion"
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def get_page(self, page_id):
+            if page_id == parent_id:
+                return {"id": parent_id, "parent": {"type": "workspace", "workspace": True}}
+            assert page_id == home_id
+            return {"id": home_id, "parent": {"page_id": parent_id}}
+        def list_child_pages(self, parent): return []
+    monkeypatch.setattr(notion_workspace, "NotionClient", Notion)
     calls = []
     def fake_index(_settings, stage, progress, course_id="", on_course_confirmed=None):
         setup_index(tmp_path)
@@ -1351,7 +1313,7 @@ def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monke
         calls.append("campus")
         if on_course_confirmed:
             on_course_confirmed("course-1", envelope)
-    def fake_catalog(root, token, stage, progress, item_progress=None, *, settings=None, course_id=""):
+    def fake_catalog(root, token, stage, progress, item_progress=None, *, settings=None, course_id="", **kwargs):
         assert root == tmp_path and token == "notion"
         assert calls == ["campus"]
         stage("建立 Notion 课程页")
@@ -1375,7 +1337,9 @@ def test_campus_sync_builds_notion_pages_after_home_was_selected(tmp_path, monke
         return {"requested": 1, "created": 1, "existing": 0,
                 "urls": ["https://app.notion.com/summary"], "failures": []}
     monkeypatch.setattr(course_summary, "publish_course_summaries", fake_summaries)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    from pku_sync import catalog_snapshots as catalog
+    catalog.activate_account(settings(tmp_path))
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["course-1"])
     manager.start_sync()
     done = wait_done(manager)
@@ -1408,16 +1372,16 @@ def test_local_notes_publish_then_course_button_has_lecture_link(tmp_path, monke
     (frames / "index.json").write_text(json.dumps({"keyframes": [
         {"file": "frame_0000_00m00s.jpg", "timestamp": 0, "time": "00:00"}
     ]}), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "parent", "url": "https://app.notion.com/home"
+    (tmp_path / "notion-workspace-v2.json").write_text(json.dumps({
+        "schema": 2, "active": True, "account_namespace": fingerprint({"session": settings(tmp_path).platform_token}), "id": "home", "parent_id": "parent", "url": "https://app.notion.com/home"
     }), "utf-8")
-    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *_: "a" * 32)
+    monkeypatch.setattr(notion_home, "ensure_recording_target", lambda *args, **kwargs: "a" * 32)
     calls = []
     def failing_publish(*_):
         calls.append("failed")
         raise RuntimeError("Notion unavailable")
     monkeypatch.setattr(recordings_api, "publish_notes", failing_publish)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     manager.start_campus_process(key, "course-1")
     failed = wait_done(manager)
     assert failed["state"] == "failed"
@@ -1440,10 +1404,10 @@ def test_local_notes_publish_then_course_button_has_lecture_link(tmp_path, monke
 
     # Switching to the additive home must retain the exact old publication
     # marker so the original remote note can still be found for rollback.
-    from pku_sync.catalog_schema import fingerprint
     from pku_sync import catalog_snapshots
     from pku_sync.panel import notion_workspace
     previous = (directory / "notion-publication.json").read_bytes()
+    seed_old_home(tmp_path, {"id": "old-home", "parent_id": "parent"})
     old_home = (tmp_path / "notion-learning-home.json").read_bytes()
     catalog_snapshots.activate_account(manager.settings)
     notion_workspace._save(notion_workspace.manifest_path(tmp_path), {
@@ -1486,7 +1450,7 @@ def test_campus_material_download_resolves_fresh_url_and_rejects_other_host(tmp_
                         lambda client, course_id: ([SimpleNamespace(
                             path="教学内容/第一讲课件", title="第一讲课件", attachments=[asset])], []))
     app = FastAPI()
-    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path), Directory()))
+    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path)))
     client = TestClient(app)
     endpoint = "/api/campus/courses/course-1/materials/0/files/0"
     response = client.get(endpoint)
@@ -1535,7 +1499,7 @@ def test_student_can_read_downloaded_handbook_in_course_view(tmp_path, monkeypat
                             path="教学大纲/课程手册及时间安排", title="课程手册及时间安排",
                             attachments=[asset])], []))
     app = FastAPI()
-    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path), Directory()))
+    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path)))
     response = TestClient(app).get("/api/campus/courses/course-1/materials/0/files/0")
     assert response.status_code == 200 and response.headers["x-handbook-cached"] == "true"
     assert (course / "materials" / "教学大纲" / "课程学生手册.pdf").read_bytes() == b"%PDF-test"
@@ -1553,7 +1517,7 @@ def test_campus_material_can_be_assigned_ignored_and_restored(tmp_path):
         {"title": "补充阅读", "kind": "文件", "path": "资料/补充阅读", "files": ["reading.pdf"]}
     ]), "utf-8")
     app = FastAPI()
-    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path), Directory()))
+    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path)))
     client = TestClient(app)
     path = "/api/campus/courses/course-1/materials/0/match"
     assert client.post(path, json={"lecture_id": "wrong"}).status_code == 422
@@ -1567,7 +1531,7 @@ def test_campus_material_can_be_assigned_ignored_and_restored(tmp_path):
 
 
 def test_demo_notion_connection_is_labeled_without_claiming_real_pages(tmp_path):
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     manager.settings.notion_token = ""
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager, demo_connection=True)
@@ -1578,30 +1542,6 @@ def test_demo_notion_connection_is_labeled_without_claiming_real_pages(tmp_path)
     assert "演示模式" in response.json()["detail"]
 
 
-def test_existing_home_still_lists_destinations_and_move_route(tmp_path, monkeypatch):
-    from pku_sync.panel import notion_home
-    from pku_sync import platform
-    monkeypatch.setattr(platform, '_fetch_account_profile',
-                        lambda _: {'status':'ready', 'revision':1, 'profile':{}})
-
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "old-parent",
-                                      "url": "https://notion.so/home"})
-    monkeypatch.setattr(notion_home, "available_parents", lambda token: [
-        {"id": "new-parent", "title": "新位置"}])
-    moved = []
-    monkeypatch.setattr(notion_home, "move_home", lambda root, token, parent: (
-        moved.append((root, token, parent)) or {"id": "home", "parent_id": parent,
-                                                 "url": "https://notion.so/home"}))
-    app = FastAPI()
-    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(tmp_path), Directory()))
-    client = TestClient(app)
-    parents = client.get("/api/campus/notion/parents")
-    assert parents.status_code == 200
-    assert parents.json()["pages"][0]["id"] == "new-parent"
-    response = client.post("/api/campus/notion/home/move", json={"parent_page_id": "new-parent"})
-    assert response.status_code == 200
-    assert response.json()["parent_id"] == "new-parent"
-    assert moved == [(tmp_path, "notion", "new-parent")]
 
 
 def test_cancel_sync_stops_before_next_course_and_preserves_completed_index(tmp_path, monkeypatch):
@@ -1614,7 +1554,7 @@ def test_cancel_sync_stops_before_next_course_and_preserves_completed_index(tmp_
         assert release.wait(5)
         stage("读取第二门课程")
     monkeypatch.setattr(recordings_api, "sync_recording_index", fake_sync)
-    manager = recordings_api.RecordingWorkManager(settings(tmp_path), Directory())
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["course-1", "course-2"])
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager)

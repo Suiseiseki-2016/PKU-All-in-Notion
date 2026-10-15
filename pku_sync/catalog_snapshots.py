@@ -289,6 +289,23 @@ def read_current_batch(settings, course_ids, *, read=None, check_cancel=None, ma
     return _read_batch(settings, identifiers, fetch, check_cancel=check_cancel, max_workers=max_workers)
 
 
+def _replace_local_file(temporary: Path, path: Path) -> None:
+    """Wait briefly for Windows readers, without repeating a network write.
+
+    Keep the sealed temporary file and original destination throughout. A
+    persistent permission error still fails instead of deleting the old file.
+    """
+    delays = (.01, .02, .04, .08, .08)
+    for attempt in range(len(delays) + 1):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 def activate_account(settings) -> None:
     token = getattr(settings, "platform_token", "") or ""
     namespace = fingerprint({"session": token}) if token else "signed-out"
@@ -304,7 +321,7 @@ def activate_account(settings) -> None:
     temporary = path.with_name("active-account." + secrets.token_hex(8) + ".tmp")
     try:
         temporary.write_text(namespace, "ascii")
-        temporary.replace(path)
+        _replace_local_file(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -328,7 +345,7 @@ def save_cache(root: Path, envelope: dict) -> None:
     temp = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
     try:
         temp.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), "utf-8")
-        temp.replace(path)
+        _replace_local_file(temp, path)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -374,7 +391,7 @@ def _save_read_status(path: Path, value: dict) -> None:
     temp = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
     try:
         temp.write_text(json.dumps(value, ensure_ascii=False), "utf-8")
-        temp.replace(path)
+        _replace_local_file(temp, path)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -521,15 +538,7 @@ def _save_projection_journal(path, state):
         # Windows readers can briefly hold a handle without FILE_SHARE_DELETE.
         # Retry only this sealed, already-fsynced file's atomic replacement,
         # never a network write. Persistent ACL errors retain the old receipt.
-        delays = (.01, .02, .04, .08, .08)
-        for attempt in range(len(delays) + 1):
-            try:
-                temporary.replace(path)
-                break
-            except PermissionError as exc:
-                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == len(delays):
-                    raise
-                time.sleep(delays[attempt])
+        _replace_local_file(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 

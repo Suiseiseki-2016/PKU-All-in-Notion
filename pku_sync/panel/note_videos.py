@@ -20,10 +20,8 @@ _CLIP_VERSION = "v4"
 # uses contextual model review and never uses lexical overlap as a verdict.
 _CORROBORATION_SPAN = 20
 
-
 class VideoClipError(RuntimeError):
     """A local clip could not be produced without affecting the note."""
-
 
 def _plain(block: dict) -> str:
     kind = block.get("type") or ""
@@ -33,7 +31,6 @@ def _plain(block: dict) -> str:
         for part in body.get("rich_text") or []
     )
 
-
 def _caption(block: dict) -> str:
     kind = block.get("type") or ""
     return "".join(
@@ -41,10 +38,8 @@ def _caption(block: dict) -> str:
         for part in (block.get(kind) or {}).get("caption") or []
     )
 
-
 def _seconds(minutes: str, seconds: str) -> int:
     return int(minutes) * 60 + int(seconds)
-
 
 def _stamps(notes: str) -> list[tuple[str, int]]:
     found: list[tuple[str, int]] = []
@@ -57,20 +52,17 @@ def _stamps(notes: str) -> list[tuple[str, int]]:
         found.append((f"{int(match['minutes']):02d}:{int(match['seconds']):02d}", seconds))
     return found
 
-
 def needs_video_clips(notes_path: Path) -> bool:
     try:
         return bool(_stamps(notes_path.read_text("utf-8")))
     except OSError:
         return False
 
-
 def _grams(text: str) -> set[str]:
     from ..media import to_simplified
 
     body = to_simplified(re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", str(text or "")))
     return {body[index:index + 2] for index in range(len(body) - 1)}
-
 
 def _claims_by_timestamp(notes: str) -> dict[int, list[str]]:
     """The note sentence each marker annotates, keyed by its timestamp."""
@@ -83,7 +75,6 @@ def _claims_by_timestamp(notes: str) -> dict[int, list[str]]:
         claims.setdefault(seconds, []).append(parts[-1] if parts else body)
     return claims
 
-
 def _load_segments(directory: Path) -> list[dict] | None:
     try:
         data = json.loads((directory / "transcript.json").read_text("utf-8"))
@@ -91,7 +82,6 @@ def _load_segments(directory: Path) -> list[dict] | None:
         return None
     segments = data.get("segments")
     return segments if isinstance(segments, list) else None
-
 
 def corroboration(claims: list[str], segments: list[dict], timestamp: int) -> float:
     """Legacy lexical diagnostic; never a publication or correctness gate."""
@@ -110,19 +100,16 @@ def corroboration(claims: list[str], segments: list[dict], timestamp: int) -> fl
             best = max(best, len(wanted & spoken) / len(wanted))
     return best
 
-
 def _source_signature(video: Path) -> str:
     stat = video.stat()
     return hashlib.sha256(
         f"{_CLIP_VERSION}:{stat.st_size}:{stat.st_mtime_ns}".encode()
     ).hexdigest()[:16]
 
-
 def _clip_path(video: Path, directory: Path, timestamp: int) -> Path:
     source_key = _source_signature(video)
     name = f"{video.stem}-{source_key}-{timestamp:06d}.mp4"
     return directory / name
-
 
 def _extract_clip(video: Path, target: Path, start: int, duration: int) -> None:
     """Stream-copy a clip in-process with the bundled FFmpeg libraries (PyAV).
@@ -206,14 +193,12 @@ def _extract_clip(video: Path, target: Path, start: int, duration: int) -> None:
         raise VideoClipError("标记位置可能超出录像范围，没有产生片段。")
     temporary.replace(target)
 
-
 def clip_for_timestamp(
     video: Path, directory: Path, timestamp: int, max_bytes: int | None = None
 ) -> Path:
     """Return a cached clip that fits the caller's remaining byte budget."""
     budget = _MAX_TOTAL_CLIP_BYTES if max_bytes is None else max(0, int(max_bytes))
     return _clip_for_timestamp(video, directory, timestamp, budget)
-
 
 def _clip_for_timestamp(
     video: Path, directory: Path, timestamp: int, max_bytes: int
@@ -236,13 +221,11 @@ def _clip_for_timestamp(
         )
     return target
 
-
 def _write_report(directory: Path, report: dict) -> None:
     path = directory / _REPORT_NAME
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=1), "utf-8")
     temporary.replace(path)
-
 
 def publish_note_videos(notion: NotionClient, note_id: str, directory: Path, *,
                         notes_path: Path | None = None) -> int:
@@ -373,7 +356,6 @@ def publish_note_videos(notion: NotionClient, note_id: str, directory: Path, *,
     })
     _write_report(directory, report)
     return inserted
-
 
 def video_publication_complete(directory: Path, *, notes_path: Path | None = None) -> bool:
     """Whether it is safe to remove the original after a successful publish."""

@@ -11,11 +11,11 @@ from pathlib import Path
 
 from ..notion import markdown_to_blocks
 from .campus_quiz import _hash, _journal_lock, _COMPLETE
-from .exercise_organizer import OrganizeBlocked
-from .exercise_grader import (ExerciseGrader, GradeBlocked, RealGradingPageAdapter, _plain,
+from .quiz_contract import OrganizeBlocked
+from .quiz_grading_core import (ExerciseGrader, GradeBlocked, RealGradingPageAdapter, _plain,
                               _find_complete_operation, PHASE_RESULT_VERIFIED, PHASE_INTENT,
                               PHASE_COMPLETED, INCOMPLETE_ANSWERS_REASON)
-from .exercises import JsonGradingRecordStore
+from .grading_records import JsonGradingRecordStore
 from .llm_json import extract_single_json_payload
 from .summary_acceptance import canonical_content_rows
 from .notion_home import _document_signature, _linked_paragraph, _source_block_signature
@@ -24,7 +24,6 @@ _REVIEW = "PKU 复习记录 · "
 _CONFIRM = "复习确认 · "
 _HISTORY = "PKU 小测批改历史 · "
 _KINDS = {"选择", "判断", "填空", "简答", "论述"}
-
 
 class _NativeRelay:
     def __init__(self, relay, context=None):
@@ -50,7 +49,6 @@ class _NativeRelay:
             raise GradeBlocked("AI 用量尚未确认，已停止自动重复批改。")
         return result
 
-
 def _rubric(prompt):
     payload = json.loads(prompt)
     rows = []
@@ -74,7 +72,6 @@ def _rubric(prompt):
         raise GradeBlocked("小测题目身份不完整，请核对后再批改。")
     return rows
 
-
 def _history_marker(rows):
     if not rows or not _plain(rows[0]).startswith(_HISTORY):
         return {}
@@ -83,7 +80,6 @@ def _history_marker(rows):
     except ValueError:
         return {}
     return value if isinstance(value, dict) and value.get("schema") == 1 else {}
-
 
 class _Directory:
     def __init__(self, path, target):
@@ -104,7 +100,6 @@ class _Directory:
     def record_grading(self, exercise_id, record):
         self.grading_record_store.put(exercise_id, record)
         self.local_grading_records = self.grading_record_store.snapshot()
-
 
 class _Adapter(RealGradingPageAdapter):
     def __init__(self, settings, quizzes, scope, directory=None):
@@ -273,7 +268,6 @@ class _Adapter(RealGradingPageAdapter):
             expected = self._review_blocks(target, question, key)
             return (not remote.get("archived") and remote.get("parent", {}).get("page_id") == center["id"]
                     and [_document_signature(row) for row in rows[:len(expected)]] == [_document_signature(row) for row in expected])
-
 
 class CampusQuizGrading:
     def __init__(self, settings, relay, quizzes):

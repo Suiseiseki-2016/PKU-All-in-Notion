@@ -4,13 +4,11 @@ from __future__ import annotations
 from .. import platform
 from ..catalog_snapshots import CatalogUnavailable
 
-
 def remote(settings) -> dict:
     result = platform._fetch_account_profile(settings)
     if result.get("status") != "ready":
         raise CatalogUnavailable("账号主页配置尚未确认，新版目录保持只读。")
     return result
-
 
 def publish(settings, home: dict, previous: dict, *, replace_existing=False) -> int:
     identity = {key: home[key] for key in ("id", "url", "parent_id")}
@@ -28,7 +26,6 @@ def publish(settings, home: dict, previous: dict, *, replace_existing=False) -> 
     if verified["profile"].get("notion_workspace_v2") != identity:
         raise CatalogUnavailable("新版主页账号配置写入后验证失败；未切换学习主页。")
     return verified["revision"]
-
 
 def pull(settings, profile: dict) -> dict:
     from pathlib import Path

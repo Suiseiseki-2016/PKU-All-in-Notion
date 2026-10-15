@@ -19,7 +19,6 @@ from .handbook_requirements import handbook_review_cards
 
 _LECTURE_NUMBER = re.compile(r"第\s*([0-9０-９]+)\s*[讲次]", re.IGNORECASE)
 
-
 def official_content_source_url(course_id, item):
     parent_id = str(item.get('parent_content_id') or '')
     if re.fullmatch(r'_\d+_\d+', parent_id):
@@ -32,7 +31,6 @@ _TEACHER_DEADLINE = re.compile(
     r"(?:（[^）]{1,8}）|\([^)]{1,8}\))?\s*\d{1,2}[:：]\d{2})",
     re.I,
 )
-
 
 def display_campus_time(value: str) -> str:
     """Show timezone-aware campus timestamps in PKU's local time."""
@@ -47,7 +45,6 @@ def display_campus_time(value: str) -> str:
         return raw
     beijing = timezone(timedelta(hours=8))
     return moment.astimezone(beijing).strftime("%Y-%m-%d %H:%M 北京时间")
-
 
 def teacher_deadline_quote(instructions: str) -> str:
     """Extract one explicit teacher-written deadline, without assigning a timezone.
@@ -70,18 +67,15 @@ def teacher_deadline_quote(instructions: str) -> str:
         candidates.add(raw)
     return next(iter(candidates)) if len(candidates) == 1 else ""
 
-
 def _read_json(path: Path, default):
     try:
         return json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
         return default
 
-
 def _number(text: str) -> int | None:
     match = _LECTURE_NUMBER.search(text or "")
     return int(match.group(1)) if match else None
-
 
 def _section_states(root: Path, folder: Path, course_id: str, metadata: dict) -> dict:
     """Display cached evidence without granting it publication authority."""
@@ -109,7 +103,6 @@ def _section_states(root: Path, folder: Path, course_id: str, metadata: dict) ->
             message = f'已读取 {count} 项{label}。'
         result[section] = {'state': state, 'count': count, 'message': message}
     return result
-
 
 def _courses(root: Path):
     for path in sorted(root.glob("*/course.json")):
@@ -153,14 +146,12 @@ def _courses(root: Path):
         if isinstance(course_id, str) and course_id and isinstance(title, str) and title:
             yield path.parent, course_id, title, metadata
 
-
 def _official_index(root: Path, folder: Path, course_id: str, section: str, default):
     from ..catalog_snapshots import cached
     envelope = cached(root, course_id)
     if envelope:
         return envelope["snapshot"]["sections"][section]["items"]
     return _read_json(folder / section / "index.json", default)
-
 
 def _category(item: dict) -> str:
     kind = str(item.get("kind") or "")
@@ -170,7 +161,6 @@ def _category(item: dict) -> str:
     if item.get("files") or kind == "文件":
         return "material"
     return "information"
-
 
 def campus_courses(root: Path) -> dict:
     rows = []
@@ -210,7 +200,6 @@ def campus_courses(root: Path) -> dict:
         })
     return {"courses": rows}
 
-
 def _historical_lessons(root: Path, course_id: str, metadata: dict) -> list[dict]:
     """Show retained sources without granting current processing eligibility."""
     from .. import catalog_snapshots as catalog, recording_history
@@ -245,7 +234,6 @@ def _historical_lessons(root: Path, course_id: str, metadata: dict) -> list[dict
                 row['notion_lecture_url'] = 'https://www.notion.so/' + UUID(target['id']).hex
         result.append(row)
     return result
-
 
 def campus_course(root: Path, course_id: str) -> dict:
     from ..catalog_snapshots import recording_source_id

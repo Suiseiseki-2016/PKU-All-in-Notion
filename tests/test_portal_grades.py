@@ -158,7 +158,7 @@ def test_table_unavailable_reports_portal_message():
 def test_gradebook_endpoints_and_calculated_filter():
     routes = {
         # /users/me answers with the user object itself, not a paged envelope.
-        grades.USERS_ME: {"id": "u1", "userName": "2300012922"},
+        grades.USERS_ME: {"id": "u1", "userName": "0000000000"},
         # Enrollments carry ids only; the name needs a separate course lookup.
         grades.USER_COURSES.format(user_id="u1"): {
             "results": [
@@ -207,7 +207,7 @@ def test_grading_type_reads_type_with_legacy_fallback():
 
 
 def test_current_user_id_reads_unwrapped_object():
-    client = FakeHttp({grades.USERS_ME: {"id": "_170580_1", "userName": "2300012922"}})
+    client = FakeHttp({grades.USERS_ME: {"id": "_170580_1", "userName": "0000000000"}})
     assert grades.current_user_id(client) == "_170580_1"
 
 

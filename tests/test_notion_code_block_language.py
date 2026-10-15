@@ -13,15 +13,15 @@ import copy, json
 from pathlib import Path
 import httpx, pytest
 import pku_sync.notion as notion_module
-import pku_sync.panel.exercise_grader as grader_module
+import pku_sync.panel.quiz_grading_core as grader_module
 from pku_sync.notion import NotionClient, markdown_to_blocks
-from pku_sync.notion_meta.entities import PageRef
-from pku_sync.panel.exercise_grader import (
+from grading_support import PageRef
+from pku_sync.panel.quiz_grading_core import (
     PHASE_COMPLETED, PHASE_RELAY_SUCCEEDED,
     ExerciseGrader, GradeBlocked, GradeTarget, GradingInput,
     RealGradingPageAdapter, _operation_result_markdown,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
+from pku_sync.panel.grading_records import JsonGradingRecordStore
 
 CONTENT = json.dumps({"score": 72, "questions": [
     {"number": 2, "type": "判断", "score": 0, "max_score": 2},

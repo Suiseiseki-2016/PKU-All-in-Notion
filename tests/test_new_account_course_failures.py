@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from pku_sync import auth, catalog_snapshots as catalog, discover, materials, tui_data
+from pku_sync import auth, catalog_snapshots as catalog, discover, materials, course_data
 from pku_sync.config import Settings
 from pku_sync.models import Course
 from pku_sync.panel import recordings_api
@@ -36,7 +36,7 @@ def test_automatic_term_filter_keeps_unrecognized_course_codes():
 
 
 def test_unexpected_course_error_does_not_abort_other_courses(tmp_path, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), None)
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     monkeypatch.setattr(manager, '_background_course_ids', lambda stage: ['broken', 'healthy'])
     calls = []
     def run(identifier):
@@ -64,7 +64,7 @@ def test_first_failed_course_remains_visible_without_claiming_synced(tmp_path, m
     monkeypatch.setattr(discover, 'discover_courses', lambda client: [course])
     monkeypatch.setattr(discover, 'select_courses', lambda rows, _: rows)
     monkeypatch.setattr(materials, 'fetch_deadlines', lambda client: {})
-    monkeypatch.setattr(tui_data, 'read_course_metadata', lambda *a, **kw: {
+    monkeypatch.setattr(course_data, 'read_course_metadata', lambda *a, **kw: {
         course.course_id: SimpleNamespace(recordings_error=RuntimeError('recording API unavailable'))})
     recordings_api.sync_recording_index(settings, lambda stage: None)
     rows = campus_courses(tmp_path)['courses']

@@ -29,7 +29,6 @@ _NO_HANDBOOK = "- 未读到可用的手册正文；请打开原文件核对考�
 _NO_ASSIGNMENTS = "- 教学网目录中尚未检出作业卡片或公告待办。"
 _NO_SPOKEN = "- 尚未从录像中检出考核或作业相关的原话。"
 
-
 def spoken_sections(note_text: str) -> tuple[list[str], list[str]]:
     """``(leads, raw)`` from one note's appendix.
 
@@ -65,12 +64,10 @@ def spoken_sections(note_text: str) -> tuple[list[str], list[str]]:
             raw.append(body)
     return leads, raw
 
-
 def spoken_lines(note_text: str) -> list[str]:
     """Every timed coursework line of one note's appendix, leads first."""
     leads, raw = spoken_sections(note_text)
     return [*leads, *raw]
-
 
 def collect_spoken_lines(data_dir: Path, course_id: str) -> list[tuple[str, str, str]]:
     """``(date, kind, line)`` for every lecture note of one course."""
@@ -91,7 +88,6 @@ def collect_spoken_lines(data_dir: Path, course_id: str) -> list[tuple[str, str,
         rows.extend((date, RAW, line) for line in raw)
     return rows
 
-
 def _handbook_lines(course: dict) -> list[str]:
     lines: list[str] = []
     for item in course.get("handbook_reviews") or []:
@@ -105,7 +101,6 @@ def _handbook_lines(course: dict) -> list[str]:
         for cue in item.get("presence_preview") or []:
             lines.append(f"- {cue.get('label')} · PDF 第 {cue.get('page')} 页 · {cue.get('text')}")
     return lines
-
 
 def _assignment_lines(course: dict) -> list[str]:
     lines: list[str] = []
@@ -127,7 +122,6 @@ def _assignment_lines(course: dict) -> list[str]:
             lines.append(f"  原公告：{item['instructions']}")
     return lines
 
-
 def _spoken_lines(spoken: list[tuple[str, str, str]] | None) -> list[str]:
     """Leads first, raw excerpts under a heading of their own.
 
@@ -147,7 +141,6 @@ def _spoken_lines(spoken: list[tuple[str, str, str]] | None) -> list[str]:
         for date, _kind, line in raw:
             lines.append(f"- {f'[{date}] ' if date else ''}{line}")
     return lines
-
 
 def assessment_markdown(course: dict,
                         spoken: list[tuple[str, str, str]] | None = None) -> str:

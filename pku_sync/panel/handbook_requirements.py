@@ -13,7 +13,6 @@ from pypdf.errors import PdfReadError
 
 from .recordings_api import _safe_attachment_path
 
-
 _HANDBOOK = re.compile(r"课程手册|学生手册|教学大纲|syllabus|course\s*handbook", re.I)
 _COURSEWORK = re.compile(
     r"课程考核|平时成绩|期中成绩|期末成绩|提交内容|截止|上交|交至|"
@@ -42,7 +41,6 @@ _PRESENCE_TYPES = (
      "考试形式和参与地点以最新通知为准；笔记不能代替本人考试。"),
 )
 
-
 def _local_pdf(materials_dir: Path, item: dict, filename: str) -> Path | None:
     """Resolve a catalogued file only inside this course's material directory."""
     if Path(filename).name != filename or not filename.lower().endswith(".pdf"):
@@ -59,7 +57,6 @@ def _local_pdf(materials_dir: Path, item: dict, filename: str) -> Path | None:
         if resolved.is_relative_to(root) and resolved.is_file():
             return resolved
     return None
-
 
 def cache_handbook_pdf(materials_dir: Path, item: dict, filename: str, payload: bytes) -> bool:
     """Cache only a catalogued, bounded PDF inside this course's materials."""
@@ -88,7 +85,6 @@ def cache_handbook_pdf(materials_dir: Path, item: dict, filename: str, payload: 
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
-
 def _pdf_pages(path: Path) -> list[tuple[int, str]]:
     from pypdf import PdfReader
 
@@ -97,7 +93,6 @@ def _pdf_pages(path: Path) -> list[tuple[int, str]]:
     reader = PdfReader(str(path))
     return [(index + 1, page.extract_text() or "")
             for index, page in enumerate(reader.pages[:_MAX_PAGES])]
-
 
 def _time_preview(pages: list[tuple[int, str]]) -> list[dict]:
     """Extract original lines with time/delivery cues, not interpreted due dates."""
@@ -123,7 +118,6 @@ def _time_preview(pages: list[tuple[int, str]]) -> list[dict]:
     selected.sort(key=lambda row: (row[1], row[2]))
     return [{"page": page, "text": excerpt} for _, page, _, excerpt in selected]
 
-
 def _presence_preview(pages: list[tuple[int, str]]) -> list[dict]:
     """Keep one original source line per participation type; infer no venue."""
     found = {}
@@ -148,7 +142,6 @@ def _presence_preview(pages: list[tuple[int, str]]) -> list[dict]:
                 found[kind] = (rank, {"kind": kind, "label": label, "page": page_number,
                                       "text": line, "note": note})
     return [found[kind][1] for kind, *_ in _PRESENCE_TYPES if kind in found]
-
 
 def handbook_review_cards(materials_dir: Path, materials: list[dict]) -> list[dict]:
     """Return source-page review cards for indexed PDF handbooks.

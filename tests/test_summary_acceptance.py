@@ -35,13 +35,13 @@ def test_acceptance_cannot_be_reused_for_another_official_lecture(tmp_path):
     assert not status(current)["accepted"]
 
 
-def test_unaccepted_summary_never_enters_real_quiz_sources(tmp_path):
-    from test_panel_notes_course_matching import seed_course, NOTION_NET_TITLE
-    from pku_sync.panel.exercise_organizer import LocalNotesProvider
-    folder = seed_course(tmp_path, "course", NOTION_NET_TITLE, [{"title": "第五讲", "notes": "课堂总结"}])
-    marker = next(folder.rglob("summary-acceptance.json"))
-    marker.unlink()
-    assert LocalNotesProvider(tmp_path).for_scope(course_title=NOTION_NET_TITLE, lecture_titles=["第五讲"]) == []
+def test_unaccepted_summary_never_enters_real_quiz_sources(tmp_path, monkeypatch):
+    client = NotesClient()
+    current = published_job(tmp_path, client)
+    provider, projection, key = current_quiz_sources(current, client, monkeypatch)
+    from pku_sync.panel.quiz_contract import OrganizeBlocked
+    with pytest.raises(OrganizeBlocked, match='已验收'):
+        provider.resolve(current.recording.course_id, [key])
 
 
 class NotesClient:
@@ -106,27 +106,17 @@ def test_remote_acceptance_is_readable_on_other_device_and_invalidated_by_edit(t
 
 
 def test_production_quiz_source_rechecks_remote_acceptance_before_reusing_notes(tmp_path, monkeypatch):
-    import json
-    from contextlib import nullcontext
-    from test_panel_notes_course_matching import seed_course, NOTION_NET_TITLE
-    from pku_sync.pipeline import collect_jobs
-    from pku_sync.panel import exercise_organizer
-    from pku_sync.panel.summary_acceptance import accept_published, document_fingerprint
-    seed_course(tmp_path, "course", NOTION_NET_TITLE,
-                [{"title": "第五讲", "notes": "已审阅的课堂总结"}])
-    current = collect_jobs(tmp_path)[0]
+    from pku_sync.panel.summary_acceptance import accept_published
+    from pku_sync.panel.quiz_contract import OrganizeBlocked
     client = NotesClient()
-    provider = exercise_organizer.LocalNotesProvider(tmp_path, settings=SimpleNamespace())
-    monkeypatch.setattr(exercise_organizer, "get_client", lambda _: nullcontext(client))
-    scope = {"course_title": NOTION_NET_TITLE, "lecture_titles": ["第五讲"]}
-    assert provider.for_scope(**scope) == []  # A local-only acceptance cannot authorize production.
-    version = {"note_id": "note", "lecture_id": "lecture", "source_id": status(current)["source_id"],
-               "notes_sha256": status(current)["notes_sha256"], "remote_sha256": document_fingerprint(client, "note")}
-    (current.directory / "published-note-version.json").write_text(json.dumps(version), "utf-8")
-    accept_published(current, client=client, notes_sha256=version["notes_sha256"], confirmed=True)
-    assert len(provider.for_scope(**scope)) == 1
-    client.rows[0]["paragraph"]["rich_text"][0]["text"]["content"] = "远端已编辑"
-    assert provider.for_scope(**scope) == []
+    current = published_job(tmp_path, client)
+    provider, projection, key = current_quiz_sources(current, client, monkeypatch)
+    with pytest.raises(OrganizeBlocked): provider.resolve(current.recording.course_id, [key])
+    projection['summary_acceptance'] = accept_published(current, client=client,
+        notes_sha256=status(current)['notes_sha256'], confirmed=True)
+    assert len(provider.resolve(current.recording.course_id, [key])['notes']) == 1
+    client.rows[0]['paragraph']['rich_text'][0]['text']['content'] = 'Edited after acceptance'
+    with pytest.raises(OrganizeBlocked): provider.resolve(current.recording.course_id, [key])
 
 
 def test_edit_during_acceptance_readback_does_not_mark_local_summary_accepted(tmp_path):
@@ -165,3 +155,18 @@ def test_internal_file_access_signature_is_not_a_new_note_version():
     assert content_fingerprint(rows) == original
     rows[0]["image"]["file"]["url"] = "https://secure.notion-static.com/another/image.png?signature=new"
     assert content_fingerprint(rows) != original
+
+
+def current_quiz_sources(current, client, monkeypatch):
+    from contextlib import nullcontext
+    from pku_sync.panel import campus_quiz
+    key = status(current)['source_id']
+    projection = {'id': 'lecture', 'source_id': key, 'summary_acceptance': {}}
+    provider = campus_quiz.CampusQuizSources(SimpleNamespace(notion_token='fixture'))
+    scope = {'workspace_id': 'home', 'course_id': current.recording.course_id,
+             'course_title': 'Course', 'quiz_center_id': 'center',
+             'official': {'lessons': [{'source_id': key, 'title': 'Lecture'}]},
+             'projection': {'lectures': {'lecture': projection}}}
+    monkeypatch.setattr(provider, 'course', lambda _: scope)
+    monkeypatch.setattr(campus_quiz, 'NotionClient', lambda _: nullcontext(client))
+    return provider, projection, key

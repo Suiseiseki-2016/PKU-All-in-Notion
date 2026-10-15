@@ -163,52 +163,10 @@ def _profile_endpoint(settings) -> str | None:
     return _endpoint(configured, "/v1/profile")
 
 
-def _local_notion_home(settings) -> dict:
-    path = Path(settings.data_dir) / "notion-learning-home.json"
-    try:
-        value = json.loads(path.read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    keys = ("id", "url", "parent_id", "origin")
-    home = {key: value[key] for key in keys if isinstance(value.get(key), str)}
-    if not all(home.get(key) for key in ("id", "url", "parent_id")):
-        return {}
-    return home
 
 
-def _save_synced_notion_home(settings, home: dict) -> None:
-    path = Path(settings.data_dir) / "notion-learning-home.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        backup = path.with_name("notion-learning-home.pre-account-sync.json")
-        try:
-            backup.write_bytes(path.read_bytes())
-        except OSError:
-            pass
-    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(home, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
-def _notion_home_accessible(settings, home: dict) -> bool:
-    token = (getattr(settings, "notion_token", "") or "").strip()
-    if not token:
-        return False
-    try:
-        from .notion import NotionClient
-
-        with NotionClient(token) as client:
-            page = client.get_page(home["id"])
-    except (httpx.HTTPError, KeyError, RuntimeError, TypeError, ValueError):
-        return False
-    return bool(page.get("id")) and not bool(page.get("archived"))
 
 
 def _fetch_account_profile(settings) -> dict:
@@ -296,54 +254,7 @@ def sync_account_profile(settings) -> dict:
         if workspace_result.get("status") != "pulled":
             return {"available": True, "status": workspace_result["status"], "revision": revision}
         return {'available': True, 'status': 'pulled', 'revision': revision}
-    remote_home = profile.get("notion_home")
-    local_home = _local_notion_home(settings)
-    if not isinstance(remote_home, dict):
-        if not local_home:
-            return {"available": True, "status": "current", "revision": revision}
-        pushed = _put_account_profile(
-            settings, revision, {**profile, "notion_home": local_home}
-        )
-        return pushed
-    if remote_home == local_home:
-        return {"available": True, "status": "current", "revision": revision}
-    if not _notion_home_accessible(settings, remote_home):
-        return {
-            "available": True,
-            "status": "notion_reconnect_required",
-            "revision": revision,
-        }
-    try:
-        _save_synced_notion_home(settings, remote_home)
-    except OSError:
-        return {
-            "available": True,
-            "status": "local_write_failed",
-            "revision": revision,
-        }
-    return {"available": True, "status": "pulled", "revision": revision}
-
-
-def publish_account_profile(settings) -> dict:
-    """Publish an explicitly created or moved local Notion home."""
-    local_home = _local_notion_home(settings)
-    if not local_home:
-        return {"available": False, "status": "no_local_home"}
-    remote = _fetch_account_profile(settings)
-    if remote.get("status") != "ready":
-        return remote
-    profile = {**remote["profile"], "notion_home": local_home}
-    result = _put_account_profile(settings, remote["revision"], profile)
-    if result.get("status") != "conflict":
-        return result
-    latest = _fetch_account_profile(settings)
-    if latest.get("status") != "ready":
-        return latest
-    return _put_account_profile(
-        settings,
-        latest["revision"],
-        {**latest["profile"], "notion_home": local_home},
-    )
+    return {"available": True, "status": "current", "revision": revision}
 
 
 def activate(code: str, settings) -> dict:

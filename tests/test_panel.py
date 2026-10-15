@@ -53,86 +53,17 @@ def write_index(tmp_path) -> None:
 
 
 def client(tmp_path, runner=None) -> TestClient:
-    return TestClient(webapi.create_app(make_settings(tmp_path), runner=runner))
+    return TestClient(webapi.create_app(make_settings(tmp_path)))
 
 
-def test_index_page_renders(tmp_path):
-    write_index(tmp_path)
-    response = client(tmp_path).get("/")
-    assert response.status_code == 200
-    text = response.text
-    assert "PKU All in Notion 状态面板" in text
-    assert "跑 daily" in text
-    assert "认知心理学" in text
-    assert "第一讲 绪论" in text
-    # The student surface has code activation, course actions, and reports.
-    assert "激活云端转写" in text
-    assert "生成小测" in text
-    assert "Notion 报告" in text
-
-
-def test_status_fragment_shows_recording_ladder(tmp_path):
-    write_index(tmp_path)
-    response = client(tmp_path).get("/partials/status")
-    assert response.status_code == 200
-    assert "认知心理学" in response.text
-    assert "indexed" in response.text
-
-
-def test_status_json_shape(tmp_path):
-    write_index(tmp_path)
-    payload = client(tmp_path).get("/api/status").json()
-    assert payload["running"] is None
-    assert payload["last"] is None
-    assert payload["daily"] == {"exists": False}
-    course = payload["recordings"][0]
-    assert course["name"] == "认知心理学"
-    assert course["recordings"][0]["stage"] == "indexed"
-    assert payload["notion"] == [
-        {"kind": "晨检", "file": None, "head": ""},
-        {"kind": "批量建页", "file": None, "head": ""},
-    ]
-
-
-def test_notion_reports_read_latest(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "review_20260917.md").write_text("9月17日晨检", "utf-8")
-    (logs / "review_20260918.md").write_text("9月18日晨检：登记 2 条新任务", "utf-8")
-    (logs / "lecture_20260918.md").write_text("批量建页：补建 3 个讲次页", "utf-8")
-    reports = webapi.notion_reports(logs)
-    assert reports[0]["kind"] == "晨检"
-    assert reports[0]["file"] == "review_20260918.md"
-    assert "登记 2 条新任务" in reports[0]["head"]
-    assert reports[1]["kind"] == "批量建页"
-    assert reports[1]["file"] == "lecture_20260918.md"
-
-
-def test_daily_log_marker_is_parsed(tmp_path):
-    (tmp_path / "logs").mkdir(parents=True)
-    (tmp_path / "logs" / "latest.daily.log").write_text(
-        "=== pku-sync daily started 20260917_060000 ===\nsome output\n=== EXIT_CODE=3 ===\n",
-        "utf-8",
-    )
-    parsed = webapi.latest_daily(tmp_path / "logs")
-    assert parsed["exists"] is True
-    assert parsed["exit_code"] == 3
-    assert "some output" in parsed["tail"]
-
-
-def test_action_submits_to_runner(tmp_path):
-    runner = FakeRunner()
-    response = client(tmp_path, runner=runner).post("/actions/daily")
-    assert response.status_code == 200
-    assert response.json() == {"started": "daily"}
-    assert runner.submitted == ["daily"]
-
-
-def test_action_rejected_while_busy(tmp_path):
-    runner = FakeRunner(running=True)
-    response = client(tmp_path, runner=runner).post("/actions/automate")
-    assert response.status_code == 409
-    assert runner.submitted == ["automate"]
+def test_index_redirects_to_current_student_workspace(tmp_path):
+    response = client(tmp_path).get("/", follow_redirects=False)
+    assert response.status_code == 307 and response.headers["location"] == "/app"
+    assert client(tmp_path).get("/app").status_code == 200
+    for retired in ("/api/status", "/partials/status", "/recordings"):
+        assert client(tmp_path).get(retired).status_code == 404
+    assert client(tmp_path).post("/actions/daily").status_code == 404
+    assert client(tmp_path).post("/actions/automate").status_code == 404
 
 
 def test_unknown_action_is_404(tmp_path):
@@ -144,47 +75,3 @@ def test_healthz(tmp_path):
     response = client(tmp_path).get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-
-
-def test_runner_is_single_flight_and_records_results():
-    started = threading.Event()
-    release = threading.Event()
-
-    def fake_run(kind: str) -> int:
-        started.set()
-        assert release.wait(timeout=5)
-        return 0
-
-    runner = jobs_mod.JobRunner(fake_run)
-    first = runner.submit("daily")
-    assert first is not None and first.state == "running"
-    assert started.wait(timeout=5)
-    assert runner.submit("automate") is None  # busy → rejected
-    release.set()
-
-    for _ in range(200):
-        if runner.last() is not None:
-            break
-        time.sleep(0.02)
-    last = runner.last()
-    assert last is not None
-    assert (last.kind, last.state, last.exit_code) == ("daily", "done", 0)
-    assert runner.current() is None
-    # free again after completion
-    assert runner.submit("daily") is not None
-
-
-def test_runner_records_pipeline_crashes():
-    def broken_run(kind: str) -> int:
-        raise ValueError("whisper exploded")
-
-    runner = jobs_mod.JobRunner(broken_run)
-    assert runner.submit("daily") is not None
-    for _ in range(200):
-        if runner.last() is not None:
-            break
-        time.sleep(0.02)
-    last = runner.last()
-    assert last.state == "failed"
-    assert last.exit_code == 1
-    assert "whisper exploded" in last.error

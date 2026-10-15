@@ -45,7 +45,7 @@ def test_account_controls_survive_refresh_with_unfinished_quizzes_hidden():
                 s.campus.course={id:'course',title:'课程',lessons:[],unassigned_materials:[],all_materials:[],
                     assignments:[],announcements:[],announcement_tasks:[]};
                 s.view='campus-course';s.campus.section='quizzes';s.campus.courseId='course';
-                s.campusQuiz.ready=true; window.__layout.render();
+                window.__layout.render();
             }''')
             account = page.locator('.sidebar [data-persistent-disclosure="desktop-account"]')
             assert not account.evaluate('el => el.open')
@@ -173,12 +173,8 @@ def test_portal_first_layout_and_account_settings():
             assert page.get_by_role("heading", name="我的课程").is_visible()
             assert page.locator('[data-action="open-course"]').count() == 0
             assert "旧缓存课程" not in page.locator(".main").inner_text()
-            page.locator('.sidebar-more > summary').click()
-            page.locator('.sidebar [data-action="open-library"]').click()
-            assert page.get_by_role("heading", name="旧学习资料").is_visible()
-            assert "旧缓存课程" in page.locator(".main").inner_text()
-            page.locator('.sidebar [data-action="open-dashboard"]').click()
-            assert page.locator('[data-action="open-course"]').count() == 0
+            assert page.locator('[data-action="open-library"]').count() == 0
+            assert page.locator('.sidebar-more').count() == 0
             page.evaluate("""() => {
                 const s = window.__layout.state;
                 s.activated = true; s.quota = {active:true};
@@ -231,21 +227,8 @@ def test_portal_first_layout_and_account_settings():
             assert page.locator('[data-center="quizzes"]').count() == 0
             assert page.locator(".campus-settings").count() == 0
             assert writes == []
-            page.evaluate("""() => {
-                const s = window.__layout.state;
-                s.campus.home = {id:'old-home',parent_id:'parent',url:'https://www.notion.so/old-home'};
-                s.campus.parentId = 'parent'; window.__layout.render();
-            }""")
-            page.locator('.sidebar [data-action="campus-account-settings"]').click()
-            assert page.get_by_role('heading', name='连接设置', exact=True).is_visible()
-            page.locator('.home-setup-advanced > summary').click()
-            page.get_by_role("button", name="创建附加新版主页").click()
-            playwright.expect(page.get_by_role("button", name="打开主页", exact=True)).to_have_attribute(
-                "data-url", "https://www.notion.so/new-home")
-            assert page.evaluate("window.__layout.state.campus.home.id") == "new-home"
-            assert page.evaluate("window.__layout.state.campus.legacyHome.id") == "old-home"
-            assert page.get_by_role("button", name="打开旧主页（回滚）").get_attribute("data-url") == "https://www.notion.so/old-home"
-            assert writes == ["http://panel.test/api/campus/notion/workspace"]
+            assert page.get_by_role('button', name='打开旧主页（回滚）').count() == 0
+            assert page.get_by_role('button', name='创建附加新版主页').count() == 0
             assert generated == graded == reviewed == history_reviewed == []
             page.evaluate("window.__layout.state.view='campus-course'; window.__layout.render()")
             page.evaluate("""() => {

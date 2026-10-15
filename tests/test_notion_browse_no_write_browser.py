@@ -18,8 +18,8 @@ def test_reading_connected_notion_parents_does_not_start_directory_write():
             writes.append(route.request.url)
         if route.request.url.endswith('/api/campus/notion/parents'):
             value = {'pages': [{'id': 'parent', 'title': 'test'}],
-                     'home': {'id': 'home', 'parent_id': 'parent'},
-                     'workspace': {'id': 'home', 'active': True}}
+                     'home': {'schema': 2, 'active': True, 'id': 'home', 'parent_id': 'parent'},
+                     'workspace': {'schema': 2, 'id': 'home', 'active': True}}
         else:
             value = {'state': 'done'}
         route.fulfill(body=json.dumps(value), content_type='application/json')

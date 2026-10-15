@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pku_sync.panel.exercise_grader import GradeTarget, _grading_prompt
+from pku_sync.panel.quiz_grading_core import GradeTarget, _grading_prompt
 from pku_sync.panel.student_ui import PANEL_COPY
 
 
@@ -31,10 +31,6 @@ def _target() -> GradeTarget:
     )
 
 
-def test_loader_uses_the_approved_explanation_copy():
-    assert PANEL_COPY["directory"]["exercises"]["grading"]["explanation"] == (
-        "后端正在读取 Notion 中的答案，按需调用 AI 评分并写回解析。请稍候。"
-    )
 
 
 def test_production_answer_scan_reports_a_blank_middle_question():
@@ -61,17 +57,3 @@ def test_e2e_answer_scan_treats_number_only_items_as_unanswered():
     ]
     _, unanswered = _grading_prompt(_target(), blocks)
     assert unanswered == ["第 2 题"]
-
-
-def test_completed_grade_applies_the_server_settlement_to_client_balance():
-    script = APP_JS.read_text(encoding="utf-8")
-    assert "state.quota.llm_points_remaining = next.body.points_remaining" in script
-
-
-def test_active_grading_stays_inside_the_selected_course():
-    script = APP_JS.read_text(encoding="utf-8")
-    start = script.index("function courseExercisesScreen()")
-    end = script.index("\n  }", start)
-    screen = script[start:end]
-    assert "organizeCard() + gradingCard() + contents" in screen
-    assert 'if (state.grading.status !== "idle") screen = gradingScreen();' not in script

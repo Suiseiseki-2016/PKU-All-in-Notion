@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..notion import NotionClient, markdown_to_blocks
 from .campus_catalog import campus_course
-from .exercise_organizer import OrganizeBlocked, _parse_quiz
+from .quiz_contract import OrganizeBlocked, _parse_quiz
 from .notion_home import _document_signature, _title
 from .notion_workspace import _save, read_projection
 from .summary_acceptance import _content_rows, content_fingerprint, published_status, canonical_content_rows
@@ -21,16 +21,13 @@ _MARKER = "PKU 课程小测身份 · "
 _COMPLETE = "PKU 小测生成验证 · "
 _MAX_SOURCE_BYTES = 90000
 
-
 def _hash(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-
 
 def _literal_block(kind, text):
     return {'object': 'block', 'type': kind, kind: {'rich_text': [
         {'type': 'text', 'text': {'content': text[offset:offset + 1800]}}
         for offset in range(0, len(text), 1800)]}}
-
 
 def _student_blocks(questions):
     rows = [_literal_block('heading_2', '练习题')]
@@ -41,11 +38,9 @@ def _student_blocks(questions):
                      _literal_block('paragraph', '答案：')])
     return rows
 
-
 def _source_refs(notes):
     return [{field: note[field] for field in ('source_id', 'note_id', 'remote_sha256')}
             for note in notes]
-
 
 @contextmanager
 def _journal_lock(path):
@@ -64,7 +59,6 @@ def _journal_lock(path):
     finally:
         connection.close()
 
-
 def _identity(block):
     if block.get("type") != "paragraph":
         return {}
@@ -77,7 +71,6 @@ def _identity(block):
     except ValueError:
         return {}
     return value if isinstance(value, dict) and value.get("schema") == 1 else {}
-
 
 class CampusQuizSources:
     def __init__(self, settings):
@@ -139,7 +132,6 @@ class CampusQuizSources:
                               "note_id": accepted["note_id"], "remote_sha256": remote["remote_sha256"],
                               "blocks": canonical_content_rows(rows)})
         return {key: value for key, value in scope.items() if key not in {"official", "projection"}} | {"notes": notes}
-
 
 class CampusQuizService:
     def __init__(self, settings, relay, *, sources=None, client_factory=None):

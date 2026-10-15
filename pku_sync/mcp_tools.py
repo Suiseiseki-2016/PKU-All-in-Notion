@@ -14,7 +14,7 @@ from typing import Literal
 
 from .pipeline import collect_jobs, recording_stage
 
-TextSection = Literal["all", "assignments", "announcements", "materials", "recordings", "logs"]
+TextSection = Literal["all", "assignments", "announcements", "materials", "recordings"]
 _TEXT_SUFFIXES = {".json", ".log", ".md", ".txt"}
 _MAX_READ_CHARS = 200_000
 
@@ -64,7 +64,7 @@ class LocalCourseTools:
         for pattern in patterns:
             effective = (
                 pattern
-                if course_folder or pattern.startswith("logs/")
+                if course_folder
                 else f"*/{pattern}"
             )
             for path in base.glob(effective):
@@ -114,24 +114,6 @@ class LocalCourseTools:
             )
         return rows
 
-    def daily_status(self, max_chars: int = 30_000) -> dict:
-        logs = self.data_dir / "logs"
-        latest = logs / "latest.daily.log"
-        summaries = sorted(logs.glob("summary_*.md"), key=lambda p: p.stat().st_mtime)
-        result: dict[str, object] = {
-            "latest_log": None,
-            "latest_summary": None,
-        }
-        if latest.exists():
-            result["latest_log"] = self.read_text(
-                latest.relative_to(self.data_dir).as_posix(), max_chars
-            )
-        if summaries:
-            result["latest_summary"] = self.read_text(
-                summaries[-1].relative_to(self.data_dir).as_posix(), max_chars
-            )
-        return result
-
     def _course_dir(self, course_folder: str) -> Path:
         if not course_folder or "/" in course_folder or "\\" in course_folder:
             raise ValueError("course_folder must be one direct child directory name")
@@ -163,7 +145,6 @@ def _section_patterns(section: TextSection) -> tuple[str, ...]:
             "recordings/*/transcript.json",
             "recordings/*/notes.md",
         ),
-        "logs": ("logs/latest.daily.log", "logs/summary_*.md"),
     }
     if section == "all":
         return tuple(pattern for values in patterns.values() for pattern in values)

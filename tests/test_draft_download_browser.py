@@ -72,8 +72,8 @@ def test_account_settings_reads_current_workspace_after_directory_update(panel):
     assert panel.evaluate('pendingChecks[0].url') == '/api/campus/notion/parents'
     panel.evaluate('''() => pendingChecks[0].resolve(new Response(JSON.stringify({
         pages: [{id:'a'.repeat(32),title:'E2E parent'}],
-        home: {id:'b'.repeat(32),parent_id:'a'.repeat(32),url:'https://www.notion.so/'+'b'.repeat(32)},
-        workspace: {id:'b'.repeat(32),parent_id:'a'.repeat(32),active:true,url:'https://www.notion.so/'+'b'.repeat(32)},
+        home: {schema:2,active:true,id:'b'.repeat(32),parent_id:'a'.repeat(32),url:'https://www.notion.so/'+'b'.repeat(32)},
+        workspace: {schema:2,id:'b'.repeat(32),parent_id:'a'.repeat(32),active:true,url:'https://www.notion.so/'+'b'.repeat(32)},
         legacy_home: {id:'c'.repeat(32),url:'https://www.notion.so/'+'c'.repeat(32)}
     }), {status:200,headers:{'Content-Type':'application/json'}}))''')
     link = panel.locator('.home-setup-ready [data-action="campus-open-home"]')

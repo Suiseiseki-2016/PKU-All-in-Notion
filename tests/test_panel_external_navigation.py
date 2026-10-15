@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from pku_sync.panel.connection import build_fake_connection_service
 from pku_sync.panel.external_navigation import is_notion_url
-from pku_sync.panel.fake_directory import build_fake_directory
+
 from pku_sync.panel.platform_bridge import FakePlatformBridge
 from pku_sync.panel.webapi import create_app
 
@@ -24,15 +24,8 @@ class _NoopRunner:
 
 
 def make_client(opener):
-    directory = build_fake_directory()
-    return TestClient(create_app(
-        settings=SimpleNamespace(data_dir="data", platform_token=""),
-        runner=_NoopRunner(),
-        directory_service=directory,
-        connection_service=build_fake_connection_service(directory_service=directory),
-        platform_service=FakePlatformBridge(activated=True),
-        notion_opener=opener,
-    ))
+    directory = None
+    return TestClient(create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=build_fake_connection_service(directory_service=directory), platform_service=FakePlatformBridge(activated=True), notion_opener=opener))
 
 
 def test_notions_only_are_opened_in_system_browser():

@@ -23,7 +23,7 @@ def configuration(root, token="fixture-account"):
 
 @pytest.mark.parametrize('outcome', ['done', 'failed'])
 def test_next_task_waits_for_terminal_workers_reservation_cleanup(tmp_path, monkeypatch, outcome):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), None)
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     terminal = threading.Event()
     release = threading.Event()
     threads = []
@@ -69,7 +69,7 @@ def test_next_task_waits_for_terminal_workers_reservation_cleanup(tmp_path, monk
 
 
 def test_delayed_start_response_keeps_its_task_identity_after_next_task_starts(tmp_path, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), None)
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     observed = {}
     calls = []
 
@@ -195,7 +195,7 @@ def test_unknown_selected_course_fails_before_observation_or_ledger_mutation(tmp
 
 
 def synchronous_manager(settings, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(settings, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(settings)
     monkeypatch.setattr(recordings_api.threading, "Thread", lambda target, args, daemon:
                         SimpleNamespace(start=lambda: target(*args)))
     return manager
@@ -249,7 +249,7 @@ def test_selected_unconfirmed_cannot_succeed_using_other_confirmed_course(tmp_pa
 
 
 def test_sync_route_accepts_selected_json_and_preserves_no_body_full_refresh(monkeypatch, tmp_path):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     calls = []
     monkeypatch.setattr(manager, "start_sync", lambda course_id="": calls.append(course_id) or {"state": "running"})
     monkeypatch.setattr(manager, "start_background_sync", lambda resume=False: calls.append("") or {"state": "running", "scope": "background"})
@@ -272,29 +272,8 @@ def test_new_workspace_receives_exact_course_scope(tmp_path, monkeypatch):
     assert calls == [{"course_id": "selected"}]
 
 
-def test_legacy_workspace_only_acquires_selected_authority_and_retains_global_dashboard(tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(notion_workspace, "saved_workspace", lambda root: {})
-    @contextmanager
-    def authority(root, settings, course_ids=None, **kwargs):
-        calls.append(("authority", course_ids, kwargs))
-        yield frozenset(course_ids)
-    monkeypatch.setattr(notion_home, "_catalog_authority", authority)
-    monkeypatch.setattr(notion_home, "_sync_catalog_projection", lambda *args, **kwargs:
-                        calls.append(("projection", kwargs)) or {})
-    notion_home.sync_catalog(tmp_path, "fixture", settings=configuration(tmp_path), course_id="selected")
-    assert calls == [("authority", ["selected"], {"tracked_mutations": True}),
-                     ("projection", {"course_ids": frozenset({"selected"}), "update_dashboard": False})]
 
 
-def test_legacy_selected_missing_local_course_cannot_return_empty_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(notion_home, "saved_home", lambda root: {"id": "fixture"})
-    monkeypatch.setattr(notion_home, "campus_courses", lambda root: {"courses": []})
-    monkeypatch.setattr(notion_home, "NotionClient", lambda token:
-                        pytest.fail("Missing selected course must fail before Notion access"))
-    with pytest.raises(ValueError, match="课程"):
-        notion_home._sync_catalog_projection(tmp_path, "fixture", course_ids={"selected"},
-                                             update_dashboard=False)
 
 
 def test_cancel_at_selected_notion_stage_prevents_summary_and_preserves_read_state(tmp_path, monkeypatch):
@@ -341,7 +320,7 @@ def test_selected_material_failure_keeps_its_previous_files_and_other_course_usa
 
 
 def test_empty_sync_route_dispatches_background_without_foreground_full_refresh(tmp_path, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     calls = []
     monkeypatch.setattr(manager, "start_sync", lambda course_id="": calls.append("legacy-full") or {"state": "running"})
     monkeypatch.setattr(manager, "start_background_sync", lambda resume=False: calls.append("background") or {"state": "running", "scope": "background"}, raising=False)
@@ -366,7 +345,7 @@ def wait_background(manager):
 
 
 def test_background_course_results_are_independent_and_resume_omits_done(tmp_path, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["selected", "other"])
     calls = []
     def course(identifier):
@@ -393,7 +372,7 @@ def test_background_course_results_are_independent_and_resume_omits_done(tmp_pat
 
 def test_background_cancellation_preserves_done_and_stops_unstarted_course(tmp_path, monkeypatch):
     import threading
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["selected", "other"])
     entered, release = threading.Event(), threading.Event()
     calls = []
@@ -418,7 +397,7 @@ def test_background_cancellation_preserves_done_and_stops_unstarted_course(tmp_p
 
 def test_shared_course_reservation_rejects_conflict_but_allows_another_course(tmp_path, monkeypatch):
     import threading
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     sibling = manager._background_worker()
     entered, release = threading.Event(), threading.Event()
     def run():
@@ -437,7 +416,7 @@ def test_shared_course_reservation_rejects_conflict_but_allows_another_course(tm
 
 
 def test_background_manual_retry_is_bounded_and_unknown_write_is_never_replayed(tmp_path, monkeypatch):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["selected"])
     calls = []
     monkeypatch.setattr(manager, "_run_background_course", lambda cid: calls.append(cid) or {"state": "failed", "error": "service refused"})
@@ -460,7 +439,7 @@ def test_background_manual_retry_is_bounded_and_unknown_write_is_never_replayed(
 
 def test_background_account_change_stops_remaining_and_keeps_old_state_namespace(tmp_path, monkeypatch):
     settings = configuration(tmp_path)
-    manager = recordings_api.RecordingWorkManager(settings, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(settings)
     monkeypatch.setattr(manager, "_background_course_ids", lambda stage: ["selected", "other"])
     original_path = manager._background_path()
     calls = []
@@ -484,12 +463,12 @@ def test_background_account_change_stops_remaining_and_keeps_old_state_namespace
 
 def test_disk_background_progress_is_read_only_and_resume_revalidates_courses(tmp_path, monkeypatch):
     settings = configuration(tmp_path)
-    original = recordings_api.RecordingWorkManager(settings, SimpleNamespace())
+    original = recordings_api.RecordingWorkManager(settings)
     monkeypatch.setattr(original, "_background_course_ids", lambda stage: ["selected"])
     monkeypatch.setattr(original, "_run_background_course", lambda cid: {"state": "done", "catalog_updated": 1, "notion_synced": True})
     original.start_background_sync()
     assert wait_background(original)["state"] == "done"
-    restored = recordings_api.RecordingWorkManager(settings, SimpleNamespace())
+    restored = recordings_api.RecordingWorkManager(settings)
     cached = restored.state()["background_sync"]
     assert cached["state"] == "interrupted"
     assert cached["course_results"][0]["metadata_state"] == "not_read"
@@ -498,7 +477,7 @@ def test_disk_background_progress_is_read_only_and_resume_revalidates_courses(tm
     restored.start_background_sync(resume=True)
     assert wait_background(restored)["state"] == "partial"
     assert calls == ["selected"]
-    switched = recordings_api.RecordingWorkManager(configuration(tmp_path, "another-account"), SimpleNamespace())
+    switched = recordings_api.RecordingWorkManager(configuration(tmp_path, 'another-account'))
     assert switched.state() == {"state": "idle"}
 
 
@@ -517,7 +496,7 @@ def test_concurrent_course_folder_collision_refuses_without_student_mutation(tmp
 
 def test_projection_wait_cancels_without_entering_writer(tmp_path):
     import threading
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     manager._writes.projection.acquire()
     manager._cancel_sync.set()
     with pytest.raises(ValueError):
@@ -528,7 +507,7 @@ def test_projection_wait_cancels_without_entering_writer(tmp_path):
 
 
 def test_projection_cancellation_before_free_lock_never_enters_writer(tmp_path):
-    manager = recordings_api.RecordingWorkManager(configuration(tmp_path), SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configuration(tmp_path))
     manager._cancel_sync.set()
     with pytest.raises(ValueError):
         with manager._projection_stage():

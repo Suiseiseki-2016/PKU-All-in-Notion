@@ -1,9 +1,11 @@
-﻿"""Write-back semantics for the metered exercise grader."""
+"""Write-back semantics for the metered exercise grader."""
 from __future__ import annotations
+from tests.grading_support import GradeRecords
+from tests.grading_support import FakeGradingPageAdapter
 
 import json
 
-from pku_sync.panel.exercise_grader import _parse_grade_results
+from pku_sync.panel.quiz_grading_core import _parse_grade_results
 
 
 def test_mixed_grade_parser_covers_all_types_and_partial_credit():
@@ -22,13 +24,12 @@ def test_mixed_grade_parser_covers_all_types_and_partial_credit():
 from dataclasses import dataclass
 from pathlib import Path
 
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     ExerciseGrader,
-    FakeGradingPageAdapter,
     _parse_grade_results,
 )
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
+
+from grading_workspace import EXERCISE_GENERATED
 
 
 @dataclass
@@ -60,7 +61,7 @@ class _WritebackRelay:
 def test_marker_rerun_is_free_reuses_url_and_dedups_wrong_answers():
     relay = _WritebackRelay()
     adapter = FakeGradingPageAdapter()
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     grader = ExerciseGrader(directory_service=directory, relay=relay, page_adapter=adapter, clock=lambda: "2025-01-01T12:00:00+08:00")
     first = grader.grade(grader.prepare(EXERCISE_GENERATED))
@@ -77,7 +78,7 @@ def test_marker_rerun_is_free_reuses_url_and_dedups_wrong_answers():
 
 
 def test_answer_writeback_never_uses_replace_page_content():
-    source = Path(__file__).parents[1].joinpath("pku_sync", "panel", "exercise_grader.py").read_text(encoding="utf-8-sig")
+    source = Path(__file__).parents[1].joinpath("pku_sync", "panel", "quiz_grading_core.py").read_text(encoding="utf-8-sig")
     assert "replace_page_content" not in source
     assert "update_result" in source
 

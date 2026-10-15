@@ -23,11 +23,7 @@ class _NoopRunner:
 
 def make_client(platform: FakePlatformBridge) -> TestClient:
     return TestClient(
-        create_app(
-            settings=SimpleNamespace(data_dir="data", platform_token=""),
-            runner=_NoopRunner(),
-            platform_service=platform,
-        )
+        create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), platform_service=platform)
     )
 
 

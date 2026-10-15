@@ -131,37 +131,3 @@ def test_spoken_lines_reads_only_the_timed_appendix():
 
 def test_spoken_lines_is_empty_without_an_appendix():
     assert spoken_lines("# 课程\n\n## 课堂内容\n\n- [12:00] 只讲了一个概念\n") == []
-
-
-def test_assessment_page_is_created_and_rebuilt_from_its_sources(tmp_path, monkeypatch):
-    monkeypatch.setattr(assessment_page, "collect_spoken_lines",
-                        lambda *_args: [("2026-09-17", LEAD, "[58:41] 就是四六吧")])
-    client = FakeNotion()
-    state: dict = {}
-    notion_home._sync_assessment_page(client, tmp_path, "course-1", "course-page",
-                                      _course(), state)
-    assert [title for _parent, title in client.created] == [notion_home.ASSESSMENT_TITLE]
-    page_id = client.created[0][1]
-    page = client.pages["course-page"][0]
-    first = client.blocks[page["id"]][0]
-    body = "".join(part.get("plain_text") or part.get("text", {}).get("content", "")
-                   for part in first[first["type"]]["rich_text"])
-    assert body.startswith("本页把考核与作业要求集中列出")
-    assert state["course-1|考核评测"]
-
-    # A second run with unchanged sources writes nothing.
-    before = list(client.blocks[page["id"]])
-    notion_home._sync_assessment_page(client, tmp_path, "course-1", "course-page",
-                                      _course(), state)
-    assert client.blocks[page["id"]] == before
-    assert client.replaced == []
-
-
-def test_assessment_page_refuses_to_overwrite_a_hand_edited_page(tmp_path, monkeypatch):
-    monkeypatch.setattr(assessment_page, "collect_spoken_lines", lambda *_args: [])
-    client = FakeNotion()
-    page = client.create_page("course-page", notion_home.ASSESSMENT_TITLE)
-    client.blocks[page["id"]] = markdown_to_blocks("这是我自己写的考核笔记。")
-    with pytest.raises(ValueError, match="手动内容"):
-        notion_home._sync_assessment_page(client, tmp_path, "course-1", "course-page",
-                                          _course(), {})
