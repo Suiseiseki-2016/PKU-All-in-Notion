@@ -253,8 +253,16 @@ class AccountFaultBoundary:
                                        content=body, headers=headers)
                     except httpx.TransportError as exc:
                         proof['error_chain'] = self._error_chain(exc)
-                        proof['failure_observed'] = any(row['errno'] in {10061, 111, errno.ECONNREFUSED}
+                        refused = any(row['errno'] in {10061, 111, errno.ECONNREFUSED}
                             or row['winerror'] == 10061 for row in proof['error_chain'])
+                        # Darwin may drop SYNs to the owned bound/non-listening
+                        # port. Require an actual connect-stage timeout chain;
+                        # read timeouts and generic transport errors do not qualify.
+                        timed_out = isinstance(exc, httpx.ConnectTimeout) and any(
+                            row['type'] == 'TimeoutError' for row in proof['error_chain'])
+                        proof['failure_observed'] = refused or timed_out
+                        if proof['failure_observed']:
+                            proof['connection_failure'] = 'refused' if refused else 'connect-timeout'
             if not proof['failure_observed']:
                 raise ResourceBlocked('proxy_failure_not_observed')
             proof['mechanism'] = 'original-request-through-owned-nonlistening-proxy'

@@ -68,7 +68,7 @@ def test_network_scope_is_exact_and_does_not_expire_login_or_mutate_other_course
         boundary.close()
 
 
-def test_actual_owned_nonlistening_proxy_has_system_refusal():
+def test_actual_owned_nonlistening_proxy_has_real_connection_failure():
     boundary = AccountFaultBoundary(SimpleNamespace(config={}, actions=[], network=[]))
     observed = []
     error_chain = boundary._error_chain
@@ -83,7 +83,11 @@ def test_actual_owned_nonlistening_proxy_has_system_refusal():
         except ResourceBlocked:
             pytest.fail('Actual proxy exception types and OS codes: ' + repr(observed))
         assert proof['failure_observed'] is True
-        assert any(row['errno'] in {10061, 111, errno.ECONNREFUSED} or row['winerror'] == 10061 for row in proof['error_chain'])
+        refused = any(row['errno'] in {10061, 111, errno.ECONNREFUSED} or row['winerror'] == 10061 for row in proof['error_chain'])
+        timed_out = proof['error_chain'][0]['type'] == 'ConnectTimeout' and any(
+            row['type'] == 'TimeoutError' for row in proof['error_chain'])
+        assert refused or timed_out
+        assert proof['connection_failure'] == ('refused' if refused else 'connect-timeout')
     finally:
         boundary.close()
 
@@ -104,6 +108,30 @@ def test_proxy_requires_platform_connection_refusal(monkeypatch, native_errno, o
         if passed:
             proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
             assert proof['failure_observed'] is True
+        else:
+            with pytest.raises(ResourceBlocked, match='proxy_failure_not_observed'):
+                boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
+    finally:
+        boundary.close()
+
+
+@pytest.mark.parametrize('kind,cause,passed', [
+    (httpx.ConnectTimeout, TimeoutError, True),
+    (httpx.ReadTimeout, TimeoutError, False),
+    (httpx.ConnectTimeout, ValueError, False),
+    (httpx.ConnectError, TimeoutError, False),
+])
+def test_owned_proxy_accepts_only_causal_connect_timeout(monkeypatch, kind, cause, passed):
+    from product_e2e import fault_boundary
+    class Upstream:
+        def request(self, *args, **kwargs):
+            raise kind('developer transport fixture') from cause('developer causal fixture')
+    monkeypatch.setattr(fault_boundary.httpx, 'Client', lambda **kwargs: nullcontext(Upstream()))
+    boundary = AccountFaultBoundary(SimpleNamespace(config={}, actions=[], network=[]))
+    try:
+        if passed:
+            proof = boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
+            assert proof['failure_observed'] is True and proof['connection_failure'] == 'connect-timeout'
         else:
             with pytest.raises(ResourceBlocked, match='proxy_failure_not_observed'):
                 boundary._network_failure('proxy', 'GET', '/v1/catalog/_123_1', None, {})
