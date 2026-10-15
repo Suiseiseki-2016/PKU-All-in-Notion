@@ -17,8 +17,9 @@ GROUPS = {"JOURNEY": 6, "XPLAT": 1}
 EXPECTED_IDS = {f"{group}-{number:02}" for group, count in GROUPS.items()
                 for number in range(1, count + 1)}
 # Coverage changes require explicit review and an update to this fingerprint.
+# 2026-10-15: user-approved hidden quiz UI replaces its retired visible flows.
 # Hash the normalized contract instead of duplicating every assertion here.
-COVERAGE_FINGERPRINT = "606a12632d3aeae7eb466e3250e13eccb03e372d2b577721442d44fcb8b83291"
+COVERAGE_FINGERPRINT = "4d82d2f280755edf7262030beb4286a2cc1112fd57bff5344936914afa2a4939"
 EXCLUDED = {".git", ".venv", "node_modules", "target", "dist", "artifacts", "data",
             "__pycache__", ".pytest_cache", ".ruff_cache"}
 GENERATED_TREES = {"desktop/src-tauri/resources", "desktop/src-tauri/binaries"}
@@ -29,7 +30,7 @@ FAULT_VARIANTS = {
     "JOURNEY-02": ["zero-null", "missing-revision", "bool-revision", "string-revision", "negative-revision", "zero-nonempty", "positive-null", "partial-snapshot", "wrong-course", "login-html", "profile-ok-catalog-fails", "legacy-extra-course"],
     "JOURNEY-03": ["create-lost-response", "append-lost-response", "readback-fails", "permission-archive-move", "expired-media-url", "restart-after-charge"],
     "JOURNEY-04": ["double-click", "lost-post-response", "two-devices", "changed-file", "changed-target", "changed-deadline", "restart-pending-submission"],
-    "JOURNEY-05": ["two-devices-generate", "two-devices-grade", "lost-enqueue-response", "lost-notion-response", "restart-after-charge", "changed-frozen-input"],
+    "JOURNEY-05": ["kill-process-and-restart"],
     "JOURNEY-06": ["offline", "dns", "proxy", "timeout", "network-restored", "403", "409", "429", "5xx", "low-balance", "disk-full", "malformed-json", "permit-acquire-lost-response", "permit-release-lost-response", "kill-process-and-restart"],
     "XPLAT-01": ["fresh-mac", "legacy-mac-extra-course", "oauth-reconnect", "restart"],
 }

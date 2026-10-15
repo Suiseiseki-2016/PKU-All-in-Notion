@@ -278,5 +278,6 @@ def expired_session(run, ui, email):
     return active, ok
 
 
-def natural_errors_complete(observed):
-    return all(observed.get(key) is True for key in ('wrong-password', 'unverified', 'expired-session'))
+def natural_errors_complete(observed, *, include_unverified=True):
+    required = ('wrong-password', 'expired-session') + (('unverified',) if include_unverified else ())
+    return all(observed.get(key) is True for key in required)

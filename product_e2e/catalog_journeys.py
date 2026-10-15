@@ -42,7 +42,7 @@ def _action(ui, name, suffix=""):
     elif name == 'revoke-notion' and not ui.visible('.sidebar [data-action="revoke-notion"]'):
         ui.click('.sidebar [data-persistent-disclosure="desktop-connection"] > summary')
         ui.wait(lambda: ui.visible('.sidebar [data-action="revoke-notion"]'))
-    scope = '.sidebar ' if name in {'open-dashboard', 'logout', 'connect-notion',
+    scope = '.sidebar ' if name in {'open-dashboard', 'open-welcome', 'logout', 'connect-notion',
                                    'redeem', 'resend-verification', 'refresh-verification',
                                    'campus-account-settings', 'revoke-notion'} else ''
     ui.click(scope + '[data-action="' + name + '"]' + suffix)
@@ -614,8 +614,11 @@ def _ledger(run):
 
 
 def _layout_probe(run, ui, course_id):
+    _action(ui, 'open-welcome')
+    ui.wait(lambda: ui.visible('#welcome-heading'))
+    welcome = ui.text('#welcome-heading')
+    ui.click('[data-action="welcome-skip"]')
     _action(ui, 'open-dashboard')
-    welcome = ui.text('.main')
     dashboard = ui.visible('[data-action="open-campus-course"][data-course="' + course_id + '"]')
     _open(ui, course_id)
     if ui.page is None:
@@ -658,14 +661,14 @@ def _layout_probe(run, ui, course_id):
             reached.add(focus['href'][1:])
         if set(geometry['centers']) <= reached:
             break
-    _action(ui, 'campus-open-center', '[data-center="quizzes"]')
+    _action(ui, 'campus-open-center', '[data-center="notices"]')
     ui.page.mouse.wheel(0, 5000)
     run.actions.append({'instance': ui.name, 'operation': 'native-wheel', 'delta_y': 5000})
     last = ui.page.evaluate('''() => {
-      const node=document.querySelector('#course-quizzes'), r=node.getBoundingClientRect();
+      const node=document.querySelector('#course-notices'), r=node.getBoundingClientRect();
       return r.top<innerHeight && r.bottom>0;
     }''')
-    metrics = {**geometry, 'welcome': '欢迎使用' in welcome and dashboard,
+    metrics = {**geometry, 'welcome': bool(welcome.strip()) and dashboard,
                'keyboard_reachable': set(geometry['centers']) <= reached,
                'scroll_reachable': last}
     return _aggregate_dpi(run, ui, metrics, supported)
@@ -679,7 +682,7 @@ def _dpi_ok(value):
         and value.get('welcome') is True and value.get('sidebar_left') is True \
         and value.get('keyboard_reachable') is True and value.get('scroll_reachable') is True \
         and value.get('horizontal_overflow') is False and value.get('centers') == [
-            'course-assignments', 'course-notices', 'course-quizzes', 'course-materials']
+            'course-assignments', 'course-notices', 'course-materials']
 
 
 def matches_os_dpi_identity(metrics, pid):
@@ -992,6 +995,11 @@ def run_identity(run):
     from .identity_live import (wrong_password, unverified_identity, expired_session,
                                refresh_oracle_identity, natural_errors_complete, verify_oauth_token_readback)
     natural_errors = {}
+    registration_deferred = 'existing-verified-account-login-logout-and-oauth' in run.scenario['assertions']
+    auth_key = ('existing-verified-account-login-logout-and-oauth' if registration_deferred
+                else 'register-verify-login-logout-and-oauth')
+    errors_key = ('wrong-expired-session-actionable' if registration_deferred
+                  else 'wrong-expired-unverified-session-actionable')
     _catalog_scope_preflight(run)
     ui = run.session()
     runtime = run.runtime('primary')
@@ -1015,43 +1023,48 @@ def run_identity(run):
         natural_errors['wrong-password'] = wrong_password(run, ui, run.credential('primary_email'))
     _login(run, ui)
     refresh_oracle_identity(run, ui, run.credential('primary_email'))
-    _action(ui, 'logout')
-    _action(ui, 'auth-mode-register')
-    ui.fill('#auth-email', run.credential('registration_email'))
-    password = run.credential('registration_password')
-    ui.fill('#auth-password', password)
-    ui.fill('#auth-password-confirm', password)
-    _action(ui, 'auth-submit')
-    ui.wait(lambda: ui.visible('.sidebar [data-action="refresh-verification"]'))
-    refresh_oracle_identity(run, ui, run.credential('registration_email'))
-    if run.mode == 'live':
-        natural_errors['unverified'] = unverified_identity(run, ui, run.credential('registration_email'))
-    if run.mode == 'fault':
-        # Exercise the new account before the human verifies its real email.
-        # The HTTP boundary observes the actual false flag unchanged; do not
-        # require a third account or rewrite an already verified identity.
-        with run.fault('unverified'):
-            unverified = ui.request_read('/api/auth/me')
-            ok = (unverified.get('active') is True
-                  and unverified.get('email', '').strip().lower()
-                      == run.credential('registration_email').strip().lower()
-                  and unverified.get('email_verified') is False
-                  and ui.visible('.sidebar [data-action="resend-verification"]'))
-            ui.screenshot('identity-unverified-before-real-inbox-verification')
-            run.check('wrong-expired-unverified-session-actionable', ok,
-                      'Real newly registered unverified identity has visible verification recovery')
-            run.fault_check('unverified', ok,
-                            'Unchanged real account GET before the real email verification click')
-    # Verification needs a real inbox click. It is never replaced by a backend
-    # POST or configured success flag. Poll the real account while it happens.
-    try:
-        ui.wait(lambda: ui.request_read('/api/auth/me').get('email_verified') is True,
-                timeout=30)
-    except AssertionError:
-        raise ResourceBlocked('real-inbox-verification-click-required') from None
-    _action(ui, 'refresh-verification')
-    ui.wait(lambda: ui.request_read('/api/auth/me').get('email_verified') is True)
-    refresh_oracle_identity(run, ui, run.credential('registration_email'))
+    if not registration_deferred:
+        _action(ui, 'logout')
+        _action(ui, 'auth-mode-register')
+        ui.fill('#auth-email', run.credential('registration_email'))
+        password = run.credential('registration_password')
+        ui.fill('#auth-password', password)
+        ui.fill('#auth-password-confirm', password)
+        _action(ui, 'auth-submit')
+        ui.wait(lambda: ui.visible('.sidebar [data-action="refresh-verification"]'))
+        refresh_oracle_identity(run, ui, run.credential('registration_email'))
+        if run.mode == 'live':
+            natural_errors['unverified'] = unverified_identity(run, ui, run.credential('registration_email'))
+        if run.mode == 'fault':
+            # Exercise the new account before the human verifies its real email.
+            # The HTTP boundary observes the actual false flag unchanged; do not
+            # require a third account or rewrite an already verified identity.
+            with run.fault('unverified'):
+                unverified = ui.request_read('/api/auth/me')
+                ok = (unverified.get('active') is True
+                      and unverified.get('email', '').strip().lower()
+                          == run.credential('registration_email').strip().lower()
+                      and unverified.get('email_verified') is False
+                      and ui.visible('.sidebar [data-action="resend-verification"]'))
+                ui.screenshot('identity-unverified-before-real-inbox-verification')
+                run.check(errors_key, ok,
+                          'Real newly registered unverified identity has visible verification recovery')
+                run.fault_check('unverified', ok,
+                                'Unchanged real account GET before the real email verification click')
+        # Verification needs a real inbox click. It is never replaced by a backend
+        # POST or configured success flag. Poll the real account while it happens.
+        try:
+            ui.wait(lambda: ui.request_read('/api/auth/me').get('email_verified') is True,
+                    timeout=30)
+        except AssertionError:
+            raise ResourceBlocked('real-inbox-verification-click-required') from None
+        _action(ui, 'refresh-verification')
+        ui.wait(lambda: ui.request_read('/api/auth/me').get('email_verified') is True)
+        refresh_oracle_identity(run, ui, run.credential('registration_email'))
+    elif ui.request_read('/api/connection').get('connected') is True:
+        # Reconnect only this isolated profile through the real provider flow.
+        _action(ui, 'revoke-notion')
+        ui.wait(lambda: ui.request_read('/api/connection').get('connected') is False)
     _action(ui, 'connect-notion')
     _oauth_browser(run)
     ui.wait(lambda: ui.request_read('/api/connection').get('connected') is True)
@@ -1062,10 +1075,10 @@ def run_identity(run):
     logout_visible = ui.visible('#auth-email')
     primary = _login(run, ui)
     refresh_oracle_identity(run, ui, run.credential('primary_email'))
-    run.check('register-verify-login-logout-and-oauth',
+    run.check(auth_key,
               registered.get('email_verified') is True and logout_visible
               and primary.get('email_verified') is True,
-              'Dedicated real registration, inbox verification, OAuth and logout/login')
+              'Real provider OAuth and logout/login; registration follows the reviewed scenario scope')
     second = None
     if 'new-device-pulls-all-supported-shared-settings-without-copying-device-private-data' in run.scenario['assertions']:
         profile = run.oracle.profile()
@@ -1156,7 +1169,7 @@ def run_identity(run):
                 ok = ui.request_read('/api/connection').get('connected') is False \
                     and ui.visible('.sidebar [data-action="connect-notion"]')
             ui.screenshot('identity-' + variant)
-            run.check('wrong-expired-unverified-session-actionable', ok,
+            run.check(errors_key, ok,
                       'Real request/OS fault has visible recovery: ' + variant)
             run.fault_check(variant, ok, 'Native visible error and recovery action')
     if run.mode == 'fault':
@@ -1191,7 +1204,7 @@ def run_identity(run):
         _login(run, ui)
         refresh_oracle_identity(run, ui, run.credential('primary_email'))
         ui, natural_errors['expired-session'] = expired_session(run, ui, run.credential('primary_email'))
-        run.check('wrong-expired-unverified-session-actionable', natural_errors_complete(natural_errors),
+        run.check(errors_key, natural_errors_complete(natural_errors, include_unverified=not registration_deferred),
                   'Actual unchanged wrong-password/unverified responses and independently proven natural session expiry')
     if second is not None:
         run.quit('secondary', require_graceful=True)
@@ -1380,12 +1393,28 @@ def _permit_tree_state(tree):
     return value
 
 
+def _projection_states(data):
+    return [json.loads(path.read_text('utf-8'))
+            for path in sorted((data / '.projection-receipts').rglob('*.json'))]
+
+
+def _update_workspace(ui):
+    with ui.page.expect_response(lambda response: response.request.method == 'GET'
+            and response.url.endswith('/api/campus/notion/parents'), timeout=180000) as parents:
+        ui.click('.sidebar [data-action="campus-account-settings"]')
+    assert parents.value.status == 200
+    ui.wait(lambda: ui.visible('[data-action="campus-create-workspace"]'), timeout=180)
+    with ui.page.expect_response(lambda response: response.request.method == 'POST'
+            and response.url.endswith('/api/campus/notion/workspace'), timeout=900000) as capture:
+        ui.click('[data-action="campus-create-workspace"]')
+    return capture.value
+
+
 def _resilience_permit_recovery(run, ui, variant):
     """Native workspace action, real lost response, own GET recovery and full tree."""
     from collections import Counter
-    from scripts.run_panel_app_data import read_env
-    from scripts.probe_native_projection_response_loss import states, update
-    data = Path(read_env(Path(run.need('instances.primary.app_dir')) / '.env')['DATA_DIR'])
+    states, update = _projection_states, _update_workspace
+    data = Path(run.need('instances.primary.app_dir')) / 'data'
     if states(data):
         raise ResourceBlocked('existing-owned-writer-requires-independent-review')
     home = run.oracle.profile()['profile']['notion_workspace_v2']
@@ -1536,6 +1565,13 @@ def _resilience_double_refresh(run, ui, course_id):
     return {'verified': passed, 'task': task}
 
 
+def _cached_source_content(value):
+    """Keep all source/user content; compare coordination diagnostics separately."""
+    volatile = {'synced_at', 'synced_at_label', 'catalog_revision', 'read_only',
+                'read_only_message', 'section_states', 'announcements_status', 'assignments_status'}
+    return {key: item for key, item in value.items() if key not in volatile}
+
+
 def run_resilience(run):
     from scripts.product_e2e_gate import FAULT_VARIANTS
     _catalog_scope_preflight(run)
@@ -1544,7 +1580,8 @@ def run_resilience(run):
     _action(ui, 'open-dashboard')
     rows = ui.request_read('/api/campus/courses')['courses']
     course_id = run.need('catalog.resilience_course_id')
-    _open(ui, course_id)
+    cached_source = _cached_source_content(_open(ui, course_id))
+    cached_list = [_cached_source_content(row) for row in rows]
     _cancel_refresh(ui, _start_refresh(ui))
     effects = _effects(run)
     run.check('browse-and-cancel-no-media-model-charge-or-submit',
@@ -1567,11 +1604,11 @@ def run_resilience(run):
             run.check(layout_key,
                       metrics['dpi_coverage_ok'] and metrics['welcome'] and metrics['sidebar_left'] and metrics['keyboard_reachable']
                       and metrics['scroll_reachable'] and not metrics['horizontal_overflow']
-                      and metrics['centers'] == ['course-assignments', 'course-notices',
-                                                 'course-quizzes', 'course-materials'],
+                      and metrics['centers'] == ['course-assignments', 'course-notices', 'course-materials'],
                       'Measured native window layout and keyboard navigation at configured DPI')
     failures = []
     before = _file_hashes(run, student_only=True)
+    run.config['network_fault_course_id'] = course_id
     variants = FAULT_VARIANTS['JOURNEY-06'] if run.mode == 'fault' else ()
     def execute_fault(variant):
         nonlocal ui
@@ -1587,8 +1624,13 @@ def run_resilience(run):
                 task = _refresh_course(ui, course_id)
             current = ui.request_read('/api/campus/courses')['courses']
             if variant in {'offline', 'dns', 'proxy', 'timeout', 'network-restored'}:
+                retained = ui.request_read('/api/campus/courses/' + quote(course_id, safe=''))
                 run.check('network-failure-bounded-and-cache-remains-usable',
-                          task['observed_elapsed_seconds'] < 90 and current == rows,
+                          task['observed_elapsed_seconds'] < 90
+                          and [_cached_source_content(row) for row in current] == cached_list
+                          and _cached_source_content(retained) == cached_source
+                          and _file_hashes(run, student_only=True) == before
+                          and ui.visible('#course-lessons'),
                           'Fault ' + variant + ': bounded failure retains browsable cache')
             elif variant in {'403', '409', '429', '5xx', 'low-balance', 'disk-full', 'malformed-json'}:
                 failures.append(task)

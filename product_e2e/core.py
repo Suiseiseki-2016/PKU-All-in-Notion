@@ -205,6 +205,7 @@ class NativeUI:
         self._dialog_decision = None
         self._dialog_handled = False
         self._pending_requests = {}
+        self._uncertain_workspace_requests = []
         if page is not None:
             self.origin = page.url.split("/app", 1)[0]
             page.on("dialog", self._on_dialog)
@@ -255,6 +256,10 @@ class NativeUI:
             # Browser failure strings may contain full URLs; keep only the
             # observed event type, never its private message or payload.
             row['request_failed_type'] = 'transport_failure' if failed else None
+            if (failed and row.get('host') in {'127.0.0.1', 'localhost'}
+                    and row.get('method') in {'POST', 'PUT', 'PATCH', 'DELETE'}
+                    and row.get('path', '').startswith('/api/campus/notion/workspace')):
+                self._uncertain_workspace_requests.append(row['path'])
 
     def _request_finished(self, request):
         self._finish_request(request, False)
@@ -463,6 +468,16 @@ class NativeUI:
         return path
 
 
+def enter_welcome(ui):
+    """Use the first-run CTA on a fresh WebView; do not set localStorage."""
+    ui.wait(lambda: ui.visible('[data-action="welcome-start"]')
+            or ui.visible('#auth-email') or ui.visible('.sidebar [data-action="open-dashboard"]'))
+    if ui.visible('[data-action="welcome-start"]'):
+        ui.screenshot('first-run-welcome')
+        ui.click('[data-action="welcome-start"]')
+        ui.wait(lambda: ui.visible('#auth-email') or ui.visible('.sidebar [data-action="open-dashboard"]'))
+
+
 class NativeRun:
     def __init__(self, scenario, mode, context):
         self.scenario, self.mode, self.context = scenario, mode, context
@@ -492,6 +507,10 @@ class NativeRun:
                     or destination.exists() or not seed.is_dir()):
                 raise ResourceBlocked("case_seed_not_isolated_or_destination_exists")
             shutil.copytree(seed, destination)
+            env_path = destination / '.env'
+            if env_path.is_file():
+                from dotenv import set_key
+                set_key(env_path, 'DATA_DIR', str(destination / 'data'))
             instance["app_dir"] = str(destination)
         from .oracles import Oracle
         self.oracle = Oracle(self.config, self.case_dir)
@@ -707,6 +726,7 @@ class NativeRun:
                 raise ResourceBlocked("native_single_instance_reused_wrong_profile")
             self.sessions[name] = ui
             ui.screenshot("startup-" + name)
+            enter_welcome(ui)
             return ui
         except Exception:
             self.quit(name)
@@ -744,6 +764,13 @@ class NativeRun:
                 and getattr(ui, "origin", None) and callable(getattr(ui, "request_read", None))):
             def catalog_terminal():
                 try:
+                    if getattr(ui, '_uncertain_workspace_requests', []):
+                        raise ResourceBlocked('workspace_write_response_unknown_before_native_quit')
+                    if any(row.get('host') in {'127.0.0.1', 'localhost'}
+                           and row.get('method') in {'POST', 'PUT', 'PATCH', 'DELETE'}
+                           and row.get('path', '').startswith('/api/')
+                           for row in getattr(ui, '_pending_requests', {}).values()):
+                        return False
                     task = ui.request_read("/api/recordings/task")
                     if (not isinstance(task, dict) or task.get("state") not in
                             {"idle", "running", "done", "partial", "failed", "cancelled"}):
@@ -767,6 +794,8 @@ class NativeRun:
                         if exercise["state"] == "running":
                             return False
                     return True
+                except ResourceBlocked:
+                    raise
                 except Exception as exc:
                     raise ResourceBlocked("catalog_state_unavailable_before_native_quit") from exc
             # A normal close must not interrupt an active mutation merely

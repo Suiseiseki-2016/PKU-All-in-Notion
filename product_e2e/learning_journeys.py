@@ -60,7 +60,7 @@ def _open_course(run, course_id, name="primary", *, center=None):
     ui.click(selector)
     ui.wait(lambda: ui.visible('.course-hero[data-course-id="' + course_id + '"] h1')
             and ui.visible("#course-lessons"))
-    section = center or {"JOURNEY-04": "assignments", "JOURNEY-05": "quizzes"}.get(run.scenario["id"])
+    section = center if center is not None else {"JOURNEY-04": "assignments", "JOURNEY-05": "quizzes"}.get(run.scenario["id"])
     if section and ui.visible('[data-action="campus-open-center"]'):
         ui.click(_action("campus-open-center", center=section))
     course = _read(ui, "/api/campus/courses/" + quote(course_id, safe=""))
@@ -1335,161 +1335,38 @@ def _assert_reviewed_quiz_unchanged(run, cfg, quiz, binding):
 
 
 def run_quiz(run):
-    cfg = run.need("quiz")
-    review_binding = _reviewed_quiz_preflight(run, cfg)
-    if review_binding is None:
-        _review_text_preflight(run, "quiz.expected_question_anchors")
-    ui, course = _open_course(run, cfg["course_id"], center="quizzes")
-    available = _read(ui, "/api/campus/courses/" + quote(cfg["course_id"], safe="") + "/quizzes")
-    sources = {row["id"]: row for row in available["lectures"]}
-    stable = True
-    for source_id in cfg["source_ids"]:
-        lesson = next(row for row in course["lessons"] if row["source_id"] == source_id)
-        marker = lesson.get("summary_acceptance", {})
-        remote = _markers(_blocks(run, marker["note_id"]), "PKU 总结验收版本 · ")
-        stable = stable and sources[source_id].get("accepted") is True and bool(remote)
-        stable = stable and remote[-1].get("remote_sha256") == marker.get("remote_sha256")
-        stable = stable and remote[-1].get("remote_sha256") == _note_fingerprint(run, marker["note_id"])
-        ui.click('[data-campus-quiz-source="' + source_id + '"]')
-    if not stable:
-        run.check("only-selected-accepted-stable-summary-sources", False, "Independent published summary version changed")
-        raise AssertionError("Refuse paid quiz from an unaccepted or changed summary")
-    if review_binding is not None:
-        # Recheck the facts immediately before cost authority, after service reads.
-        _reviewed_quiz_preflight(run, cfg)
-    run.authorize_cost(points=10, seconds=0)
+    """Observe the shipped hidden feature; never invoke paid quiz APIs."""
+    if 'unfinished-quiz-entry-hidden' not in run.scenario['assertions']:
+        raise ResourceBlocked('obsolete_visible_quiz_acceptance_contract')
     before = _ledger(run)
-    ui.click("#course-quizzes details > summary")
-    ui.fill("[data-campus-quiz-paper]", cfg["prior_paper"])
-    _confirm(run, ui, _action("campus-generate-quiz"))
-    path = "/api/campus/courses/" + quote(cfg["course_id"], safe="") + "/quizzes"
-    ui.wait(lambda: any(set(row.get("source_ids", [])) == set(cfg["source_ids"])
-                        for row in _read(ui, path).get("items", [])), timeout=180)
-    quiz = next(row for row in _read(ui, path)["items"] if set(row.get("source_ids", [])) == set(cfg["source_ids"]))
-    rows = _blocks(run, quiz["id"])
-    marker = _markers(rows, "PKU 课程小测身份 · ")
-    questions, answers = _quiz_questions(rows)
-    if review_binding is not None:
-        cfg = _reviewed_quiz_answers(run, ui, cfg, quiz, rows, review_binding)
-    run.check("only-selected-accepted-stable-summary-sources",
-              stable and bool(marker) and set(marker[-1].get("source_ids", [])) == set(cfg["source_ids"]),
-              "Independent accepted summary versions and generated Notion source identities")
-    grounded = (_review_text(run, quiz["id"], "quiz.expected_question_anchors") if review_binding is None else
-                all(anchor in '\n'.join(_plain(row) for row in _blocks(run, quiz['id']))
-                    for anchor in cfg['expected_question_anchors']))
-    run.check("choice-blank-short-answer-and-reference-grounding",
-              {kind for _, kind in questions} >= {"选择", "填空", "简答"}
-              and cfg["prior_paper"] in "\n".join(_plain(row) for row in rows)
-              and grounded, "Question types and pre-authored source fact anchors independently checked")
-    ui.click('[data-action="campus-open-summary"][data-url="' + quiz["url"] + '"]')
-    notion = run.external_page(quiz["url"])
-    _assert_reviewed_quiz_unchanged(run, cfg, quiz, review_binding)
-    editable = []
-    for row, answer in zip(answers, cfg["answer_texts"], strict=True):
-        selector = '[data-block-id="' + row["id"] + '"] [contenteditable="true"]'
-        notion.wait(lambda selector=selector: notion.visible(selector))
-        editable.append(notion.attr(selector, "contenteditable") == "true")
-        notion.fill(selector, "答案：" + answer)
-    run.check("notion-editable-answers-without-answer-key-leak", all(editable) and len(answers) == 5,
-              "Real Notion answer blocks editable; no teacher key in independent student page")
-    expected_answers = ["答案：" + value for value in cfg["answer_texts"]]
-    notion.wait(lambda: [_plain(row) for row in _quiz_questions(_blocks(run, quiz["id"]))[1]] == expected_answers)
-    notion = run.external_page(quiz["url"])
-    single_machine = run.scenario.get("device_scope") == "single-machine"
-    if single_machine:
-        run.restart("primary")
-        reopened, _ = _open_course(run, cfg["course_id"], center="quizzes")
-        reopened.click('[data-action="campus-open-summary"][data-url="' + quiz["url"] + '"]')
-        run.external_page(quiz["url"])
-        run.check("answers-survive-reopen-and-local-restart",
-                  [_plain(row) for row in _quiz_questions(_blocks(run, quiz["id"]))[1]] == expected_answers,
-                  "Reopened after actual primary restart")
-    else:
-        secondary, _ = _open_course(run, cfg["course_id"], "secondary", center="quizzes")
-        secondary.click('[data-action="campus-open-summary"][data-url="' + quiz["url"] + '"]')
-        run.external_page(quiz["url"])
-        run.check("answers-survive-reopen-and-cross-device-read",
-                  [_plain(row) for row in _quiz_questions(_blocks(run, quiz["id"]))[1]] == expected_answers,
-                  "Reopened via both installed devices")
-    ui, _ = _open_course(run, cfg["course_id"], center="quizzes")
-    _assert_reviewed_quiz_unchanged(run, cfg, quiz, review_binding)
-    _confirm(run, ui, _action("campus-grade-quiz", quiz=quiz["id"]))
-    reviews_path = "/api/campus/courses/" + quote(cfg["course_id"], safe="") + "/quiz-reviews"
-    ui.wait(lambda: bool(_read(ui, reviews_path).get("histories")), timeout=180)
-    histories = _read(ui, reviews_path)["histories"]
-    history = next(row for row in histories if row.get("quiz_id") == quiz["id"])
-    history_rows = _blocks(run, history["id"])
-    grade_correct = _grade_check(run, history["id"], cfg)
-    run.check("objective-oracle-and-bounded-subjective-grade",
-              grade_correct,
-              "Independent fixture answers and declared subjective rubric checked against real grade")
-    history_text = "\n".join(_plain(row) for row in history_rows)
-    ui.click(_action("campus-record-review", review=history["id"]))
-    _capability(run, ui, "prompt")(cfg["review_note"])
-    ui.wait(lambda: cfg["review_note"] in "\n".join(_plain(row) for row in _blocks(run, history["id"])))
-    run.check("original-answers-history-and-review-content-preserved",
-              all(value in history_text for value in cfg["answer_texts"])
-              and all(value in "\n".join(_plain(row) for row in _blocks(run, history["id"]))
-                      for value in (*cfg["answer_texts"], cfg["review_note"])),
-              "Real Notion history preserves original answers and appended review")
-    notion = run.external_page(quiz["url"])
-    changed = cfg["changed_answer"]
-    notion.fill('[data-block-id="' + answers[0]["id"] + '"] [contenteditable="true"]', "答案：" + changed)
-    notion.wait(lambda: _plain(_quiz_questions(_blocks(run, quiz["id"]))[1][0]) == "答案：" + changed)
-    ui, _ = _open_course(run, cfg["course_id"], center="quizzes")
-    cost_before = _ledger(run)
-    _confirm(run, ui, _action("campus-grade-quiz", quiz=quiz["id"]))
-    ui.wait(lambda: ui.visible(_action("campus-regrade-quiz", quiz=quiz["id"])))
-    run.check("changed-question-or-answer-needs-confirmed-regrade",
-              not _new_rows(cost_before, _ledger(run), "settlements")
-              and ui.visible(_action("campus-regrade-quiz", quiz=quiz["id"])),
-              "Changed real answer requires separate regrade confirmation and no charge before it")
-    frozen_rejections = []
-    def recover(variant):
-        name = "secondary" if variant.startswith("two-devices") else "primary"
-        if variant == "restart-after-charge":
-            run.restart(name)
-        active, _ = _open_course(run, cfg["course_id"], name, center="quizzes")
-        def confirm_retry(selector):
-            if single_machine and variant.startswith("repeat-"):
-                active.prepare_dialog(True)
-                active.double_click(selector)
-                active.confirm(True)
-            else:
-                _confirm(run, active, selector)
-        if "grade" in variant:
-            confirm_retry(_action("campus-grade-quiz", quiz=quiz["id"]))
-        else:
-            for source_id in cfg["source_ids"]:
-                active.click('[data-campus-quiz-source="' + source_id + '"]')
-            active.fill("[data-campus-quiz-paper]", cfg["prior_paper"])
-            if variant == 'changed-frozen-input':
-                frozen_rejections.append(_changed_frozen_quiz_input(run, active, cfg))
-                return
-            confirm_retry(_action("campus-generate-quiz"))
-        active.wait(lambda: not active.visible('[data-action="campus-refresh-quizzes"][disabled]'), timeout=180)
-    faults = _faults(run, recover, lambda variant, old, new, receipt:
-                     bool(receipt.get("observed")) and not _new_rows(old, new, "settlements")
-                     and (variant != 'changed-frozen-input' or bool(frozen_rejections)
-                          and frozen_rejections[-1]['passed'] and receipt.get('original_source_content_restored') is True
-                          and receipt.get('archived_generated_block_verified') is True)
-                     and len([row for row in _read(ui, path)["items"] if row.get("operation_id") == quiz.get("operation_id")]) == 1,
-                     restart_operation_ids=lambda current: [row['operation_id'] for row in _new_rows(before, current, 'settlements')])
-    if run.mode == "live":
-        # The single-machine scope retries from the real primary installation;
-        # the unchanged frozen inputs must still cause no second settlement.
-        recover("repeat-generate" if single_machine else "two-devices-generate")
-        costs = _ledger(run)
-        recover("repeat-grade" if single_machine else "two-devices-grade")
-        faults.append(not _new_rows(costs, _ledger(run), "settlements"))
+    course_id = run.need('catalog.resilience_course_id')
+    def inspect():
+        ui, _ = _open_course(run, course_id, center='')
+        if ui.page is None:
+            raise ResourceBlocked('hidden_quiz_native_request_observer_required')
+        ui.page.reload()
+        ui, _ = _open_course(run, course_id, center='')
+        ui.wait(lambda: ui.visible('#course-lessons'))
+        hidden = ui.page.locator('[data-center="quizzes"], #course-quizzes, [data-action="campus-generate-quiz"], [data-action="campus-grade-quiz"]').count() == 0
+        ui.screenshot('hidden-quiz-course-' + str(len(run.ui_evidence)))
+        return hidden
+    initial = inspect()
+    run.check('unfinished-quiz-entry-hidden', initial)
+    run.restart('primary')
+    reopened = inspect()
+    run.check('reopen-and-restart-keep-quiz-hidden', initial and reopened)
+    if run.mode == 'fault':
+        with run.fault('kill-process-and-restart'):
+            run.crash_and_restart('primary')
+            recovered = inspect()
+        run.fault_check('kill-process-and-restart', recovered)
+    forbidden = [row for row in run.network if re.search(r'/api/[^?]*(?:quizzes|quiz-reviews|quiz-grade|quiz-generate)', row.get('path', ''))]
+    run.check('course-navigation-does-not-request-quiz-apis', not forbidden)
     after = _ledger(run)
-    new_jobs = _new_rows(before, after, "jobs")
-    new_settlements = _new_rows(before, after, "settlements")
-    run.check("concurrent-generate-grade-and-recovery-one-job-one-settlement",
-              bool(faults) and all(faults) and len(new_jobs) == len(new_settlements) == 2
-              and len({row["operation_id"] for row in new_settlements}) == 2,
-              "Real generate/grade jobs, scoped native retries and independent unique settlements")
-    ui.screenshot("quiz-history-and-regrade-confirmation")
+    run.check('hidden-quiz-does-not-create-jobs-or-charges',
+              not _new_rows(before, after, 'jobs') and not _new_rows(before, after, 'settlements')
+              and before['charged_points'] == after['charged_points']
+              and before['charged_seconds'] == after['charged_seconds'])
 
 
 def run_cross_platform(run):

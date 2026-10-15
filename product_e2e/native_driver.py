@@ -1189,8 +1189,51 @@ JOURNEYS = {
 def run_case(scenario, mode, context):
     if scenario["id"] not in JOURNEYS or mode not in {"live", "fault"}:
         raise ValueError("unsupported_native_journey")
+    disk = None
+    if scenario['id'] == 'JOURNEY-06' and mode == 'fault' and context['target'] == 'windows':
+        from .disk_native_case import DiskCase
+        try:
+            disk = DiskCase(context)
+            context = disk.prepare()
+        except Exception as exc:
+            code = exc.code if isinstance(exc, ResourceBlocked) else 'actual_disk_fixture_setup_failed_' + type(exc).__name__
+            run = NativeRun(scenario, mode, context)
+            def unavailable(value):
+                raise ResourceBlocked(code)
+            result = _execute(run, JOURNEYS[scenario['id']], paid=False, preflight=unavailable)
+            return disk.finish(run, result) if disk is not None else result
     run = NativeRun(scenario, mode, context)
-    return _execute(run, JOURNEYS[scenario["id"]], paid=scenario["id"] in {"JOURNEY-03", "JOURNEY-04", "JOURNEY-05"})
+    result = _execute(run, JOURNEYS[scenario["id"]], paid=scenario["id"] in {"JOURNEY-03", "JOURNEY-04"}, preflight=_preflight_resources)
+    return disk.finish(run, result) if disk is not None else result
+
+
+def _preflight_resources(run):
+    """Resolve required resources before changing an account or remote page."""
+    keys = {
+        'JOURNEY-01': ['external_browser', 'previous_artifact', 'previous_artifact_sha256'],
+        'JOURNEY-02': ['catalog.resilience_course_id', 'catalog.legacy_course_ids',
+                       'catalog.renamed_course', 'catalog.same_name_course_ids',
+                       'catalog.empty_course_id', 'catalog.unreadable_course_id',
+                       'catalog.existing_course_link'],
+        'JOURNEY-03': ['learning.course_id', 'learning.expected_summary_anchors',
+                       'learning.sentinel_page_id', 'learning.missing_link_fixture',
+                       'learning.existing_summary_source_id'],
+        'JOURNEY-04': ['assignment.course_id', 'assignment.content_id'],
+        'JOURNEY-05': ['catalog.resilience_course_id'],
+        'JOURNEY-06': ['catalog.resilience_course_id', 'account.operation_ledger_path',
+                       'account.supported_dpi'],
+    }
+    for key in keys[run.scenario['id']]:
+        run.need(key)
+    if run.scenario['id'] == 'JOURNEY-01':
+        credentials = ['primary_email', 'primary_password', 'alternate_email',
+                       'alternate_password', 'designated_redemption_code']
+        if 'register-verify-login-logout-and-oauth' in run.scenario['assertions']:
+            credentials += ['registration_email', 'registration_password']
+        if run.mode == 'live':
+            credentials.append('expired_account_token')
+        for key in credentials:
+            run.credential(key)
 
 
 def run_main_chain(context):
@@ -1205,8 +1248,10 @@ def run_main_chain(context):
     return result
 
 
-def _execute(run, action, *, paid):
+def _execute(run, action, *, paid, preflight=None):
     try:
+        if preflight is not None:
+            preflight(run)
         # Every journey needs actual before/after accounting, including those
         # expected to cost zero. Missing accounting still must not hide native
         # startup failures; charge-producing journeys cannot proceed without it.
