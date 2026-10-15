@@ -1,24 +1,25 @@
 """Pinned, spend-free coverage for the adopted five-question grade contract."""
 from __future__ import annotations
+from tests.grading_support import GradeRecords
+from tests.grading_support import FakeGradingPageAdapter
 
 import copy
 import json
 
 import pytest
 
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     E2E_GRADE_QUESTION_RUBRIC,
     GRADE_RESULT_CONTRACT_VERSION,
     ExerciseGrader,
-    FakeGradingPageAdapter,
     GradeSettlementError,
     GradeTarget,
     GradingInput,
     _grading_prompt,
     _validate_grade_result,
 )
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
+
+from grading_workspace import EXERCISE_GENERATED
 
 
 def _valid_result():
@@ -67,7 +68,7 @@ class _WriteTrackingAdapter(FakeGradingPageAdapter):
 
 
 def _grader(result):
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     relay = _Relay(result)
     adapter = _WriteTrackingAdapter()
@@ -94,7 +95,7 @@ def _target(directory, title):
 
 
 def test_provider_prompt_pins_exact_schema_types_identity_and_rubric():
-    directory = build_fake_directory("grade-slow")
+    directory = GradeRecords()
     directory.load()
     target = _target(directory, "[E2E] 五题批改契约")
     prompt, unanswered = _grading_prompt(
@@ -114,7 +115,7 @@ def test_provider_prompt_pins_exact_schema_types_identity_and_rubric():
 
 
 def test_provider_prompt_keeps_fixture_contract_out_of_general_exercises():
-    directory = build_fake_directory("grade-slow")
+    directory = GradeRecords()
     directory.load()
     prompt, _ = _grading_prompt(
         _target(directory, "普通练习"),

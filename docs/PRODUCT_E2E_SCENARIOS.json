@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "required_modes": [
+    "live",
+    "fault"
+  ],
+  "required_evidence_roles": [
+    "ui",
+    "oracle",
+    "network",
+    "runtime"
+  ],
+  "service_hosts": [
+    "pku.aeoluswu.info",
+    "course.pku.edu.cn",
+    "api.notion.com"
+  ],
+  "max_report_age_hours": 24,
+  "scenarios": [
+    {
+      "id": "JOURNEY-01",
+      "name": "安装升级→登录授权→同账号新设备→切换账号→退出重启",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "installed-native-version-and-single-instance",
+        "upgrade-and-restart-preserve-data",
+        "register-verify-login-logout-and-oauth",
+        "wrong-expired-unverified-session-actionable",
+        "new-device-pulls-all-supported-shared-settings-without-copying-device-private-data",
+        "account-switch-no-cross-account-content",
+        "quota-and-designated-test-redemption-match-ledger",
+        "quit-releases-owned-processes-and-ports"
+      ],
+      "deferrals": {
+        "windows": {
+          "reason": "user-approved-single-windows-machine-and-2026-10-15-registration-deferral",
+          "assertions": [
+            "new-device-pulls-all-supported-shared-settings-without-copying-device-private-data"
+          ],
+          "fault_variants": [
+            "unverified"
+          ],
+          "assertion_replacements": {
+            "register-verify-login-logout-and-oauth": "existing-verified-account-login-logout-and-oauth",
+            "wrong-expired-unverified-session-actionable": "wrong-expired-session-actionable"
+          }
+        }
+      }
+    },
+    {
+      "id": "JOURNEY-02",
+      "name": "教学网课程→部分同步→旧目录迁移→每节课作业通知",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "course-term-and-source-ids-match-independent-portal",
+        "positive-and-zero-revisions-handled-per-course",
+        "legacy-extra-courses-do-not-break-valid-course-sync",
+        "unconfirmed-course-read-only-and-actionable",
+        "all-lessons-including-september29-not-missing-or-duplicated",
+        "same-name-and-renamed-courses-retain-identities",
+        "assignments-notices-official-quizzes-source-and-deadline-correct",
+        "empty-distinct-from-unreadable-and-cache-retained"
+      ]
+    },
+    {
+      "id": "JOURNEY-03",
+      "name": "Notion目录→查看总结→按需下载→短媒体转写总结→恢复",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "home-course-center-lesson-parent-and-marker-readback",
+        "repeat-sync-and-missing-link-repair-preserve-student-content",
+        "permission-archive-move-and-reauth-actionable",
+        "summary-link-and-source-acceptance-correct",
+        "explicit-original-download-correct-source-and-playable-on-windows",
+        "expired-media-address-refresh-bounded-and-browsing-usable",
+        "short-real-asr-and-summary-reviewed-and-published",
+        "retry-reuses-artifacts-one-settlement-and-oss-audio-cleanup"
+      ]
+    },
+    {
+      "id": "JOURNEY-04",
+      "name": "作业要求→Notion和本地文件→整理预览→确认提交→官方回执",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "official-target-and-deadline-not-title-only",
+        "unmatched-and-historical-work-cannot-submit",
+        "ai-requirements-and-preview-file-content-and-hash-verified",
+        "no-submission-before-explicit-confirmation",
+        "designated-test-assignment-official-history-and-file-readback",
+        "unknown-result-and-changed-draft-block-repeat-post",
+        "two-devices-one-submission-and-recoverable-receipt",
+        "another-device-reads-official-state-without-resubmission"
+      ],
+      "deferrals": {
+        "windows": {
+          "reason": "user-approved-2026-10-06-no-designated-resubmittable-assignment",
+          "assertions": [
+            "designated-test-assignment-official-history-and-file-readback",
+            "unknown-result-and-changed-draft-block-repeat-post",
+            "two-devices-one-submission-and-recoverable-receipt",
+            "another-device-reads-official-state-without-resubmission"
+          ],
+          "fault_variants": [
+            "lost-post-response",
+            "two-devices",
+            "restart-pending-submission"
+          ]
+        }
+      }
+    },
+    {
+      "id": "JOURNEY-05",
+      "name": "未完成小测隐藏→课程浏览→重开重启→无后台请求或收费",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "unfinished-quiz-entry-hidden",
+        "course-navigation-does-not-request-quiz-apis",
+        "reopen-and-restart-keep-quiz-hidden",
+        "hidden-quiz-does-not-create-jobs-or-charges"
+      ]
+    },
+    {
+      "id": "JOURNEY-06",
+      "name": "网络权限余额磁盘故障→中断恢复→流量费用→窗口导航",
+      "targets": [
+        "windows",
+        "macos"
+      ],
+      "assertions": [
+        "network-failure-bounded-and-cache-remains-usable",
+        "403-409-429-5xx-low-balance-disk-full-and-malformed-response-actionable",
+        "unknown-write-not-replayed-and-permits-reconciled",
+        "interruption-restart-and-double-click-no-duplicate-effect",
+        "browse-and-cancel-no-media-model-charge-or-submit",
+        "ui-cost-and-reused-receipt-match-real-ledger",
+        "failure-id-matches-redacted-log-and-next-action",
+        "welcome-course-list-left-account-and-course-centers-work-at-supported-dpi-with-keyboard-scroll"
+      ],
+      "deferrals": {
+        "windows": {
+          "reason": "user-approved-2026-10-07-defer-125-and-150-percent-physical-windows-scaling",
+          "assertions": [],
+          "fault_variants": [],
+          "physical_dpi": {
+            "required": [
+              96
+            ],
+            "deferred": [
+              120,
+              144
+            ]
+          }
+        }
+      },
+      "assertions_by_mode": {
+        "live": [
+          "browse-and-cancel-no-media-model-charge-or-submit",
+          "ui-cost-and-reused-receipt-match-real-ledger",
+          "welcome-course-list-left-account-and-course-centers-work-at-supported-dpi-with-keyboard-scroll"
+        ],
+        "fault": [
+          "network-failure-bounded-and-cache-remains-usable",
+          "403-409-429-5xx-low-balance-disk-full-and-malformed-response-actionable",
+          "unknown-write-not-replayed-and-permits-reconciled",
+          "interruption-restart-and-double-click-no-duplicate-effect",
+          "failure-id-matches-redacted-log-and-next-action"
+        ]
+      }
+    },
+    {
+      "id": "XPLAT-01",
+      "name": "真Windows写入→真Mac首启和旧目录升级→授权读取总结小测批改",
+      "targets": [
+        "macos"
+      ],
+      "assertions": [
+        "windows-and-mac-native-home-course-lesson-identities-match",
+        "fresh-mac-pulls-without-local-copy-or-media-download",
+        "old-mac-partial-catalog-valid-courses-usable-and-unconfirmed-read-only",
+        "mac-oauth-download-entry-and-notion-quiz-grade-links-correct"
+      ]
+    }
+  ]
+}

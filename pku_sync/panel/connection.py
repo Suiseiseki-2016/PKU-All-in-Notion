@@ -45,22 +45,12 @@ CONNECT_BUSY_MESSAGE = "正在连接 Notion，请稍候。"
 CONNECT_FAILED_COPY = "连接 Notion 没有成功，请稍后重试。"
 CONNECT_SERVICE_UNAVAILABLE_COPY = "云端 Notion 授权服务尚未配置，请联系管理员处理后再试。"
 
-# The dedicated disconnected directory state: distinct from the sync error
-# and empty states (library/notion-workspace.md rule 10).
-DISCONNECTED_DIRECTORY_TITLE = "Notion 尚未连接"
-DISCONNECTED_DIRECTORY_COPY = (
-    "连接 Notion 后，这里会显示讲次与资料索引。"
-)
-DISCONNECTED_DIRECTORY_ACTION = "连接 Notion"
-
-
 class ConnectionBusy(RuntimeError):
     """A reconnect is already in flight (single-flight refusal)."""
 
     def __init__(self, message: str = CONNECT_BUSY_MESSAGE):
         super().__init__(message)
         self.message = message
-
 
 class ConnectionProvider(Protocol):
     instant_connect: bool
@@ -76,7 +66,6 @@ class ConnectionProvider(Protocol):
     def connect(self) -> None:
         """Acquire a credential again; raises on failure."""
         ...
-
 
 class ConnectionService:
     """Connection state plus the single-flight reconnect flight."""
@@ -158,7 +147,6 @@ class ConnectionService:
             with self._lock:
                 self._connecting = False
 
-
 class RealConnectionProvider:
     """Production provider: the local .env token and the relay OAuth login.
 
@@ -209,17 +197,9 @@ class RealConnectionProvider:
         # the login already wrote the .env; the live settings must agree so
         # the panel state flips without a restart
         self._settings.notion_token = token
-        template_id = (token_info or {}).get("duplicated_template_id")
-        if template_id:
-            from .notion_home import adopt_oauth_template
-            try:
-                adopt_oauth_template(Path(self._settings.data_dir), token, template_id)
-            except Exception:
-                logger.exception("Notion OAuth template adoption failed")
         from ..platform import sync_account_profile
 
         sync_account_profile(self._settings)
-
 
 class FakeConnectionProvider:
     """Seeded-fake provider for ``pku-sync panel --fake``.
@@ -243,7 +223,6 @@ class FakeConnectionProvider:
     def connect(self) -> None:
         self._connected = True
 
-
 def make_connection_service(
     settings=None,
     *,
@@ -262,7 +241,6 @@ def make_connection_service(
         on_disconnect=getattr(directory_service, "invalidate", None),
     )
 
-
 def build_fake_connection_service(
     *, connected: bool = True, directory_service=None
 ) -> ConnectionService:
@@ -271,7 +249,6 @@ def build_fake_connection_service(
         FakeConnectionProvider(connected=connected),
         on_disconnect=getattr(directory_service, "invalidate", None),
     )
-
 
 __all__ = [
     "STATE_CONNECTED",
@@ -288,9 +265,6 @@ __all__ = [
     "CONNECT_BUSY_MESSAGE",
     "CONNECT_FAILED_COPY",
     "CONNECT_SERVICE_UNAVAILABLE_COPY",
-    "DISCONNECTED_DIRECTORY_TITLE",
-    "DISCONNECTED_DIRECTORY_COPY",
-    "DISCONNECTED_DIRECTORY_ACTION",
     "ConnectionBusy",
     "ConnectionProvider",
     "ConnectionService",

@@ -133,7 +133,8 @@ def test_changed_student_link_is_preserved_when_official_link_is_repaired():
 def test_catalog_cannot_write_without_account_authority(tmp_path, monkeypatch):
     monkeypatch.setattr(notion_home, "NotionClient", lambda *args: pytest.fail("Notion must not be contacted"))
     with pytest.raises(ValueError, match="账号"):
-        notion_home.sync_catalog(tmp_path, "fake-token")
+        with notion_home._catalog_authority(tmp_path, None):
+            pytest.fail("unconfirmed writer admitted")
 
 
 def test_failed_portal_read_prevents_shared_projection_even_with_local_digest(tmp_path, monkeypatch):
@@ -142,7 +143,7 @@ def test_failed_portal_read_prevents_shared_projection_even_with_local_digest(tm
     monkeypatch.setattr(notion_home, "NotionClient", lambda *args: pytest.fail("shared write after failure"))
     monkeypatch.setattr(catalog, "current", lambda *args: pytest.fail("should stop before account calls"))
     with pytest.raises(ValueError, match="只读"):
-        notion_home.sync_catalog(tmp_path, "fake", settings=object())
+        catalog.assert_portal_readable(tmp_path)
 
 
 @pytest.mark.parametrize('mutation', ['namespace', 'missing-course', 'boolean', 'reading'])

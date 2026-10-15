@@ -29,6 +29,8 @@ def setup(tmp_path, monkeypatch):
         def __exit__(self, *a): pass
         def get_page(self, identifier):
             state['reads'].append(identifier)
+            if identifier in state.get('inaccessible_ids', []):
+                raise NotionError('fixture legacy page inaccessible', status=403)
             if state['fault'] == '403' or state['fault'] == '404':
                 raise NotionError('fixture inaccessible', status=int(state['fault']))
             if state['fault'] == 'offline': raise httpx.ConnectError('fixture network')
@@ -44,7 +46,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(notion_home, 'available_parents', lambda _: [{'id':TODO,'title':'TODO LIST'}])
     monkeypatch.setattr(notion_workspace, 'read_projection', lambda *a: pytest.fail('Startup must not scan all courses'))
     app = FastAPI()
-    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings, None))
+    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings))
     return settings, state, TestClient(app)
 
 def test_startup_restores_existing_home_and_selects_its_actual_parent(setup):
@@ -84,12 +86,14 @@ def test_reconnect_retries_restore_in_same_login_session(setup):
     body = client.get('/api/campus/notion/parents?selected_only=true').json()
     assert body['home']['id'] == HOME and body['home_sync']['status'] == 'pulled'
 
-def test_inaccessible_legacy_home_does_not_block_verified_modern_home(setup, monkeypatch):
+def test_inaccessible_legacy_home_does_not_block_verified_modern_home(setup):
     settings, state, _ = setup
     state['profile']['profile']['notion_home'] = {'id':'d'*32,'parent_id':'e'*32,'url':'https://www.notion.so/legacy'}
-    monkeypatch.setattr(platform, '_notion_home_accessible', lambda *a: pytest.fail('Modern home must not depend on legacy grant'))
+    state['inaccessible_ids'] = ['d' * 32, 'e' * 32]
     assert platform.sync_account_profile(settings)['status'] == 'pulled'
     assert notion_home.saved_home(settings.data_dir)['id'] == HOME
+    assert set(state['reads']) == {HOME, PARENT}
+    assert state['writes'] == []
 
 def test_explicit_replacement_keeps_other_profile_fields_and_revision_guard(setup, monkeypatch):
     settings, state, _ = setup

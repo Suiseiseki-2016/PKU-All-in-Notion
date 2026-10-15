@@ -15,9 +15,7 @@ from ..projection_receipts import verified_workspace_operation
 from .campus_catalog import campus_course, campus_courses, display_campus_time
 from .recordings_api import _safe_attachment_path
 
-HOME_TITLE = "PKU All in Notion · 学习主页"
 _PRESENCE_REQUIRED = re.compile(r"随堂考勤|到课考勤|现场签到|课堂展示|课堂汇报|课堂点评")
-
 
 def _title(page: dict) -> str:
     properties = page.get("properties") or {}
@@ -28,17 +26,14 @@ def _title(page: dict) -> str:
     return "".join(part.get("plain_text") or part.get("text", {}).get("content", "")
                    for part in page.get("title") or [])
 
-
 def available_parents(token: str) -> list[dict]:
     with NotionClient(token) as client:
         pages = client.search("", object_type="page")
     return [{"id": page["id"], "title": _title(page) or "未命名页面", "url": page.get("url", "")}
             for page in pages if page.get("id") and not page.get("archived")]
 
-
 def home_path(data_dir: Path) -> Path:
     return data_dir / "notion-learning-home.json"
-
 
 def legacy_home(data_dir: Path) -> dict:
     try:
@@ -47,20 +42,10 @@ def legacy_home(data_dir: Path) -> dict:
         return {}
     return home if isinstance(home, dict) and home.get("id") and home.get("parent_id") else {}
 
-
 def saved_home(data_dir: Path) -> dict:
     from .notion_workspace import saved_workspace
     workspace = saved_workspace(data_dir)
-    return workspace if workspace.get("active") else legacy_home(data_dir)
-
-
-def _save_home(data_dir: Path, value: dict) -> None:
-    path = home_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=1), "utf-8")
-    temporary.replace(path)
-
+    return workspace if workspace.get("active") else {}
 
 def _child(client: NotionClient, parent_id: str, title: str) -> dict:
     matches = [page for page in client.list_child_pages(parent_id) if page["title"] == title]
@@ -74,69 +59,6 @@ def _child(client: NotionClient, parent_id: str, title: str) -> dict:
     return {"id": page["id"], "url": page.get("url", "")}
 
 
-def adopt_oauth_template(data_dir: Path, token: str, page_id: str) -> dict:
-    """Use the page Notion duplicated and shared during public OAuth."""
-    existing = saved_home(data_dir)
-    if existing:
-        return existing
-    with NotionClient(token) as client:
-        page = client.get_page(page_id)
-    if not page.get("id"):
-        raise ValueError("Notion 没有返回已授权的学习主页。")
-    home = {"id": page["id"], "url": page.get("url", ""),
-            "parent_id": "oauth-template", "origin": "oauth-template"}
-    _save_home(data_dir, home)
-    return home
-def create_home(data_dir: Path, token: str, parent_id: str) -> dict:
-    parents = available_parents(token)
-    if parent_id not in {page["id"] for page in parents}:
-        raise ValueError("请选择已授权的 Notion 父页面。")
-    existing = saved_home(data_dir)
-    if existing and existing["parent_id"] != parent_id:
-        raise ValueError("学习主页已创建；请先在现有主页继续整理。")
-    with NotionClient(token) as client:
-        if existing:
-            page = client.get_page(existing["id"])
-            return {"id": existing["id"], "url": page.get("url", existing.get("url", "")),
-                    "parent_id": parent_id}
-        page = _child(client, parent_id, HOME_TITLE)
-    home = {"id": page["id"], "url": page["url"], "parent_id": parent_id}
-    _save_home(data_dir, home)
-    return home
-
-
-def move_home(data_dir: Path, token: str, parent_id: str, *, settings=None) -> dict:
-    """Move the existing learning tree, preserving its page ID and contents."""
-    existing = saved_home(data_dir)
-    if existing.get("schema") == 2:
-        from .notion_workspace import move_workspace
-        return move_workspace(settings, parent_id)
-    if not existing:
-        raise ValueError("请先创建 Notion 学习主页。")
-    if parent_id == existing["id"]:
-        raise ValueError("学习主页不能作为自己的父页面。")
-    if parent_id not in {page["id"] for page in available_parents(token)}:
-        raise ValueError("请选择已授权的 Notion 父页面。")
-    with NotionClient(token) as client:
-        page = client.get_page(existing["id"])
-        current_parent = (page.get("parent") or {}).get("page_id")
-        if current_parent != parent_id:
-            moved = client.move_page(existing["id"], parent_id)
-        else:
-            moved = page
-    home = {**existing, "url": moved.get("url") or page.get("url") or existing.get("url", ""),
-            "parent_id": parent_id}
-    _save_home(data_dir, home)
-    return home
-
-
-def _course_titles(data_dir: Path) -> dict[str, str]:
-    rows = campus_courses(data_dir)["courses"]
-    counts = Counter(row["title"] for row in rows)
-    return {row["id"]: (row["title"] if counts[row["title"]] == 1
-                        else f"{row['title']} · {row['id']}") for row in rows}
-
-
 def _lecture_titles(course: dict) -> dict[str, str]:
     bases = {lesson["id"]: " · ".join(
         part for part in (lesson["date"], lesson["title"]) if part
@@ -145,17 +67,14 @@ def _lecture_titles(course: dict) -> dict[str, str]:
     return {key: (title if counts[title] == 1 else f"{title} · {key[:8]}")
             for key, title in bases.items()}
 
-
 def _lecture_status_title(base: str, has_note: bool) -> str:
     # A published child page proves that notes exist, not that the full
     # lecture passed evidence and editorial acceptance.
     return ("笔记待验收 · " if has_note else "待整理 · ") + base
 
-
 def _has_note_child(children: list[dict]) -> bool:
     return any(child.get("title", "").startswith(("转写笔记 ·", "更新笔记 ·"))
                for child in children)
-
 
 def _find_lecture(children: dict[str, dict], base: str) -> dict | None:
     # A prior sync may have left an empty directory page alongside a lecture
@@ -166,7 +85,6 @@ def _find_lecture(children: dict[str, dict], base: str) -> dict | None:
         if title in children:
             return children[title]
     return None
-
 
 def _ensure_status_lecture(client: NotionClient, parent_id: str, base: str,
                            children: dict[str, dict]) -> tuple[dict, bool]:
@@ -211,7 +129,6 @@ def _ensure_status_lecture(client: NotionClient, parent_id: str, base: str,
     children[base] = page
     return page, made
 
-
 def _indexed_children(client: NotionClient, parent_id: str) -> dict[str, dict]:
     found = {}
     for page in client.list_child_pages(parent_id):
@@ -220,7 +137,6 @@ def _indexed_children(client: NotionClient, parent_id: str) -> dict[str, dict]:
             raise ValueError(f"Notion 中有多个同名页面「{title}」，请先手动确认。")
         found[title] = page
     return found
-
 
 def _ensure_indexed_child(client: NotionClient, parent_id: str,
                           title: str, children: dict[str, dict], *,
@@ -236,56 +152,11 @@ def _ensure_indexed_child(client: NotionClient, parent_id: str,
     children[title] = {"id": page["id"], "title": title}
     return children[title], True
 
-
-def _recover_published_notes(client: NotionClient, data_dir: Path, home_id: str,
-                             course_id: str, lessons: list[dict],
-                             lecture_titles: dict[str, str],
-                             lecture_children: dict[str, dict]) -> int:
-    """Adopt existing remote notes from an earlier release without republishing."""
-    from datetime import datetime, timezone
-    from ..pipeline import collect_jobs
-    from .recordings_api import recording_id
-
-    jobs = {recording_id(job): job for job in collect_jobs(data_dir, course_id)}
-    recovered = 0
-    for lesson in lessons:
-        job = jobs.get(lesson["id"])
-        if job is None or not (job.directory / "notes.md").is_file():
-            continue
-        marker = job.directory / "notion-publication.json"
-        if marker.exists():
-            continue
-        lecture = lecture_children.get(lecture_titles[lesson["id"]])
-        if not lecture:
-            continue
-        note_title = f"转写笔记 · {job.recording.date} {job.recording.title}"[:100]
-        matches = [page for page in client.list_child_pages(lecture["id"])
-                   if page.get("title") == note_title and page.get("id")]
-        if len(matches) != 1:
-            continue
-        note_id = matches[0]["id"].replace("-", "")
-        lecture_id = lecture["id"].replace("-", "")
-        publication = {
-            "recording_id": lesson["id"], "home_id": home_id,
-            "lecture_id": lecture["id"],
-            "lecture_url": f"https://www.notion.so/{lecture_id}",
-            "note_url": f"https://www.notion.so/{note_id}",
-            "recovered_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-        temporary = marker.with_name(marker.name + ".tmp")
-        temporary.write_text(json.dumps(publication, ensure_ascii=False, indent=1), "utf-8")
-        temporary.replace(marker)
-        recovered += 1
-    return recovered
-
 SECTION_TITLES = ("通知", "作业", "课堂记录", "资料")
-ASSESSMENT_TITLE = "考核评测"
 LECTURE_PLACEHOLDER = "目录占位 · 这节录像尚未按需整理。当前没有课堂笔记；请在桌面课程页确认整理后再查看。"
-
 
 def _source_state_path(data_dir: Path) -> Path:
     return data_dir / "notion-source-state.json"
-
 
 def _source_state(data_dir: Path) -> dict:
     try:
@@ -293,7 +164,6 @@ def _source_state(data_dir: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
-
 
 def _save_source_state(data_dir: Path, value: dict, *, path: Path | None = None) -> None:
     path = path or _source_state_path(data_dir)
@@ -304,12 +174,10 @@ def _save_source_state(data_dir: Path, value: dict, *, path: Path | None = None)
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=1), "utf-8")
     temporary.replace(path)
 
-
 def _linked_paragraph(label: str, url: str) -> dict:
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
         {"type": "text", "text": {"content": label, "link": {"url": url}}}
     ]}}
-
 
 def _material_source_url(course_id: str, item: dict) -> str:
     from urllib.parse import quote
@@ -319,7 +187,6 @@ def _material_source_url(course_id: str, item: dict) -> str:
         return ("https://course.pku.edu.cn/webapps/blackboard/content/listContent.jsp"
                 "?course_id=" + quote(course_id) + "&content_id=" + quote(parent_id))
     return "https://course.pku.edu.cn/"
-
 
 def _source_url(course_id: str, section: str, item: dict) -> str:
     from urllib.parse import quote
@@ -335,7 +202,6 @@ def _source_url(course_id: str, section: str, item: dict) -> str:
     if section == "通知":
         return announcement_source_url(course_id, str(item.get("id") or ""))
     return _material_source_url(course_id, item)
-
 
 def _summary_line(section: str, item: dict) -> str:
     if section == '测验':
@@ -356,7 +222,6 @@ def _summary_line(section: str, item: dict) -> str:
     if section == "通知":
         return f"老师通知 · {item.get('title') or '未命名通知'}"
     return f"课程资料 · {item.get('title') or '未命名资料'}"
-
 
 def _item_blocks(course_id: str, section: str, item: dict, synced_at: str) -> list[dict]:
     summary = _summary_line(section, item)
@@ -463,7 +328,6 @@ def _item_blocks(course_id: str, section: str, item: dict, synced_at: str) -> li
                       "https://course.pku.edu.cn/#pku-card/" + identity + "/" + _source_block_signature(blocks[0])))
     return blocks
 
-
 def _source_items(course: dict, section: str) -> list[dict]:
     if section == '测验':
         return course.get('official_assessments', [])
@@ -472,26 +336,6 @@ def _source_items(course: dict, section: str) -> list[dict]:
     if section == "作业":
         return course["assignments"] + course.get("announcement_tasks", []) + course.get("handbook_reviews", [])
     return [item for item in course["all_materials"] if item["category"] == "material"]
-
-
-def catalog_plan_total(rows: list[dict]) -> int:
-    """Work items a catalog sync will visit, so the bar reflects real work.
-
-    The counts come from the same local course index the sync walks, so the
-    planned total and the reported progress use one definition of "an item".
-    """
-    total = 1  # the dashboard snapshot written once at the end
-    for row in rows:
-        total += len(SECTION_TITLES)  # 通知 / 作业 / 课堂记录 / 资料 directory pages
-        total += int(row.get("announcements") or 0)
-        total += (int(row.get("assignments") or 0) + int(row.get("announcement_tasks") or 0)
-                  + int(row.get("handbook_reviews") or 0))
-        total += int(row.get("materials") or 0)
-        total += 1  # 考核评测 page
-        total += 1  # 已有课程笔记 link page
-        total += int(row.get("recordings") or 0)
-        total += 1  # 课堂记录 index
-    return total
 
 
 def _source_key(course_id: str, section: str, item: dict) -> str:
@@ -505,12 +349,10 @@ def _source_key(course_id: str, section: str, item: dict) -> str:
                             ("|" + str(item.get("posted_at") or "") if section == "通知" else ""))
     return course_id + "|" + section + "|" + str(identity)
 
-
 _HISTORICAL_SOURCE_NOTE = (
     "以下是旧版同步记录或手动修改的内容，可能已过期；"
     "本页当前要求以上方内容及教学网原页面为准。"
 )
-
 
 def _source_block_signature(block: dict) -> str:
     """Compare app-written content without relying on Notion response metadata."""
@@ -525,11 +367,9 @@ def _source_block_signature(block: dict) -> str:
     return hashlib.sha256(json.dumps((kind, parts), ensure_ascii=False,
                                    sort_keys=True).encode("utf-8")).hexdigest()
 
-
 def _source_block_state(blocks: list[dict]) -> dict[str, str]:
     return {block["id"]: _source_block_signature(block)
             for block in blocks if block.get("id")}
-
 
 def _document_signature(block: dict) -> str:
     kind = block.get("type", "")
@@ -549,14 +389,12 @@ def _document_signature(block: dict) -> str:
     return hashlib.sha256(json.dumps((_source_block_signature(block), details),
                                     ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
-
 def _document_blocks(client: NotionClient, page_id: str) -> list[dict]:
     rows = client.list_children(page_id)
     for row in rows:
         if row.get("type") == "table" and row.get("has_children") and "children" not in row.get("table", {}):
             row["table"] = {**row["table"], "children": client.list_children(row["id"])}
     return rows
-
 
 def _reconcile_document(client: NotionClient, page_id: str, blocks: list[dict],
                         state: dict, key: str) -> None:
@@ -597,7 +435,6 @@ source with a historical label. Digest equality never bypasses a remote read.
     state[manifest_key] = {"id": page_id, "owned_blocks": {block["id"]: _document_signature(block)
                                                          for block in current[:len(blocks)]}}
 
-
 def _recover_source_append(client: NotionClient, page_id: str,
                            blocks: list[dict], owned_before: dict,
                            pending: dict) -> list[dict]:
@@ -629,7 +466,6 @@ def _recover_source_append(client: NotionClient, page_id: str,
                 client.archive_block(block_id, retry=False)
     return client.list_children(page_id)
 
-
 def _next_formal_assignment_due(course: dict, now: datetime | None = None) -> str:
     """Summarize only a future, timezone-aware deadline from the formal index."""
     current = now or datetime.now(timezone.utc)
@@ -656,7 +492,6 @@ def _next_formal_assignment_due(course: dict, now: datetime | None = None) -> st
         return ""
     _, title, label = min(candidates)
     return f"最近已知正式作业截止：{label} · {title}。请打开对应作业卡核对原题与提交要求。"
-
 
 def _source_status(section: str, course: dict, count: int,
                    now: datetime | None = None) -> str:
@@ -696,7 +531,6 @@ def _source_status(section: str, course: dict, count: int,
             status += ("\n老师原文中的截止线索（系统无独立截止字段，请打开原作业页核对）："
                        + "；".join(teacher_clues[:3]))
     return status
-
 
 def _sync_source_status(client: NotionClient, page_id: str,
                         section: str, course: dict, count: int,
@@ -741,7 +575,6 @@ def _sync_source_status(client: NotionClient, page_id: str,
     if not any(_source_block_signature(row) == expected for row in client.list_children(page_id)):
         raise ValueError("Notion 教学网状态写入后验证失败。")
 
-
 def _source_read_time_text(block):
     if block.get('type') != 'paragraph':
         return None
@@ -755,7 +588,6 @@ def _source_read_time_text(block):
     if _document_signature(block) != _document_signature(markdown_to_blocks(text)[0]):
         return None
     return text
-
 
 def _source_body_matches(existing, desired):
     """Compare the displayed source, allowing only its observation time to age."""
@@ -773,7 +605,6 @@ def _source_body_matches(existing, desired):
         time_changes += 1
     return time_changes <= 1
 
-
 def _recorded_source_matches(existing, owned, course_id):
     """Permit read-only reuse of one changed clock, without claiming its signature."""
     current = {block.get('id'): block for block in existing if block.get('id')}
@@ -790,7 +621,6 @@ def _recorded_source_matches(existing, owned, course_id):
             return False
         changed_times += 1
     return changed_times <= 1
-
 
 def _refresh_source_read_time(client, page_id, existing, desired, previous):
     """Refresh only an unchanged, recorded source card's observation time."""
@@ -826,7 +656,6 @@ def _refresh_source_read_time(client, page_id, existing, desired, previous):
                 or _source_block_state(actual) != expected):
             raise ValueError('Notion 卡片读取时间更新后内容发生变化；原记录保留，未确认完成。')
     return {**owned, **{identifier: signature for identifier, _, signature in changes}}
-
 
 @verified_workspace_operation('source-section')
 def _sync_source_section(client: NotionClient, data_dir: Path, course_id: str,
@@ -1022,7 +851,6 @@ def _sync_source_section(client: NotionClient, data_dir: Path, course_id: str,
                 raise ValueError('Notion 来源卡片在同步期间发生变化；原内容保留，未确认完成。')
     _sync_source_status(client, page_id, section, course, len(items))
 
-
 def _sync_existing_notes_link(client: NotionClient, course_id: str,
                               course_page_id: str, course: dict, state: dict) -> None:
     from urllib.parse import urlsplit
@@ -1049,14 +877,12 @@ def _sync_existing_notes_link(client: NotionClient, course_id: str,
     _reconcile_document(client, page["id"], blocks, state, key)
     state[key] = url
 
-
 def _sync_lecture_placeholder(client: NotionClient, lecture_id: str) -> None:
     if not client.list_children(lecture_id):
         blocks = markdown_to_blocks(LECTURE_PLACEHOLDER)
         client.append_blocks(lecture_id, blocks, retry=False)
         if [_source_block_signature(row) for row in client.list_children(lecture_id)] != [_source_block_signature(row) for row in blocks]:
             raise ValueError("Notion 讲次页创建后验证失败。")
-
 
 @verified_workspace_operation('lecture')
 def _sync_source_lectures(client, parent_id, lessons, titles, children, *, tick=None,
@@ -1092,7 +918,6 @@ def _sync_source_lectures(client, parent_id, lessons, titles, children, *, tick=
         final_observation.update(deepcopy(final))
     return result
 
-
 def _lecture_note_identity(rows):
     # list_child_pages derives these same child_page blocks from a complete
     # paginated list_children response. Never use a persisted note cache.
@@ -1100,7 +925,6 @@ def _lecture_note_identity(rows):
                      for row in rows if row.get('type') == 'child_page'
                      and (row.get('child_page') or {}).get('title', '').startswith(
                          ('转写笔记 ·', '更新笔记 ·')))
-
 
 def _unchanged_source_lecture(lesson, base, children, observed):
     marker = _lecture_marker(lesson)
@@ -1122,7 +946,6 @@ def _unchanged_source_lecture(lesson, base, children, observed):
     # verified operation can complete. Changed/new pages keep the write path.
     return page, notes
 
-
 def _lecture_observations(client, children):
     pages = [page for page in {page['id']: page for page in children.values()}.values()
              if page.get('title') not in SECTION_TITLES]
@@ -1135,14 +958,12 @@ def _lecture_observations(client, children):
     with ThreadPoolExecutor(max_workers=min(4, len(pages))) as pool:
         return dict(pool.map(read, pages))
 
-
 def _lecture_marker(lesson):
     from urllib.parse import quote
     identity = lesson.get('source_id')
     return (_linked_paragraph('查看教学网讲次来源', 'https://course.pku.edu.cn/' +
             'webapps/bb-streammedia-hqy-BBLEARN/videoList.action#' + quote(identity, safe=''))
             if identity else None)
-
 
 def _verify_lecture_identities(lessons, observed, *, result=None):
     for lesson in lessons:
@@ -1157,7 +978,6 @@ def _verify_lecture_identities(lessons, observed, *, result=None):
         if result is not None and (len(matches) != 1 or
                 matches[0]['id'] != result[lesson['id']][0]['id']):
             raise ValueError('Notion 教学网讲次标识在同步期间发生变化；未确认目录完成。')
-
 
 def _ensure_source_lecture(client: NotionClient, parent_id: str, lesson: dict,
                            base: str, children: dict[str, dict], *, observed=None) -> tuple[dict, bool]:
@@ -1201,7 +1021,6 @@ def _ensure_source_lecture(client: NotionClient, parent_id: str, lesson: dict,
             observed[page['id']] = (page, verified)
     return page, made
 
-
 def _recording_note_snapshot(client, lessons, titles, lecture_children):
     pages = {lecture_children[titles[lesson['id']]]['id'] for lesson in lessons}
     if not pages:
@@ -1212,7 +1031,6 @@ def _recording_note_snapshot(client, lessons, titles, lecture_children):
             if row.get('title', '').startswith(('转写笔记 ·', '更新笔记 ·')))
     with ThreadPoolExecutor(max_workers=min(4, len(pages))) as pool:
         return dict(pool.map(read, sorted(pages)))
-
 
 def _sync_recording_section(client: NotionClient, page_id: str,
                             lessons: list[dict], titles: dict[str, str],
@@ -1272,200 +1090,8 @@ def _sync_recording_section(client: NotionClient, page_id: str,
     state[key] = digest
 
 
-
-def _sync_assessment_page(client: NotionClient, data_dir: Path, course_id: str,
-                          course_page_id: str, detail: dict, state: dict) -> None:
-    """Keep one course-level page for grading, exam and submission rules.
-
-    A lecture note records the lecture. The rules a student must not miss are
-    course-level and scattered across the handbook, the formal cards and the
-    teacher's own words, so they get one page of their own. The page is rebuilt
-    from its sources, so it refuses to touch a page edited by hand.
-    """
-    from .assessment_page import INTRO, assessment_markdown, collect_spoken_lines
-
-    markdown = assessment_markdown(detail, collect_spoken_lines(data_dir, course_id))
-    digest = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-    key = course_id + "|考核评测"
-    children = _indexed_children(client, course_page_id)
-    blocks = markdown_to_blocks(markdown)
-    # Keep the existing append path for oversized documents. A small new
-    # document needs one tracked write instead of empty-create then append.
-    initial = blocks if len(blocks) <= 100 else None
-    page, made = _ensure_indexed_child(client, course_page_id, ASSESSMENT_TITLE,
-                                      children, initial_blocks=initial)
-    existing = _document_blocks(client, page["id"])
-    if made and initial:
-        if [_document_signature(row) for row in existing] != [_document_signature(row) for row in blocks]:
-            raise ValueError("Notion 考核评测页创建后验证失败；未记录内容所有权。")
-        state[key + '|verified-blocks'] = {'id': page['id'], 'owned_blocks': {
-            row['id']: _document_signature(row) for row in existing}}
-    if existing:
-        first = existing[0]
-        rich = (first.get(first.get("type") or "", {}) or {}).get("rich_text") or []
-        marker = "".join(part.get("plain_text") or part.get("text", {}).get("content", "")
-                         for part in rich)
-        if not marker.startswith(INTRO[:24]):
-            raise ValueError("考核评测页含有手动内容，已停止自动覆盖。")
-    _reconcile_document(client, page["id"], blocks, state, key)
-    state[key] = digest
-
-
 DASHBOARD_TITLE = "近期待办与新通知"
 DASHBOARD_MARKER = "学习概览 · 来自教学网正式目录与老师公告；请以原页面为准。"
-
-
-def _dashboard_snapshot_label(courses: list[dict]) -> str:
-    """Keep the source age visible even if nobody opens the desktop app again."""
-    timestamps = []
-    for course in courses:
-        raw = str(course.get("synced_at") or "")
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if parsed.tzinfo is not None:
-            timestamps.append(parsed.astimezone(timezone.utc))
-    if not timestamps:
-        source = "教学网课程目录的读取时间未记录。"
-    else:
-        earliest = display_campus_time(min(timestamps).isoformat())
-        latest = display_campus_time(max(timestamps).isoformat())
-        source = (f"教学网课程目录读取时间：{earliest}。" if earliest == latest else
-                  f"教学网课程目录读取时间：{earliest} 至 {latest}。")
-    missing = len(courses) - len(timestamps)
-    if missing:
-        source += f"另有 {missing} 门课程未记录读取时间。"
-    return (source + "此页是同步快照，不会实时刷新；超过 24 小时的课程请在桌面版更新目录，"
-            "并到教学网原页核对新作业与通知。")
-
-
-def _dashboard_blocks(data_dir: Path, titles: dict[str, str], state: dict, course_ids=None) -> list[dict]:
-    from datetime import timedelta
-    from .campus_todos import announcement_source_url
-    now = datetime.now(timezone.utc)
-    due_rows = []
-    notice_rows = []
-    handbook_rows = []
-    course_rows = campus_courses(data_dir)["courses"]
-    if course_ids is not None:
-        course_rows = [row for row in course_rows if row["id"] in course_ids]
-    for row in course_rows:
-        course = campus_course(data_dir, row["id"])
-        course_title = titles[row["id"]]
-        for item in course["assignments"] + course.get("announcement_tasks", []):
-            due_raw = str(item.get("due_at") or "")
-            if not due_raw:
-                continue
-            try:
-                due = datetime.fromisoformat(due_raw.replace("Z", "+00:00"))
-                if due.tzinfo is None:
-                    due = due.replace(tzinfo=timezone(timedelta(hours=8)))
-            except ValueError:
-                continue
-            if due < now or due > now + timedelta(days=14):
-                continue
-            key = _source_key(row["id"], "作业", item)
-            page_id = (state.get(key) or {}).get("id", "")
-            url = ("https://www.notion.so/" + page_id.replace("-", "")
-                   if page_id else _source_url(row["id"], "作业", item))
-            due_rows.append((due, course_title, item, url))
-        for item in course.get("handbook_reviews", []):
-            key = _source_key(row["id"], "作业", item)
-            page_id = (state.get(key) or {}).get("id", "")
-            url = ("https://www.notion.so/" + page_id.replace("-", "")
-                   if page_id else _source_url(row["id"], "作业", item))
-            handbook_rows.append((course_title, item, url))
-        for item in course["announcements"]:
-            key = _source_key(row["id"], "通知", item)
-            page_id = (state.get(key) or {}).get("id", "")
-            url = ("https://www.notion.so/" + page_id.replace("-", "") if page_id
-                   else announcement_source_url(row["id"], str(item.get("id") or "")))
-            notice_rows.append((str(item.get("posted_at") or ""), course_title, item, url))
-    snapshot_day = now.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    blocks = markdown_to_blocks(
-        DASHBOARD_MARKER + "\n\n" + _dashboard_snapshot_label(course_rows) +
-        f"\n\n## {snapshot_day} 起 14 天内的已知截止事项"
-    )
-    for _, course_title, item, url in sorted(due_rows, key=lambda value: value[0]):
-        kind = ("公告待办" if item.get("source") == "announcement" else
-                "教学网日历事项（目标关联待核对，所列为日历时间）" if item.get("source") == "calendar" else "正式作业")
-        label = (f"{item.get('due_at_label') or item.get('due_at')} · {course_title} · "
-                 f"{kind} · {item.get('notice_title') or item.get('title')}")
-        blocks.append(_linked_paragraph(label, url))
-    if not due_rows:
-        blocks += markdown_to_blocks("正式作业和公告索引中未发现未来 14 天的已知截止事项；课程手册及课堂要求仍需核对。")
-    if handbook_rows:
-        time_rows = [(title, item, url, cue)
-                     for title, item, url in handbook_rows
-                     for cue in (item.get("time_preview") or [])[:2]][:12]
-        if time_rows:
-            blocks += markdown_to_blocks(
-                "## 手册中的日期线索（节选，待核对）\n\n"
-                "以下保留手册原文和页码，可能包含小测、展示或提交安排；"
-                "尚未核对年份、本人参与方式或老师后续调整，不代表正式作业截止时间。"
-                "点开手册卡片查看其余要求。")
-            for course_title, item, url, cue in time_rows:
-                excerpt = str(cue.get("text") or "").strip().replace("\n", " / ")
-                if len(excerpt) > 600:
-                    excerpt = excerpt[:600] + "…（原文见手册）"
-                blocks.append(_linked_paragraph(
-                    f"{course_title} · {item.get('filename')} · PDF 第 {cue['page']} 页 · {excerpt}", url))
-        presence_rows = [(title, item, url) for title, item, url in handbook_rows
-                         if item.get("presence_preview")]
-        if presence_rows:
-            blocks += markdown_to_blocks("## 需核对本人参与的事项\n\n"
-                                         "笔记不能代替出勤、现场活动或本人考试；具体到场和参与方式以老师最新要求为准。")
-            for course_title, item, url in presence_rows:
-                labels = "、".join(dict.fromkeys(cue["label"] for cue in item["presence_preview"]))
-                blocks.append(_linked_paragraph(
-                    f"{course_title} · {labels} · {item.get('filename')}（查看手册原文与页码）", url))
-        blocks += markdown_to_blocks("## 课程手册待核对")
-        for course_title, item, url in handbook_rows:
-            pages = "、".join(str(page["page"]) for page in item.get("pages") or [])
-            label = f"{course_title} · {item.get('filename')}" + (f" · PDF 第 {pages} 页有考核线索" if pages else " · 请核对全文")
-            blocks.append(_linked_paragraph(label, url))
-    blocks += markdown_to_blocks("## 最近通知")
-    for _, course_title, item, url in sorted(notice_rows, reverse=True)[:10]:
-        blocks.append(_linked_paragraph(
-            f"{course_title} · {item.get('title') or '未命名通知'} · "
-            f"{item.get('posted_at_label') or item.get('posted_at') or '时间未提供'}", url))
-    if not notice_rows:
-        blocks += markdown_to_blocks("尚未同步到正式通知；请到教学网核对。")
-    return blocks
-
-
-def _sync_dashboard(client: NotionClient, data_dir: Path, home_id: str,
-                    titles: dict[str, str], state: dict, course_ids=None) -> None:
-    blocks = _dashboard_blocks(data_dir, titles, state, course_ids)
-    digest = hashlib.sha256(json.dumps(blocks, ensure_ascii=False, sort_keys=True)
-                            .encode("utf-8")).hexdigest()
-    page = _child(client, home_id, DASHBOARD_TITLE)
-    existing = client.list_children(page["id"])
-    if existing:
-        first = existing[0]
-        rich = (first.get(first.get("type") or "", {}) or {}).get("rich_text") or []
-        marker = "".join(part.get("plain_text") or part.get("text", {}).get("content", "")
-                         for part in rich)
-        if marker != DASHBOARD_MARKER:
-            raise ValueError("近期待办页面已有手动内容；未自动覆盖。")
-    _reconcile_document(client, page["id"], blocks, state, "|dashboard")
-    home_blocks = client.list_children(home_id)
-    link_text = "查看近期待办与新通知"
-    has_link = any(
-        block.get("type") == "paragraph" and
-        any((part.get("plain_text") or part.get("text", {}).get("content", "")) == link_text
-            for part in (block.get("paragraph") or {}).get("rich_text") or [])
-        for block in home_blocks
-    )
-    if not has_link:
-        first = home_blocks[0]["id"] if home_blocks else None
-        client.append_blocks(home_id, [_linked_paragraph(
-            link_text, "https://www.notion.so/" + page["id"].replace("-", "")
-        )], after=first, retry=False)
-    current = client.list_children(page["id"])
-    state["|dashboard"] = {"id": page["id"], "hash": digest,
-                           "block_ids": [block["id"] for block in current]}
 
 @contextmanager
 def _catalog_authority(data_dir: Path, settings, course_ids=None, *, verified_steps=False,
@@ -1499,25 +1125,41 @@ def _catalog_authority(data_dir: Path, settings, course_ids=None, *, verified_st
                 before_existing_projection()
     for envelope in envelopes:
         join_before_existing_receipt(envelope)
-    from ..projection_receipts import prepared_cohort, prepared_read_phase
-    with prepared_cohort(verified_steps=verified_steps, tracked_mutations=tracked_mutations) as cohort:
-        with prepared_read_phase(settings, envelopes, check_cancel=check_cancel), ExitStack() as stack:
-            for envelope in envelopes:
-                if check_cancel:
-                    check_cancel()
-                # A receipt appearing after preflight still cannot overlap
-                # reads. A late wait may expire the original TTL and fail;
-                # it must never renew or relax that freshness boundary.
-                join_before_existing_receipt(envelope)
-                stack.enter_context(catalog.projection(settings, envelope))
-            for envelope in envelopes:
-                catalog.save_cache(data_dir, envelope)
-            cohort.begin()
-            if check_cancel:
-                check_cancel()
-            yield frozenset(envelope["snapshot"]["course_id"] for envelope in envelopes)
-            cohort.complete()
-
+    from ..projection_receipts import PreparedReadExpired, prepared_cohort, prepared_read_phase
+    with ExitStack() as stack:
+        from .. import platform
+        stack.enter_context(platform.request_scope())
+        binding = catalog._read_binding(settings)
+        for prefetch in (True, False):
+            try:
+                with ExitStack() as admission:
+                    cohort = admission.enter_context(prepared_cohort(
+                        verified_steps=verified_steps, tracked_mutations=tracked_mutations))
+                    if prefetch:
+                        admission.enter_context(prepared_read_phase(settings, envelopes, check_cancel=check_cancel))
+                    for envelope in envelopes:
+                        if check_cancel:
+                            check_cancel()
+                        if catalog._read_binding(settings) != binding:
+                            raise catalog.CatalogUnavailable('账号或连接已变化，请重新读取课程。')
+                        join_before_existing_receipt(envelope)
+                        admission.enter_context(catalog.projection(settings, envelope))
+                    stack.enter_context(admission.pop_all())
+                break
+            except PreparedReadExpired:
+                if not prefetch:
+                    raise
+                # The failed admission has released every known permit before
+                # this new phase. Discard all prefetched evidence and perform
+                # the original fresh serial checks. Never extend the TTL, retry
+                # a changed snapshot, or replay the writer body below.
+        for envelope in envelopes:
+            catalog.save_cache(data_dir, envelope)
+        cohort.begin()
+        if check_cancel:
+            check_cancel()
+        yield frozenset(envelope["snapshot"]["course_id"] for envelope in envelopes)
+        cohort.complete()
 
 def sync_catalog(data_dir: Path, token: str, stage=None, progress=None,
                  item_progress=None, *, settings=None, course_id: str = "",
@@ -1535,169 +1177,12 @@ def sync_catalog(data_dir: Path, token: str, stage=None, progress=None,
         if progress:
             progress(len(result["courses"]), len(result["courses"]), "courses", 0)
         return result
-    scope = {"course_ids": [course_id]} if course_id else {}
-    with _catalog_authority(data_dir, settings, tracked_mutations=True, **scope) as course_ids:
-        projection_scope = {"update_dashboard": False} if course_id else {}
-        return _sync_catalog_projection(data_dir, token, stage, progress, item_progress,
-                                        course_ids=course_ids, **projection_scope)
-
-
-def repair_classroom_index(settings, course_id: str) -> dict:
-    """Repair one existing classroom index from the current account snapshot.
-
-This is the incident-repair path: retain the home, course, existing lecture
-pages and every student block. No dashboard, other course or assessment page
-is rewritten. Requires a confirmed complete portal refresh on this device.
-"""
-    from .. import catalog_snapshots as catalog
-    root = Path(settings.data_dir)
-    catalog.activate_account(settings)
-    catalog.assert_portal_readable(root, course_id)
-    expected = catalog.cached(root, course_id)
-    if expected is None:
-        raise catalog.CatalogUnavailable("没有当前账号已确认的教学网快照，禁止修复共享目录。")
-    home = legacy_home(root)
-    if not home:
-        raise ValueError("Windows 尚未配置既有 Notion 学习主页。")
-    title = _course_titles(root).get(course_id)
-    state = _source_state(root)
-    with catalog.projection(settings, expected):
-        with NotionClient(settings.notion_token) as client:
-            courses = _indexed_children(client, home["id"])
-            if title not in courses:
-                raise ValueError("既有 Notion 主页中没有唯一对应课程页；未创建或覆盖页面。")
-            course_page = courses[title]
-            sections = _indexed_children(client, course_page["id"])
-            if "课堂记录" not in sections:
-                raise ValueError("既有课程没有课堂记录索引；未创建或覆盖页面。")
-            page_id = sections["课堂记录"]["id"]
-            before = len(client.list_children(page_id))
-            detail = campus_course(root, course_id)
-            titles = _lecture_titles(detail)
-            children = _indexed_children(client, course_page["id"])
-            _sync_source_lectures(client, course_page['id'], detail['lessons'], titles, children)
-            _sync_recording_section(client, page_id, detail["lessons"], titles, children, state, course_id)
-            after = len(client.list_children(page_id))
-        _save_source_state(root, state)
-    return {"course_id": course_id, "revision": expected["revision"],
-            "lectures_verified": len(detail["lessons"]), "blocks_added": after - before,
-            "index_url": "https://www.notion.so/" + page_id.replace("-", "")}
-
-
-def _sync_catalog_projection(data_dir: Path, token: str, stage=None, progress=None,
-                             item_progress=None, *, course_ids=None,
-                             update_dashboard: bool = True) -> dict:
-    """Create empty Notion course and lecture pages from the campus index.
-
-    This operation never downloads recordings or attachments. Repeated runs
-    inspect existing children before writing, so refreshing a course is safe.
-    ``item_progress(done, total, label)`` reports how many planned pages and
-    cards are finished, so the desktop panel can show remaining work honestly.
-    """
-    home = saved_home(data_dir)
-    if not home:
-        raise ValueError("请先选择 Notion 父页面并创建学习主页。")
-    rows = campus_courses(data_dir)["courses"]
-    if course_ids is not None:
-        rows = [row for row in rows if row["id"] in course_ids]
-    if not update_dashboard and len(rows) != 1:
-        raise ValueError("这门课程的教学网目录未唯一确认；未执行 Notion 同步。")
-    titles = _course_titles(data_dir)
-    created_courses = created_lectures = recovered_notes = 0
-    total_items = catalog_plan_total(rows) - int(not update_dashboard)
-    done_items = 0
-
-    def tick(label: str) -> None:
-        nonlocal done_items
-        done_items += 1
-        if item_progress:
-            item_progress(done_items, total_items, label)
-
-    source_state = _source_state(data_dir)
-    with NotionClient(token) as client:
-        client.get_page(home["id"])
-        home_children = _indexed_children(client, home["id"])
-        for index, row in enumerate(rows, 1):
-            if stage:
-                stage(f"建立 Notion 课程页：{row['title']}")
-            course_page, made = _ensure_indexed_child(
-                client, home["id"], titles[row["id"]], home_children
-            )
-            created_courses += int(made)
-            detail = campus_course(data_dir, row["id"])
-            course_children = _indexed_children(client, course_page["id"])
-            sections = {}
-            for section in SECTION_TITLES:
-                initial = (markdown_to_blocks(_source_status(
-                    section, detail, len(_source_items(detail, section))))
-                    if section in {'通知', '作业', '资料'} else None)
-                section_page, _ = _ensure_indexed_child(
-                    client, course_page["id"], section, course_children,
-                    initial_blocks=initial,
-                )
-                sections[section] = section_page
-                tick(f"{row['title']} · 建目录页：{section}")
-            for section in ("通知", "作业", "资料"):
-                _sync_source_section(client, data_dir, row["id"], section,
-                                     sections[section]["id"], detail, source_state,
-                                     tick=lambda label, course_title=row["title"]:
-                                     tick(f"{course_title} · {label}"))
-            _sync_assessment_page(client, data_dir, row["id"], course_page["id"],
-                                  detail, source_state)
-            tick(f"{row['title']} · 考核评测页")
-            _sync_existing_notes_link(client, row["id"], course_page["id"],
-                                      detail, source_state)
-            tick(f"{row['title']} · 已有课程笔记页")
-            lecture_titles = _lecture_titles(detail)
-            lecture_children = _indexed_children(client, course_page["id"])
-            def lecture_tick(lesson):
-                tick(f"{row['title']} · 讲次页："
-                     + " · ".join(part for part in (lesson["date"], lesson["title"]) if part))
-            verified_lectures = _sync_source_lectures(
-                client, course_page['id'], detail['lessons'], lecture_titles,
-                lecture_children, tick=lecture_tick)
-            created_lectures += sum(int(made) for _, made in verified_lectures.values())
-            recovered_notes += _recover_published_notes(
-                client, data_dir, home["id"], row["id"], detail["lessons"],
-                lecture_titles, lecture_children
-            )
-            _sync_recording_section(client, sections["课堂记录"]["id"],
-                                    detail["lessons"], lecture_titles,
-                                    lecture_children, source_state, row["id"])
-            tick(f"{row['title']} · 课堂记录索引")
-            _save_source_state(data_dir, source_state)
-            if progress:
-                progress(index, len(rows), "courses", 0)
-        if update_dashboard:
-            _sync_dashboard(client, data_dir, home["id"], titles, source_state, course_ids)
-            _save_source_state(data_dir, source_state)
-            tick("汇总近期待办与新通知")
-    return {"courses": len(rows), "created_courses": created_courses,
-            "created_lectures": created_lectures, "recovered_notes": recovered_notes, "home_url": home.get("url", "")}
-
+    raise ValueError("请先创建学习主页；旧主页内容已保留，不会继续写入。")
 
 def ensure_recording_target(data_dir: Path, token: str, job, *, settings=None) -> str:
-    from .notion_workspace import saved_workspace, sync_workspace
-    if saved_workspace(data_dir):
-        if settings is None:
-            raise ValueError("新版讲次目标需要已验证的账号快照。")
-        from .recordings_api import recording_id
-        workspace = sync_workspace(settings, course_id=job.recording.course_id)
-        return workspace["courses"][job.recording.course_id]["lectures"][recording_id(job)]["id"]
-    home = saved_home(data_dir)
-    if not home:
-        raise ValueError("请先在 Notion 中创建学习主页。")
-    course = campus_course(data_dir, job.recording.course_id)
+    from .notion_workspace import sync_workspace
     from .recordings_api import recording_id
-    lecture_title = _lecture_titles(course)[recording_id(job)]
-    course_title = _course_titles(data_dir)[job.recording.course_id]
-    with NotionClient(token) as client:
-        client.get_page(home["id"])
-        course_page = _child(client, home["id"], course_title)
-        children = _indexed_children(client, course_page["id"])
-        lecture_page = _find_lecture(children, lecture_title)
-        if lecture_page is None:
-            lecture_page, _ = _ensure_status_lecture(
-                client, course_page["id"], lecture_title, children)
-    return lecture_page["id"]
-
+    if settings is None:
+        raise ValueError("讲次目标需要已验证的账号快照。")
+    workspace = sync_workspace(settings, course_id=job.recording.course_id)
+    return workspace["courses"][job.recording.course_id]["lectures"][recording_id(job)]["id"]

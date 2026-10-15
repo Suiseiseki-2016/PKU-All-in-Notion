@@ -8,6 +8,8 @@ permissions:
 jobs:
   package:
     runs-on: macos-15
+    env:
+      UV_PYTHON: '3.12'
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.2.0

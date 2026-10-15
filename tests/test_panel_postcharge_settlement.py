@@ -1,10 +1,10 @@
-﻿"""Regression coverage for charged grading recovery boundaries."""
+"""Regression coverage for charged grading recovery boundaries."""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 
-from pku_sync.panel.exercise_grader import ExerciseGrader, GradeTarget, GradingInput
+from pku_sync.panel.quiz_grading_core import ExerciseGrader, GradeTarget, GradingInput
 
 
 @dataclass

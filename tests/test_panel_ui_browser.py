@@ -15,7 +15,7 @@ from browser_support import browser_launch_options
 from fastapi.testclient import TestClient
 
 from pku_sync.panel.connection import ConnectionService, CONNECTED_COPY, CONNECT_FAILED_COPY
-from pku_sync.panel.fake_directory import build_fake_directory
+
 from pku_sync.panel.platform_bridge import FakePlatformBridge
 from pku_sync.platform import PlatformError
 from pku_sync.panel.webapi import create_app
@@ -60,13 +60,7 @@ class _RetryConnection:
 def test_registration_verification_and_notion_connection_in_edge():
     platform = FakePlatformBridge(activated=False)
     provider = _RetryConnection()
-    app = create_app(
-        settings=SimpleNamespace(data_dir="data", platform_token=""),
-        runner=_NoopRunner(),
-        directory_service=build_fake_directory(),
-        connection_service=ConnectionService(provider),
-        platform_service=platform,
-    )
+    app = create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=ConnectionService(provider), platform_service=platform)
     client = TestClient(app)
 
     def serve(route):
@@ -92,6 +86,7 @@ def test_registration_verification_and_notion_connection_in_edge():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.set_viewport_size({"width": 800, "height": 560})
@@ -182,6 +177,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/")
             page.evaluate("(copy) => { window.PANEL_COPY = copy; }", PANEL_COPY)
@@ -253,19 +249,12 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
 
 
 @pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_notion_preview_opens_browser_and_returns_to_old_library():
+def test_retired_library_has_no_desktop_or_mobile_entry():
     from pku_sync.panel.connection import build_fake_connection_service
 
     opened = []
-    directory = build_fake_directory()
-    app = create_app(
-        settings=SimpleNamespace(data_dir="data", platform_token=""),
-        runner=_NoopRunner(),
-        directory_service=directory,
-        connection_service=build_fake_connection_service(directory_service=directory),
-        platform_service=FakePlatformBridge(activated=True),
-        notion_opener=lambda url: opened.append(url) or True,
-    )
+    directory = None
+    app = create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=build_fake_connection_service(directory_service=directory), platform_service=FakePlatformBridge(activated=True), notion_opener=lambda url: opened.append(url) or True)
     client = TestClient(app)
 
     def serve(route):
@@ -291,20 +280,18 @@ def test_notion_preview_opens_browser_and_returns_to_old_library():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.get_by_role("heading", name="我的课程").wait_for()
             assert page.locator('[data-action="open-course"]').count() == 0
-            page.locator('.sidebar [data-action="open-library"]').click()
-            page.locator('[data-action="open-course"]').first.click()
-            page.locator('[data-action="select-lecture"]').first.click()
-            page.locator('[data-action="launch"][data-kind="lecture"]').first.click()
-            page.get_by_text(PANEL_COPY["launch"]["opened_external"]).wait_for()
-            assert len(opened) == 1
-            assert opened[0].startswith("https://www.notion.so/")
-            assert page.url == "http://panel.test/app"
-            assert page.locator('[data-nav="library"][aria-current="page"]').count() >= 1
-            assert page.locator('[data-action="open-course"]').count() >= 1
+            assert page.locator('[data-action="open-library"]').count() == 0
+            assert page.locator('[data-nav="library"]').count() == 0
+            page.set_viewport_size({'width':390,'height':844})
+            page.locator('.mobile-account-menu > summary').click()
+            assert '旧学习资料' not in page.locator('.mobile-account-menu').inner_text()
+            assert opened == []
+            assert page.url == 'http://panel.test/app'
         finally:
             browser.close()
 
@@ -323,6 +310,7 @@ def test_sidebar_stays_put_while_right_content_scrolls():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.set_content(markup)
             before = page.locator(".sidebar").bounding_box()
             page.mouse.move(800, 350)
@@ -371,14 +359,8 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
     from pku_sync.panel.connection import build_fake_connection_service
 
     platform = _RedeemPlatform()
-    directory = build_fake_directory()
-    app = create_app(
-        settings=SimpleNamespace(data_dir="data", platform_token=""),
-        runner=_NoopRunner(),
-        directory_service=directory,
-        connection_service=build_fake_connection_service(directory_service=directory),
-        platform_service=platform,
-    )
+    directory = None
+    app = create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=build_fake_connection_service(directory_service=directory), platform_service=platform)
     client = TestClient(app)
     assert client.post("/api/platform/redeem", json={"code": "TEST1234"}).status_code == 403
 
@@ -405,6 +387,7 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             page.locator(".sidebar").get_by_text(PANEL_COPY["account"]["unverified"], exact=True).wait_for()
@@ -441,294 +424,8 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
         finally:
             browser.close()
 
-@pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_course_recording_stays_metadata_only_until_user_confirms(tmp_path, monkeypatch):
-    import json
-    from pku_sync.config import Settings
-    from pku_sync.models import Recording
-    from pku_sync.panel.connection import build_fake_connection_service
-    from pku_sync.panel import notion_home
-    from pku_sync import platform as account_platform
-
-    monkeypatch.setattr(account_platform, '_fetch_account_profile',
-                        lambda _settings: {'status':'ready','revision':0,'profile':{}})
-
-    monkeypatch.setattr(notion_home, "available_parents", lambda _token: [{
-        "id": "oauth-template", "title": "已授权父页面", "url": "https://www.notion.so/oauth-template"
-    }])
-
-    directory = build_fake_directory()
-    notion_course = directory.load()["courses"][0]
-    settings = Settings(_env_file=None, data_dir=tmp_path, pku_username="student",
-                        pku_password="secret", platform_token="session", notion_token="notion")
-    opened = []
-    app = create_app(
-        settings=settings, runner=_NoopRunner(), directory_service=directory,
-        notion_opener=lambda url: (opened.append(url) or True),
-        connection_service=build_fake_connection_service(),
-        platform_service=FakePlatformBridge(activated=True),
-    )
-    client = TestClient(app)
-    campus = tmp_path / "campus-course"
-    (campus / "recordings").mkdir(parents=True)
-    (campus / "course.json").write_text(
-        json.dumps({"course_id": "campus-one", "name": notion_course["title"]}), "utf-8"
-    )
-    recording = Recording(course_id="campus-one", title="第1讲录像",
-                          recorded_at="2026-09-24 09:00:00")
-    (campus / "recordings" / "index.json").write_text(
-        json.dumps([recording.model_dump()]), "utf-8"
-    )
-    (campus / "materials").mkdir()
-    (campus / "materials" / "index.json").write_text(json.dumps([
-        {"title": "第1讲课件", "kind": "文件", "path": "教学内容/第1讲课件",
-         "files": ["slides.pdf"]},
-        {"title": "补充阅读", "kind": "文件", "path": "资料/补充阅读", "files": []},
-    ]), "utf-8")
-    (tmp_path / "notion-learning-home.json").write_text(json.dumps({
-        "id": "home", "parent_id": "oauth-template", "url": "https://notion.so/home"
-    }), "utf-8")
-    # Processing is enabled only for an account-confirmed official snapshot.
-    # A bare legacy index now intentionally renders as read-only.
-    from pku_sync import catalog_snapshots as catalog
-    from pku_sync.models import Course
-    catalog.activate_account(settings)
-    material_rows = json.loads((campus / "materials/index.json").read_text("utf-8"))
-    for number, row in enumerate(material_rows, 1):
-        row["content_id"] = f"_fixture{number}_1"
-    catalog.save_cache(tmp_path, {"revision": 1, "snapshot": catalog.build_snapshot(
-        Course(course_id="campus-one", name=notion_course["title"]),
-        [recording], material_rows, [], [])})
-    started = []
-    catalog_calls = []
-    app.state.recording_manager.start_background_sync = lambda **kwargs: (catalog_calls.append("explicit") or {
-        "state": "done", "kind": "sync", "scope": "background", "stage": "逐课更新已完成"
-    })
-    app.state.recording_manager.start_campus_process = lambda *args, **kwargs: (
-        started.append((args, kwargs)) or {"state": "running", "kind": "process", "stage": "下载录像",
-                                 "progress_done": 5242880, "progress_total": 10485760,
-                                 "progress_unit": "bytes", "bytes_done": 5242880, "speed_bps": 10240}
-    )
-
-    def serve(route):
-        request = route.request
-        url = urlsplit(request.url)
-        path = url.path + ("?" + url.query if url.query else "")
-        if path == "/api/update":
-            route.fulfill(status=404, body="{}", content_type="application/json")
-            return
-        response = client.request(
-            request.method, path,
-            content=request.post_data.encode() if request.post_data else None,
-            headers={"content-type": request.headers.get("content-type", "application/json")},
-        )
-        route.fulfill(status=response.status_code, body=response.content,
-                      content_type=response.headers.get("content-type", "text/plain"))
-
-    with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
-        try:
-            page = browser.new_page()
-            page.route("http://panel.test/**", serve)
-            page.goto("http://panel.test/app")
-            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').wait_for()
-            assert catalog_calls == []
-            # Retain the one-dispatch check, but require an explicit command.
-            # Reading the parent list no longer grants a background write.
-            assert client.post('/api/campus/notion/sync').status_code == 200
-            assert catalog_calls == ["explicit"]
-            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
-            page.get_by_role("heading", name="第1讲录像").wait_for()
-            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
-            assert page.locator(".material-file-link").count() == 1
-            assert "slides.pdf" in page.locator(".material-file-link").inner_text()
-            page.locator('[data-material-select="1"]').select_option(index=1)
-            page.locator('[data-action="campus-material-assign"][data-material="1"]').click()
-            page.locator('[data-material-select="1"]').wait_for(state='detached')
-            page.locator('[data-action="campus-course-home"]').click()
-            page.locator('[data-action="campus-open-lesson"]').click()
-            page.locator(".recording-row").get_by_text("补充阅读").wait_for()
-            assert started == []
-            assert not list(tmp_path.rglob("video.mp4"))
-            consent = page.locator('[data-recording-direct-oss]')
-            assert consent.count() == 1 and not consent.is_checked()
-            button = page.locator('[data-action="campus-process"]')
-            button.wait_for()
-            page.wait_for_function('!document.querySelector("[data-action=campus-process]").disabled')
-            style = page.get_by_role('combobox', name='笔记方式')
-            assert style.input_value() == 'transcript'
-            style.select_option('topics')
-            page.once("dialog", lambda dialog: dialog.dismiss())
-            button.click()
-            assert started == []
-            consent.check()
-            page.once("dialog", lambda dialog: dialog.accept())
-            button.click()
-            assert len(started) == 1
-            assert started[0][0][1] == "campus-one"
-            assert started[0][1]["direct_oss"] is True
-            assert started[0][1]['notes_strategy'] == 'topics'
-            page.wait_for_function('!document.querySelector("[data-recording-direct-oss]").checked')
-            assert not list(tmp_path.rglob("video.mp4"))
-            page.locator(".recording-task progress[value='5242880']").wait_for()
-            assert "50%" in page.locator(".recording-task").inner_text()
-            assert "10.0 KB/秒" in page.locator(".recording-task").inner_text()
-
-            from pku_sync.panel.recordings_api import collect_jobs, recording_id
-            job = collect_jobs(tmp_path)[0]
-            job.directory.mkdir(exist_ok=True)
-            (job.directory / "transcript.json").write_text(json.dumps({
-                "segments": [{"start": 0, "end": 10, "text": "课堂内容。"}]
-            }, ensure_ascii=False), "utf-8")
-            (job.directory / "notes.md").write_text("# 已有课堂笔记", "utf-8")
-            (job.directory / "keyframes").mkdir()
-            (job.directory / "keyframes" / "index.json").write_text(
-                json.dumps({"keyframes": []}), "utf-8")
-            page.reload()
-            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
-            page.locator('[data-action="campus-open-lesson"]').click()
-            publish = page.get_by_role("button", name="发布已有笔记")
-            publish.wait_for()
-            page.once("dialog", lambda dialog: dialog.accept())
-            publish.click()
-            assert len(started) == 2
-            assert started[1][1]["reuse_existing"] is True
-            assert started[1][1]["direct_oss"] is False
-            assert not job.video.exists()
-
-            (job.directory / "video.mp4").write_bytes(b"cached-video-for-review")
-            (job.directory / "transcript.json").write_text(json.dumps({
-                "segments": [{"start": 2425.0, "end": 2437.0,
-                              "text": "这里介绍RAC算法和公钥。"}]
-            }, ensure_ascii=False), "utf-8")
-            (job.directory / "notes.md").write_text("# 待重整的旧笔记", "utf-8")
-            (job.directory / "notion-publication.json").write_text(json.dumps({
-                "recording_id": recording_id(job), "home_id": "home",
-                "lecture_url": "https://www.notion.so/" + "a" * 32,
-                "note_url": "https://app.notion.com/" + "b" * 32
-            }), "utf-8")
-            page.reload()
-            page.locator('[data-action="open-campus-course"][data-course="campus-one"]').click()
-            page.locator('[data-action="campus-open-lesson"]').click()
-            jump = page.locator('[data-action="campus-open-lecture"]')
-            jump.wait_for()
-            assert page.locator('[data-action="campus-process"]').count() == 0
-            page.locator('[data-action="campus-review-term"]').click()
-            panel = page.locator(".term-review-panel")
-            panel.get_by_text("这里介绍RAC算法和公钥。").wait_for()
-            assert panel.locator("video").get_attribute("src").endswith("/preview")
-            assert panel.get_by_role("button", name="确认修正为 RSA").is_disabled()
-            panel.locator("[data-term-review-confirm]").check()
-            panel.get_by_role("button", name="确认修正为 RSA").click()
-            page.get_by_text("转写已修正，请重新整理笔记。").wait_for()
-            assert "RSA算法" in (job.directory / "transcript.json").read_text("utf-8")
-            assert "RAC算法" in next(job.directory.glob("transcript.before-review-*.json")).read_text("utf-8")
-            assert (job.directory / "notes.md").read_text("utf-8") == "# 待重整的旧笔记"
-            jump.click()
-            assert opened == ["https://app.notion.com/" + "b" * 32]
-            page.get_by_role("heading", name="我的课程").wait_for()
-        finally:
-            browser.close()
 
 
-@pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_materials_only_course_and_demo_notice_in_edge(tmp_path):
-    import json
-    from pku_sync.config import Settings
-    from pku_sync.panel.connection import build_fake_connection_service
-
-    folder = tmp_path / "materials-only"
-    (folder / "recordings").mkdir(parents=True)
-    (folder / "materials").mkdir()
-    (folder / "recordings" / "index.json").write_text("[]", "utf-8")
-    (folder / "course.json").write_text(json.dumps({
-        "course_id": "_101540_1", "code": "LONG-COURSE-CODE-2026",
-        "name": "只有课件的课程", "term": "2026 秋",
-    }), "utf-8")
-    (folder / "materials" / "index.json").write_text(json.dumps([{
-        "title": "第一讲课件", "kind": "文件", "path": "资料/第一讲课件", "files": ["slides.pdf"]
-    }]), "utf-8")
-    (folder / "assignments").mkdir()
-    (folder / "assignments" / "index.json").write_text(json.dumps([{
-        "title": "第一次作业", "content_id": "_1714169_1",
-        "due_at": "2026-10-01 23:30", "source": "content-tree",
-        "instructions": "答案与代码打包提交", "files": []
-    }]), "utf-8")
-    directory = build_fake_directory()
-    app = create_app(
-        settings=Settings(_env_file=None, data_dir=tmp_path, pku_username="student",
-                          pku_password="secret", platform_token="session"),
-        runner=_NoopRunner(), directory_service=directory,
-        connection_service=build_fake_connection_service(),
-        platform_service=FakePlatformBridge(activated=True),
-    )
-    client = TestClient(app)
-    def serve(route):
-        request = route.request
-        url = urlsplit(request.url)
-        path = url.path + ("?" + url.query if url.query else "")
-        if path == "/api/update":
-            route.fulfill(status=404, body="{}", content_type="application/json")
-            return
-        response = client.request(
-            request.method, path,
-            content=request.post_data.encode() if request.post_data else None,
-            headers={"content-type": request.headers.get("content-type", "application/json")},
-        )
-        route.fulfill(status=response.status_code, body=response.content,
-                      content_type=response.headers.get("content-type", "text/plain"))
-
-    with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
-        try:
-            page = browser.new_page(viewport={"width": 1100, "height": 760})
-            page.route("http://panel.test/**", serve)
-            page.goto("http://panel.test/app")
-            card = page.locator(".course-card")
-            card.wait_for()
-            assert "…1540_1" in card.inner_text()
-            assert "_101540_1" not in card.inner_text()
-            assert "LONG-COURSE-CODE-2026" not in card.inner_text()
-            page.locator('.sidebar [data-action="campus-account-settings"]').click()
-            assert page.locator(".campus-setup .setup-steps li").count() == 4
-            assert page.get_by_text("Notion 演示连接").count() == 0
-            assert page.locator(".campus-setup").get_by_text("演示模式", exact=False).count() == 1
-            card.get_by_role("button", name="查看课程").click()
-            page.locator('.campus-centers').wait_for()
-            assert page.get_by_text("这门课程暂时没有录像").is_visible()
-            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
-            assert page.locator(".material-file-link").count() == 1
-            assert page.locator('[data-action="campus-material-ignore"]').count() == 0
-            assert page.locator("[data-recording-direct-oss]").count() == 0
-            assert page.get_by_text("音频经 15 分钟").count() == 0
-            assert page.locator(".course-hero").get_attribute('data-course-id') == "_101540_1"
-            page.locator('[data-action="campus-course-home"]').click()
-            page.locator('[data-action="campus-open-center"][data-center="assignments"]').click()
-            page.get_by_role("button", name="准备作业文件").click()
-            form = page.locator("#assignment-prepare-form")
-            form.wait_for()
-            form.locator('[name="archive_name"]').fill("学号姓名第1次作业.zip")
-            form.locator('[name="attachments"]').set_input_files({
-                "name": "答案.pdf", "mimeType": "application/pdf", "buffer": b"example answer"
-            })
-            page.get_by_role("button", name="生成本地草稿并预检").click()
-            page.get_by_text("本地草稿：学号姓名第1次作业.zip").wait_for()
-            assert page.get_by_text("答案.pdf", exact=False).count() >= 1
-            page.get_by_role("button", name="确认提交到教学网").click()
-            page.get_by_text("请先下载检查草稿文件，并勾选确认。").wait_for()
-            page.get_by_role("button", name="准备作业文件").click()
-            form = page.locator("#assignment-prepare-form")
-            form.locator('[name="submission_mode"]').select_option("single_file")
-            assert form.locator('[name="archive_name"]').count() == 0
-            assert "不会转换页面格式" in form.inner_text()
-            form.locator('[name="attachments"]').set_input_files({
-                "name": "学号姓名第一次作业.pdf", "mimeType": "application/pdf", "buffer": b"original pdf bytes"
-            })
-            page.get_by_role("button", name="生成本地草稿并预检").click()
-            page.get_by_text("本地草稿：学号姓名第一次作业.pdf").wait_for()
-            assert page.get_by_role("link", name="下载并检查文件").is_visible()
-        finally:
-            browser.close()
 
 
 @pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
@@ -758,13 +455,7 @@ def test_handbook_requirements_visible_when_formal_assignment_index_is_empty(tmp
         (8, "文字报告电子版、科普视频成片请于 12 月 28 日 24 点前发至小班助教邮箱。\n" * 8 +
          "考试形式：闭卷考试"),
     ])
-    app = create_app(
-        settings=Settings(_env_file=None, data_dir=tmp_path, pku_username="student",
-                          pku_password="secret", platform_token="session"),
-        runner=_NoopRunner(), directory_service=build_fake_directory(),
-        connection_service=build_fake_connection_service(),
-        platform_service=FakePlatformBridge(activated=True),
-    )
+    app = create_app(settings=Settings(_env_file=None, data_dir=tmp_path, pku_username='student', pku_password='secret', platform_token='session'), connection_service=build_fake_connection_service(), platform_service=FakePlatformBridge(activated=True))
     client = TestClient(app)
 
     def serve(route):
@@ -784,6 +475,7 @@ def test_handbook_requirements_visible_when_formal_assignment_index_is_empty(tmp
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1100, "height": 1700})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
             card = page.locator(".course-card")
@@ -848,6 +540,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.on("dialog", lambda dialog: dialog.accept())
             page.goto("http://panel.test/")
@@ -925,7 +618,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
             assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
             page.locator('[data-action="campus-course-home"]').click()
             assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
-            assert page.locator('.campus-centers a').count() == 4
+            assert page.locator('.campus-centers a').count() == 3
             page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;

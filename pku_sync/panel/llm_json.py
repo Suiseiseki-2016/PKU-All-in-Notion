@@ -40,7 +40,6 @@ _UNRECOVERABLE = "no single recoverable JSON object in the response"
 # equivalent JSON fence.
 _FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*([^ \t]*)[ \t]*$")
 
-
 def _is_closing_fence(line: str, fence: str) -> bool:
     """A closing fence is the same char, at least as long, with no info."""
     match = _FENCE_LINE_RE.match(line)
@@ -50,7 +49,6 @@ def _is_closing_fence(line: str, fence: str) -> bool:
         and match.group(1)[0] == fence[0]
         and len(match.group(1)) >= len(fence)
     )
-
 
 def unwrap_single_json_fence(content: Any) -> Any:
     """Return the payload inside exactly one fenced wrapper, else the content.
@@ -91,7 +89,6 @@ def unwrap_single_json_fence(content: Any) -> Any:
         return content
     return "\n".join(lines[open_index + 1:close_index])
 
-
 def _payload_regions(content: str) -> list[str] | None:
     """Return the non-fence scan regions, or None for an invalid fence shape.
 
@@ -127,7 +124,6 @@ def _payload_regions(content: str) -> list[str] | None:
         "\n".join(lines[close_index + 1:]),
     ]
 
-
 def _matching_brace(text: str, start: int) -> int | None:
     """Index of the ``}`` closing the ``{`` at ``start``, string-aware."""
     depth = 0
@@ -152,7 +148,6 @@ def _matching_brace(text: str, start: int) -> int | None:
             if depth == 0:
                 return index
     return None
-
 
 def _container_depth(prefix: str) -> int:
     """Net JSON container depth of the text before a candidate, string-aware.
@@ -182,7 +177,6 @@ def _container_depth(prefix: str) -> int:
             depth -= 1
     return depth
 
-
 def _object_candidates(text: str) -> list[tuple[dict, int, int]]:
     """Left-to-right top-level JSON object candidates in one region.
 
@@ -210,7 +204,6 @@ def _object_candidates(text: str) -> list[tuple[dict, int, int]]:
                 position = end + 1
                 continue
         position = start + 1
-
 
 def extract_single_json_payload(content: Any) -> Any:
     """Recover the single JSON object from a metered LLM response, if any.

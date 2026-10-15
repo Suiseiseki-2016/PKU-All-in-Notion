@@ -32,9 +32,6 @@ from pku_sync.panel.connection import (
     CONNECTING_COPY,
     DISCONNECT_TOAST,
     DISCONNECTED_COPY,
-    DISCONNECTED_DIRECTORY_ACTION,
-    DISCONNECTED_DIRECTORY_COPY,
-    DISCONNECTED_DIRECTORY_TITLE,
     RECONNECT_TOAST,
     STATE_CONNECTED,
     STATE_CONNECTING,
@@ -45,7 +42,7 @@ from pku_sync.panel.connection import (
     build_fake_connection_service,
     make_connection_service,
 )
-from pku_sync.panel.fake_directory import build_fake_directory
+
 from pku_sync.panel.webapi import create_app
 
 SEEDED_TOKEN = "secret_seeded_notion_token_c0ffee"
@@ -64,12 +61,7 @@ def make_settings(tmp_path, token: str = "") -> SimpleNamespace:
 def make_app(service, settings=None, directory_service=None):
     """A panel app whose only live surface is the connection service."""
     return TestClient(
-        create_app(
-            settings=settings or SimpleNamespace(data_dir="data", platform_token=""),
-            runner=_NoopRunner(),
-            directory_service=directory_service or build_fake_directory(),
-            connection_service=service,
-        )
+        create_app(settings=settings or SimpleNamespace(data_dir='data', platform_token=''), connection_service=service)
     )
 
 
@@ -176,19 +168,6 @@ def test_disconnect_is_idempotent(tmp_path):
 # -- no stale directory data after a revoke ------------------------------------
 
 
-def test_disconnect_drops_the_cached_directory_so_nothing_stale_is_served(tmp_path):
-    directory = build_fake_directory()
-    service = build_fake_connection_service(directory_service=directory)
-    client = make_app(service, directory_service=directory)
-
-    client.get("/api/directory")
-    reads_after_first_load = len(directory.provider.client.calls)
-    client.get("/api/courses/x/materials", params={"view": "all"})  # cached read
-    assert len(directory.provider.client.calls) == reads_after_first_load
-
-    client.post("/api/connection/disconnect")
-    client.get("/api/directory")  # a fresh read, not the dropped cache
-    assert len(directory.provider.client.calls) > reads_after_first_load
 
 
 # -- reconnect ------------------------------------------------------------------
@@ -325,32 +304,3 @@ def test_connection_copy_matches_the_approved_prototype():
     assert DISCONNECTED_COPY == "尚未连接 · 点击连接 Notion 开始"
     assert DISCONNECT_TOAST == "已断开 Notion 连接，可随时重新连接。"
     assert RECONNECT_TOAST == "已重新连接 Notion 学习空间。"
-
-
-def test_disconnected_directory_state_copy_is_dedicated_and_distinct():
-    from pku_sync.panel.directory import SYNC_ERROR_GENERIC, SYNC_ERROR_READ
-
-    # the disconnected directory state is its own state: not a sync error and
-    # not the generic empty copy
-    assert DISCONNECTED_DIRECTORY_TITLE == "Notion 尚未连接"
-    assert "连接 Notion" in DISCONNECTED_DIRECTORY_COPY
-    assert DISCONNECTED_DIRECTORY_ACTION == "连接 Notion"
-    for reason in (SYNC_ERROR_GENERIC, SYNC_ERROR_READ):
-        assert DISCONNECTED_DIRECTORY_COPY != reason
-    assert "还没有已索引的课程" not in DISCONNECTED_DIRECTORY_COPY
-
-def test_relay_oauth_template_is_adopted_as_learning_home(tmp_path, monkeypatch):
-    settings = make_settings(tmp_path)
-    calls = []
-    from pku_sync.panel import notion_home
-    monkeypatch.setattr(notion_home, "adopt_oauth_template",
-                        lambda data_dir, token, page_id: calls.append((data_dir, token, page_id)))
-    provider = RealConnectionProvider(
-        settings, env_path=tmp_path / ".env",
-        login=lambda *_args, **_kwargs: {
-            "access_token": SEEDED_TOKEN, "duplicated_template_id": "new-home"
-        },
-    )
-    provider.connect()
-    assert settings.notion_token == SEEDED_TOKEN
-    assert calls == [(tmp_path, SEEDED_TOKEN, "new-home")]

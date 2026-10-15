@@ -5,16 +5,14 @@ import json
 from pathlib import Path
 
 from .. import catalog_snapshots as catalog
-from .exercise_organizer import OrganizeBlocked
+from .quiz_contract import OrganizeBlocked
 from .notion_home import _document_signature
 from .notion_workspace import _save
 
 _active = ContextVar('native_course_writer', default=None)
 
-
 def _signatures(rows):
     return [_document_signature(row) for row in rows]
-
 
 class _Writer:
     def __init__(self, path, state, factory):
@@ -86,7 +84,6 @@ class _Writer:
             raise OrganizeBlocked(502, 'Notion 返回后仍未读取到完整写入结果，共享锁已保留。')
         return result
 
-
 class _Client:
     def __init__(self, client, writer):
         self.client, self.writer = client, writer
@@ -103,13 +100,11 @@ class _Client:
             return getattr(self.client, name)
         raise OrganizeBlocked(409, '该 Notion 操作不在课程共享写入范围内。')
 
-
 @contextmanager
 def guarded_client(factory):
     with factory() as client:
         writer = _active.get()
         yield _Client(client, writer) if writer else client
-
 
 @contextmanager
 def course_writer(settings, course_id, factory):

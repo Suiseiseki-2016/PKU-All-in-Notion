@@ -23,6 +23,7 @@ def test_projected_lecture_does_not_replace_first_processing_with_regeneration(t
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route('**/*', lambda route: route.fulfill(body='<div id="app"></div><div id="toast"></div>', content_type='text/html'))
             page.goto('http://renderer-regression.test')
             page.evaluate('copy => {window.PANEL_COPY=copy}', PANEL_COPY)

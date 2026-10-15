@@ -18,6 +18,7 @@ def renderer():
     with sync_playwright() as driver:
         browser = driver.chromium.launch(**browser_launch_options(),headless=True)
         page = browser.new_page()
+        page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
         controls = {"terminal":"failed","quota_mode":"success","held":None,
                     "redeem_mode":"success","held_redeem":None,"redeem_posts":[]}
         requests = []

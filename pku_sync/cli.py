@@ -43,54 +43,10 @@ app.add_typer(submit_app, name="submit")
 console = Console()
 
 
-class RichConsoleRecorder:
-    """The CLI's `service.Recorder`: rich capture with markup-capable lines."""
-
-    def __init__(self, console: Console) -> None:
-        self._console = console
-
-    def begin(self) -> None:
-        self._console.begin_capture()
-
-    def print(self, text: str) -> None:
-        self._console.print(text)
-
-    def end(self) -> str:
-        return self._console.end_capture()
 
 
-def _daily_steps():
-    """Bind today's steps exactly as `daily` runs them.
-
-    The commands are looked up at call time, so tests (and any future
-    caller) can still monkeypatch them before invoking `daily_cmd` /
-    `automate_cmd`. The orchestration itself lives in `pku_sync.service`.
-    """
-    from functools import partial
-
-    from .service import DailySteps
-
-    return DailySteps(
-        sync=partial(sync_cmd, course="", skip_recordings=False),
-        download=partial(download_cmd, course="", limit=0),
-        process=partial(process_cmd, course="", limit=0),
-        summarize=partial(summarize_cmd, log=None),
-    )
 
 
-def _automate_events():
-    """Automate's human-facing announcements, shared by CLI and panel."""
-    from .service import AutomateEvents
-
-    return AutomateEvents(
-        daily_failed=lambda: console.print(
-            "[red]daily 本步失败；继续晨检与批量建页，把管道异常登记进 Notion。[/red]"
-        ),
-        review_failed=lambda: console.print("[yellow]MCP review 失败；下次会重试。[/yellow]"),
-        lecture_failed=lambda: console.print(
-            "[yellow]讲义批量建页失败；建页是幂等的，下次 automate 会重试。[/yellow]"
-        ),
-    )
 
 
 def _targets(client, course: str):
@@ -706,135 +662,14 @@ def notion_search(
         console.print(f"  [{kind}] {title} → {row.get('url', '')}")
 
 
-@app.command(name="summarize")
-def summarize_cmd(
-    log: Annotated[
-        str | None,
-        typer.Option("--log", help="指定 daily 日志路径（默认 logs/latest.daily.log）"),
-    ] = None,
-) -> None:
-    """把最近一次 daily 日志整理成当日中文简报（LLM 后端，无需 agent 会话）。"""
-    from .summarize import run
-
-    path = run(log)
-    if path is None:
-        console.print(
-            "[yellow]没有可用的 daily 日志（logs/latest.daily.log 缺失或为空），跳过简报。[/yellow]"
-        )
-        return
-    console.print(f"[green]简报已写入[/green] {path}")
 
 
-@app.command(name="review")
-def review_cmd() -> None:
-    """通过已选 agent 宿主和两组 MCP 完成 Notion 晨检登记。"""
-    from .agent_runner import run_review
-    from .config import settings
-
-    try:
-        result = run_review(settings)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        console.print(f"[red]MCP review 启动失败：{exc}[/red]")
-        raise typer.Exit(1) from exc
-    if result.returncode:
-        console.print(
-            f"[red]{result.host} review 失败（退出码 {result.returncode}）："
-            f"{result.stderr[-400:]}[/red]"
-        )
-        raise typer.Exit(result.returncode)
-    console.print(f"[green]MCP review 完成[/green] {result.output_path}")
 
 
-@app.command(name="daily")
-def daily_cmd(
-    skip_process: Annotated[
-        bool, typer.Option("--skip-process", help="Download only; leave transcription for the GPU host")
-    ] = False,
-    skip_recordings: Annotated[
-        bool, typer.Option("--skip-recordings/--with-recordings", help="Only sync recording metadata by default; media processing needs explicit opt-in")
-    ] = True,
-    skip_summary: Annotated[
-        bool, typer.Option("--skip-summary", help="Skip the LLM daily summary step")
-    ] = False,
-) -> None:
-    """One unattended pass: sync, download, process, then summarize."""
-    from .config import settings
-    from .service import run_daily
-
-    result = run_daily(
-        settings,
-        skip_process=skip_process,
-        skip_recordings=skip_recordings,
-        skip_summary=skip_summary,
-        recorder=RichConsoleRecorder(console),
-        steps=_daily_steps(),
-    )
-    if result.failure is not None:
-        # Re-raise so the failure reaches the caller's exit code: the log
-        # files (and their EXIT_CODE marker) are already written.
-        raise result.failure
 
 
-@app.command(name="lecture-batch")
-def lecture_batch_cmd() -> None:
-    """通过已选 agent 宿主和两组 MCP 幂等补建缺失的讲次页。"""
-    from .agent_runner import run_lecture_batch
-    from .config import settings
-
-    try:
-        result = run_lecture_batch(settings)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        console.print(f"[red]MCP 讲义批量建页启动失败：{exc}[/red]")
-        raise typer.Exit(1) from exc
-    if result.returncode:
-        console.print(
-            f"[red]{result.host} 讲义批量建页失败（退出码 {result.returncode}）："
-            f"{result.stderr[-400:]}[/red]"
-        )
-        raise typer.Exit(result.returncode)
-    console.print(f"[green]MCP 讲义批量建页完成[/green] {result.output_path}")
 
 
-@app.command(name="automate")
-def automate_cmd(
-    skip_process: Annotated[
-        bool, typer.Option("--skip-process", help="Download only; leave transcription for the GPU host")
-    ] = False,
-    skip_recordings: Annotated[
-        bool, typer.Option("--skip-recordings/--with-recordings", help="Only sync recording metadata by default; media processing needs explicit opt-in")
-    ] = True,
-    skip_summary: Annotated[
-        bool, typer.Option("--skip-summary", help="Skip the local LLM daily summary")
-    ] = False,
-    skip_review: Annotated[
-        bool, typer.Option("--skip-review", help="Skip the MCP-backed Notion review")
-    ] = False,
-    skip_lecture: Annotated[
-        bool, typer.Option("--skip-lecture", help="Skip the MCP-backed lecture-page backfill")
-    ] = False,
-) -> None:
-    """One unattended pass: the daily pipeline, then the Notion review and lecture backfill."""
-    from .config import settings
-    from .service import run_automate
-
-    result = run_automate(
-        settings,
-        skip_process=skip_process,
-        skip_recordings=skip_recordings,
-        skip_summary=skip_summary,
-        skip_review=skip_review,
-        skip_lecture=skip_lecture,
-        recorder=RichConsoleRecorder(console),
-        steps=_daily_steps(),
-        review=review_cmd,
-        lecture=lecture_batch_cmd,
-        events=_automate_events(),
-    )
-    if result.daily.failure is not None:
-        # Re-raise so any external scheduler's last-run status stays non-zero:
-        # the failure should be visible outside the log file too, and the
-        # EXIT_CODE marker is already written.
-        raise result.daily.failure
 
 
 @app.command(name="panel")
@@ -853,7 +688,7 @@ def panel_cmd(
         str,
         typer.Option(
             "--fake-variant",
-            help="演示状态：normal / slow / grade-slow / grade-recovery / low-balance / grade-502 / organize-blocked / organize-agent-missing / organize-agent-blocked / organize-agent-mcp-down / organize-agent-timeout / organize-agent-multiple / organize-agent-recovery / fault / fault-launch / transport-launch / missing-lecture / empty / usage-cap / exercise-fault-launch / exercise-missing（需配合 --fake）",
+            help="演示账号状态：normal / low-balance（需配合 --fake）",
         ),
     ] = "normal",
 ) -> None:
@@ -869,33 +704,17 @@ def panel_cmd(
     from .config import settings
 
     host = "127.0.0.1"  # 本地面板只绑回环地址
-    # The student directory service (real adapter by default; the seeded-fake
-    # mode for browser verification) is shared by the directory API routes.
-    # Built before binding so an invalid fake variant fails cleanly.
-    # In --fake mode the connection and platform bridges are faked too, so a
-    # verification run can drive activation and connect/disconnect without any
-    # network call and without touching the student's real credentials. The
-    # fake service assembly (variant wiring, relay failure injection) is shared
-    # with the variant tests via ``fake_panel.build_fake_panel_services``.
+    connection_service = None
+    platform_service = None
     if fake:
-        from .panel.fake_panel import build_fake_panel_services
-
-        try:
-            (directory_service, connection_service, platform_service,
-             organizer_service, grading_service) = build_fake_panel_services(fake_variant)
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-    else:
-        from .panel.directory import make_directory_service
-
-        directory_service = make_directory_service()
-        # None → create_app builds the production connection/platform bridges
-        # against the loaded settings
-        connection_service = None
-        platform_service = None
-        organizer_service = None
-        grading_service = None
+        from .panel.connection import build_fake_connection_service
+        from .panel.platform_bridge import FakePlatformBridge
+        if fake_variant not in {"normal", "low-balance"}:
+            console.print("[red]演示状态仅支持 normal / low-balance。[/red]")
+            raise typer.Exit(1)
+        connection_service = build_fake_connection_service()
+        platform_service = FakePlatformBridge(activated=True,
+            llm_points=4.0 if fake_variant == "low-balance" else 100.0)
     # The fake panel is deterministic for local/browser validation. Production
     # always checks the public GitHub Releases manifest through UpdateService.
     update_service = UpdateService.from_settings(
@@ -930,11 +749,8 @@ def panel_cmd(
     uvicorn.Server(
         uvicorn.Config(
             create_app(
-                directory_service=directory_service,
                 connection_service=connection_service,
                 platform_service=platform_service,
-                organizer_service=organizer_service,
-                grading_service=grading_service,
                 update_service=update_service,
             ),
             host=host,
@@ -944,18 +760,6 @@ def panel_cmd(
     ).run(sockets=[sock])
 
 
-@app.command(name="tui")
-def tui_cmd() -> None:
-    """交互式工作台：课程资料、录音、Notion 状态、DDL 与 AI 操作。"""
-    from .config import settings
-
-    try:
-        from .tui import PkuSyncApp
-    except ImportError as exc:
-        console.print(f"[red]TUI 需要 textual：pip install textual（或 uv pip install -e .）[/red]")
-        console.print(f"[dim]原因：{exc}[/dim]")
-        raise typer.Exit(1) from exc
-    PkuSyncApp(settings.data_dir).run()
 
 
 def _submit_assignment_table(rows: list) -> Table:

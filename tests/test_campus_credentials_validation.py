@@ -13,7 +13,7 @@ from pku_sync.panel import recordings_api
 def endpoint(root, monkeypatch):
     settings = SimpleNamespace(data_dir=root / "data", platform_token="account",
                                pku_username="original", pku_password="original-secret")
-    manager = recordings_api.RecordingWorkManager(settings, None)
+    manager = recordings_api.RecordingWorkManager(settings)
     app = FastAPI()
     recordings_api.add_recording_routes(app, manager)
     path = root / ".env"

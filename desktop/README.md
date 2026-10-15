@@ -86,7 +86,7 @@ Tauri then embeds `externalBin` + `resources/runtime` and produces:
 
 ### On-demand recording notes
 
-From **总览**, open a course and select **课堂录像**. Save teaching-network credentials locally, sync the recording index, choose the matching teaching-network course once, then select one recording and a ready lecture. Browsing courses and recording metadata does not download media. Download, transcription, notes, and Notion publishing start only after the student confirms the selected recording. Only that recording is downloaded, transcribed, summarized and published. Daily/automate actions sync metadata but skip media by default; CLI operators must pass `--with-recordings` for batch media work.
+从「我的课程」保存教学网账号并更新课程目录，然后在设置中连接 Notion、选择保存位置并创建学习主页。打开课程后按需整理一节课堂录像；同步目录不会下载或转写媒体。同步失败时可以重试，已保存账号和 Notion 连接会保留。
 
 ### Campus-first learning home
 

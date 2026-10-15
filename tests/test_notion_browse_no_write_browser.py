@@ -18,8 +18,8 @@ def test_reading_connected_notion_parents_does_not_start_directory_write():
             writes.append(route.request.url)
         if route.request.url.endswith('/api/campus/notion/parents'):
             value = {'pages': [{'id': 'parent', 'title': 'test'}],
-                     'home': {'id': 'home', 'parent_id': 'parent'},
-                     'workspace': {'id': 'home', 'active': True}}
+                     'home': {'schema': 2, 'active': True, 'id': 'home', 'parent_id': 'parent'},
+                     'workspace': {'schema': 2, 'id': 'home', 'active': True}}
         else:
             value = {'state': 'done'}
         route.fulfill(body=json.dumps(value), content_type='application/json')
@@ -27,9 +27,11 @@ def test_reading_connected_notion_parents_does_not_start_directory_write():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route('**/*', serve)
             page.goto('http://panel.test')
-            page.set_content('<div id="app"></div><div id="toast"></div>')
+            page.route('http://panel.test/', lambda route: route.fulfill(body='<div id="app"></div><div id="toast"></div>', content_type='text/html'))
+            page.goto('http://panel.test/')
             page.evaluate('copy => {window.PANEL_COPY = copy;}', PANEL_COPY)
             page.add_script_tag(content=script)
             page.evaluate('''async () => {

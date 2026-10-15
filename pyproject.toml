@@ -1,6 +1,6 @@
 [project]
 name = "pku-course-sync"
-version = "0.1.56"
+version = "0.1.58"
 description = "Daily sync of PKU Teaching Network course materials and lecture recordings"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,7 +10,6 @@ dependencies = [
     "pydantic-settings>=2.3",
     "typer>=0.12",
     "rich>=13.7",
-    "textual>=0.79",
     "beautifulsoup4>=4.12",
     # Lecture slides and official homework are often PDFs; use their text as
     # source material when checking generated study notes.
@@ -48,7 +47,6 @@ local-asr = ["faster-whisper>=1.0"]
 
 [project.scripts]
 pku-sync = "pku_sync.cli:app"
-pkutui = "pku_sync.cli:tui_cmd"
 
 [build-system]
 requires = ["hatchling"]

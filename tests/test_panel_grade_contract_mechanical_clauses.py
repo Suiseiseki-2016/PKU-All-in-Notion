@@ -22,18 +22,19 @@ charge record fields (operation id, settlement, graded_at). Every relay is a
 deterministic fake — no real LLM, Notion, or other spend.
 """
 from __future__ import annotations
+from tests.grading_support import GradeRecords
+from tests.grading_support import FakeGradingPageAdapter
 
 import copy
 import json
 
 import pytest
 
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     E2E_GRADE_QUESTION_RUBRIC,
     GRADE_RESULT_CONTRACT_VERSION,
     GRADE_RESULT_INVALID_REASON,
     ExerciseGrader,
-    FakeGradingPageAdapter,
     GradeBlocked,
     GradeSettlementError,
     GradeTarget,
@@ -41,9 +42,9 @@ from pku_sync.panel.exercise_grader import (
     _grading_prompt,
     _validate_grade_result,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
+from pku_sync.panel.grading_records import JsonGradingRecordStore
+
+from grading_workspace import EXERCISE_GENERATED
 
 GRADED_AT = "2026-09-20T22:03:56+08:00"
 SUMMED_EARNED = sum(item.expected_score for item in E2E_GRADE_QUESTION_RUBRIC)
@@ -188,7 +189,7 @@ class _DirectoryStub:
 
 
 def _fresh_grader(content: str):
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     relay = _Relay(content)
     adapter = _ContractAdapter()
@@ -257,7 +258,7 @@ def test_verbatim_response_normalizes_to_pinned_per_question_result():
 
 
 def test_response_contract_pins_wrong_answer_key_and_earned_points_clauses():
-    directory = build_fake_directory("grade-slow")
+    directory = GradeRecords()
     directory.load()
     target = directory.exercise_grade_target(EXERCISE_GENERATED)
     # _grading_prompt is driven by the target title ([E2E] prefix), so reuse

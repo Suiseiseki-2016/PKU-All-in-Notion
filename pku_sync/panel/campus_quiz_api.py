@@ -5,28 +5,24 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .exercise_organizer import OrganizeBlocked
+from .quiz_contract import OrganizeBlocked
 from .jobs import EXERCISE_JOB_BUSY_MESSAGE
-from .exercise_grader import GradeBlocked, GradeSettlementError
+from .quiz_grading_core import GradeBlocked, GradeSettlementError
 
 logger = logging.getLogger(__name__)
-
 
 class GenerateQuizRequest(BaseModel):
     lecture_ids: list[str] = Field(default_factory=list, max_length=50)
     confirmed: bool = False
     prior_paper: str = Field(default="", max_length=20000)
 
-
 class GradeQuizRequest(BaseModel):
     confirmed: bool = False
     force: bool = False
 
-
 class ReviewRequest(BaseModel):
     confirmed: bool = False
     note: str = Field(default="", max_length=4000)
-
 
 def add_campus_quiz_routes(app, service, gate, grading_service=None):
     @app.get("/api/campus/courses/{course_id}/quizzes")

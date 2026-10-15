@@ -1,14 +1,23 @@
 """doctor 自检逻辑的单测：磁盘/CLI/文件探测全走注入点，不碰真实系统。"""
 
+
 from __future__ import annotations
 
+
 import io
-from datetime import datetime, timedelta
+
+
+
+
 from types import SimpleNamespace
+
 
 from rich.console import Console
 
+
 from pku_sync import doctor
+
+
 from pku_sync.config import Settings
 
 
@@ -21,9 +30,6 @@ def _settings(tmp_path, **overrides) -> Settings:
     )
     base.update(overrides)
     return Settings(**base)
-
-
-# --- 单项检查 ---------------------------------------------------------------
 
 
 def test_env_file_missing_and_present(tmp_path, monkeypatch):
@@ -54,38 +60,6 @@ def test_agent_host_lookup(tmp_path, monkeypatch):
     assert doctor.check_agent_host(_settings(tmp_path, agent_host="codex")).status == "fail"
 
 
-def test_daily_log_states(tmp_path):
-    data = tmp_path / "data"
-    s = _settings(tmp_path)
-    assert doctor.check_daily_log(s).status == "warn"  # 无日志
-    logs = data / "logs"
-    logs.mkdir(parents=True)
-    log = logs / "latest.daily.log"
-    log.write_text("=== pku-sync daily started 20260916_060002 ===\n=== EXIT_CODE=0 ===\n", "utf-8")
-    assert doctor.check_daily_log(s).status == "ok"
-    log.write_text("=== pku-sync daily started 20260916_060002 ===\n=== EXIT_CODE=1 ===\n", "utf-8")
-    assert doctor.check_daily_log(s).status == "fail"
-    log.write_text("=== pku-sync daily started 20260916_060002 ===\n", "utf-8")
-    assert doctor.check_daily_log(s).status == "fail"  # 尾标缺失 = 截断
-
-
-def test_reports_freshness(tmp_path):
-    logs = tmp_path / "data" / "logs"
-    logs.mkdir(parents=True)
-    today = datetime.now().strftime("%Y%m%d")
-    old = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
-    (logs / f"review_{today}.md").write_text("x", "utf-8")
-    (logs / f"lecture_{today}.md").write_text("x", "utf-8")
-    assert doctor.check_reports(_settings(tmp_path)).status == "ok"
-    (logs / f"review_{old}.md").write_text("x", "utf-8")
-    (logs / f"lecture_{old}.md").write_text("x", "utf-8")
-    (logs / f"review_{today}.md").unlink()
-    (logs / f"lecture_{today}.md").unlink()
-    check = doctor.check_reports(_settings(tmp_path))
-    assert check.status == "warn"
-    assert "5 天前" in check.detail
-
-
 def test_disk_thresholds(tmp_path, monkeypatch):
     s = _settings(tmp_path)
     gb = 1 << 30
@@ -95,9 +69,6 @@ def test_disk_thresholds(tmp_path, monkeypatch):
     assert doctor.check_disk(s).status == "warn"
     monkeypatch.setattr(doctor.shutil, "disk_usage", lambda p: SimpleNamespace(free=gb // 2))
     assert doctor.check_disk(s).status == "fail"
-
-
-# --- 汇总 -------------------------------------------------------------------
 
 
 def test_run_checks_aggregates_failures(tmp_path, monkeypatch):

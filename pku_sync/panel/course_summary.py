@@ -30,17 +30,14 @@ _MAX_POINT_CHARS = 220
 _MAX_UNCERTAIN = 12
 _MAX_CLUES = 12
 
-
 def beijing_today(now: datetime | None = None) -> date:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError("课程总结需要带时区的当前时间。")
     return current.astimezone(timezone(timedelta(hours=8))).date()
 
-
 def summary_title(course_title: str, day: date) -> str:
     return f"{course_title}｜{SUMMARY_SUFFIX}（截至 {day.isoformat()}）"
-
 
 def _plain(value: str) -> str:
     text = re.sub(r"\*\*|`", "", value).strip()
@@ -49,12 +46,10 @@ def _plain(value: str) -> str:
         text = text[:_MAX_POINT_CHARS] + "…"
     return text
 
-
 _TIMESTAMP_BULLET = re.compile(r"^[*\-+]\s*\[(\d{1,2}:\d{2})\]\s*(.+)$")
 _HEADING = re.compile(r"^(#{2,4})\s+(.+)$")
 _BULLET = re.compile(r"^[*\-+]\s+(.+)$")
 _BOLD_LINE = re.compile(r"^\*\*([^*]+)\*\*$")
-
 
 def note_outline(markdown: str) -> dict:
     """Pull topics, spoken homework clues and open questions out of one note.
@@ -118,13 +113,11 @@ def note_outline(markdown: str) -> dict:
                 current[1].append(last_point)
     return {"topics": topics, "clues": clues, "uncertain": uncertain}
 
-
 def _point_text(point: str, children: list[str]) -> str:
     if not children:
         return point
     joiner = "" if point.endswith(("：", ":")) else "；"
     return point + joiner + "；".join(children)
-
 
 def _lecture_rows(data_dir: Path, course: dict) -> list[dict]:
     jobs = {recording_id(job): job for job in collect_jobs(data_dir, course["id"])}
@@ -149,15 +142,12 @@ def _lecture_rows(data_dir: Path, course: dict) -> list[dict]:
         })
     return rows
 
-
 def _label(row: dict) -> str:
     base = " · ".join(part for part in (row["date"], row["title"]) if part)
     return f"《{base or row['id']}》"
 
-
 def _lecture_link(row: dict) -> str:
     return row["notion_note_url"] or row["notion_lecture_url"]
-
 
 def _assignment_entries(course: dict) -> list[tuple[str, str | None]]:
     entries: list[tuple[str, str | None]] = []
@@ -184,7 +174,6 @@ def _assignment_entries(course: dict) -> list[tuple[str, str | None]]:
     elif status in {"partial", "error"}:
         entries.append(("教学网作业来源读取不完整；以上清单可能遗漏，请到教学网核对。", None))
     return entries
-
 
 def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) -> list[tuple[str, str | None]]:
     """The summary page as ordered (line, link) entries.
@@ -275,17 +264,14 @@ def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) 
                         + ("…" if len(noteless) > 8 else ""), None))
     return entries
 
-
 def summary_markdown(data_dir: Path, course_id: str, *, day: date | None = None) -> str:
     """Plain-text rendering of the same snapshot, for tests and previews."""
     return "\n".join(line for line, _ in summary_entries(data_dir, course_id, day=day))
-
 
 def _linked_paragraph(label: str, url: str) -> dict:
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
         {"type": "text", "text": {"content": label, "link": {"url": url}}}
     ]}}
-
 
 def summary_blocks(data_dir: Path, course_id: str, *, day: date | None = None) -> list[dict]:
     blocks: list[dict] = []
@@ -302,38 +288,29 @@ def summary_blocks(data_dir: Path, course_id: str, *, day: date | None = None) -
         blocks += markdown_to_blocks("\n".join(pending))
     return blocks
 
-
 def find_course_page(client: NotionClient, data_dir: Path, course_id: str, *,
                      identity_observation=None) -> dict:
-    from .notion_home import _course_titles, saved_home
+    from .notion_home import saved_home
 
     home = saved_home(data_dir)
     if not home:
         raise ValueError("请先选择 Notion 父页面并创建学习主页。")
-    if home.get("schema") == 2:
-        from .notion_workspace import _course_page
-        from .campus_catalog import campus_courses
-        row = next(row for row in campus_courses(data_dir)["courses"] if row["id"] == course_id)
-        if identity_observation is not None:
-            observed_home, observed = identity_observation
-            if observed_home['id'] != home['id']:
-                raise ValueError('新版主页在总结期间发生变化；已有内容已保留。')
-            return _course_page(client, home['id'], row, create=False,
-                                observed=observed, verify_selected=True)
-        return _course_page(client, home["id"], row, create=False)
-    title = _course_titles(data_dir)[course_id]
-    matches = [page for page in client.list_child_pages(home["id"]) if page.get("title") == title]
-    if not matches:
-        raise ValueError("这门课还没有 Notion 课程页；请先同步 Notion 课程目录。")
-    return matches[0]
-
+    from .notion_workspace import _course_page
+    from .campus_catalog import campus_courses
+    row = next(row for row in campus_courses(data_dir)["courses"] if row["id"] == course_id)
+    if identity_observation is not None:
+        observed_home, observed = identity_observation
+        if observed_home['id'] != home['id']:
+            raise ValueError('学习主页在总结期间发生变化；已有内容已保留。')
+        return _course_page(client, home['id'], row, create=False,
+                            observed=observed, verify_selected=True)
+    return _course_page(client, home["id"], row, create=False)
 
 def _course_folder(data_dir: Path, course_id: str) -> Path | None:
     from .campus_catalog import _courses
 
     return next((folder for folder, key, _title, _meta in _courses(data_dir) if key == course_id),
                 None)
-
 
 def _confirmed_course(data_dir: Path, course_id: str) -> tuple[dict, tuple]:
     """Cached browsing permission never authorizes an unconfirmed write."""
@@ -356,13 +333,11 @@ def _confirmed_course(data_dir: Path, course_id: str) -> tuple[dict, tuple]:
     catalog.assert_portal_readable(data_dir, course_id)
     return course, (namespace, envelope['revision'], fingerprint(envelope['snapshot']))
 
-
 def _assert_summary_authority(data_dir: Path, course_id: str, expected: tuple) -> None:
     from ..catalog_snapshots import CatalogUnavailable
     _, current = _confirmed_course(data_dir, course_id)
     if current != expected:
         raise CatalogUnavailable('教学网课程确认状态在总结期间变化；未确认完成，请重新更新课程目录。')
-
 
 def _save_summary_marker(data_dir: Path, course_id: str, result: dict, *, authority: tuple) -> None:
     """Remember the newest snapshot so the course page can link straight to it."""
@@ -381,7 +356,6 @@ def _save_summary_marker(data_dir: Path, course_id: str, result: dict, *, author
         temporary.replace(marker)
     except OSError:
         logger.warning("course summary marker could not be saved for %s", course_id)
-
 
 def publish_course_summary(client: NotionClient, data_dir: Path, course_id: str, *,
                            day: date | None = None, identity_observation=None,
@@ -420,7 +394,6 @@ def publish_course_summary(client: NotionClient, data_dir: Path, course_id: str,
     else:
         _save_summary_marker(data_dir, course_id, result, authority=authority)
     return result
-
 
 def publish_course_summaries(data_dir: Path, token: str, course_ids: list[str], *,
                              day: date | None = None,

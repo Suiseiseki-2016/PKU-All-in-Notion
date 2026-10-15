@@ -18,7 +18,7 @@ from pku_sync.panel.recordings_api import RecordingWorkManager, Work, add_record
 def test_task_state_remains_observable_when_sync_http_workers_are_busy(tmp_path, state):
     async def exercise():
         app = FastAPI()
-        manager = RecordingWorkManager(SimpleNamespace(data_dir=str(tmp_path)), None)
+        manager = RecordingWorkManager(SimpleNamespace(data_dir=str(tmp_path)))
         manager._work = Work(kind='sync', state=state, stage='同步并验证新版 Notion 目录')
         add_recording_routes(app, manager)
         started, release = threading.Event(), threading.Event()

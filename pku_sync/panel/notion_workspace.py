@@ -20,7 +20,6 @@ SUMMARY_LINK = "查看已有总结（请核对内容）"
 _MANIFEST_COMMIT_LOCK = threading.RLock()
 _ACTIVE_READ_PLANS = {}
 
-
 def _summary_page(client, url):
     from urllib.parse import urlsplit
     import re
@@ -36,7 +35,6 @@ def _summary_page(client, url):
         raise ValueError("已有总结页面已不可读取，未迁移链接。")
     return page
 
-
 @verified_workspace_operation('summary-link')
 def _link_summary(client, lecture_id, url):
     _summary_page(client, url)
@@ -47,10 +45,8 @@ def _link_summary(client, lecture_id, url):
     if not any(legacy._source_block_signature(row) == signature for row in client.list_children(lecture_id)):
         raise ValueError("已有总结链接写入后验证失败。")
 
-
 def manifest_path(root: Path) -> Path:
     return root / "notion-workspace-v2.json"
-
 
 def saved_workspace(root: Path) -> dict:
     try:
@@ -67,7 +63,6 @@ def saved_workspace(root: Path) -> dict:
         return {}
     return value
 
-
 def _save(path: Path, value: dict) -> None:
     if path.name == 'notion-workspace-v2.json':
         with _MANIFEST_COMMIT_LOCK:
@@ -75,13 +70,11 @@ def _save(path: Path, value: dict) -> None:
         return
     _save_document(path, value)
 
-
 def _save_document(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), "utf-8")
     temporary.replace(path)
-
 
 def _verify_home(page: dict, home_id: str, parent_id: str) -> None:
     """Reject a changed home before reading descendants or obtaining a writer."""
@@ -98,7 +91,6 @@ def _verify_home(page: dict, home_id: str, parent_id: str) -> None:
     if not valid:
         raise ValueError(message)
 
-
 @verified_workspace_operation('center')
 def _verified_child(client, parent: str, title: str) -> dict:
     page = legacy._child(client, parent, title)
@@ -109,7 +101,6 @@ def _verified_child(client, parent: str, title: str) -> dict:
     ):
         raise ValueError("新版 Notion 页面写入后验证失败。")
     return page
-
 
 @verified_workspace_operation('center')
 def _verified_centers(client, parent: str, *, observed_children=None, extra_pages_out=None) -> dict:
@@ -160,7 +151,6 @@ def _verified_centers(client, parent: str, *, observed_children=None, extra_page
         extra_pages_out.update(extra_pages)
     return result
 
-
 def _classify_course_children(pages: list[dict], parent: str) -> tuple[dict, dict]:
     """Keep the fixed centers distinct from every other actual direct subpage."""
     from uuid import UUID
@@ -190,7 +180,6 @@ def _classify_course_children(pages: list[dict], parent: str) -> tuple[dict, dic
     extras = {page['id']: deepcopy(page) for page in pages if page['title'] not in CENTERS}
     return centers, extras
 
-
 def _page_parent_matches(page, expected):
     from uuid import UUID
     try:
@@ -199,7 +188,6 @@ def _page_parent_matches(page, expected):
                 and UUID(parent['page_id']) == UUID(expected))
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
-
 
 def _verify_selected_parent(client, parent_id):
     from uuid import UUID
@@ -213,7 +201,6 @@ def _verify_selected_parent(client, parent_id):
         raise ValueError('已选 Notion 父页面已不可读取或已归档；已有记录已保留，未写入目录。')
     return page
 
-
 def _course_identity_snapshot(client, parent):
     pages = client.list_child_pages(parent)
     if not pages:
@@ -222,7 +209,6 @@ def _course_identity_snapshot(client, parent):
     # passed to the workers, and every response must finish successfully.
     with ThreadPoolExecutor(max_workers=min(4, len(pages))) as pool:
         return list(pool.map(lambda page: (page, client.list_children(page['id'])), pages))
-
 
 def _existing_course_page(client, parent: str, course: dict, *, observed=None) -> dict | None:
     source = "https://course.pku.edu.cn/#pku-course:" + course["id"]
@@ -241,7 +227,6 @@ def _existing_course_page(client, parent: str, course: dict, *, observed=None) -
     if any(page.get("title") == course["title"] for page, _ in observed):
         raise ValueError("新版目录中有同名课程但缺少稳定身份，请核对后再同步。")
     return None
-
 
 @verified_workspace_operation('course')
 def _course_page(client, parent: str, course: dict, *, create: bool = True,
@@ -279,14 +264,11 @@ def _course_page(client, parent: str, course: dict, *, create: bool = True,
         children_out.update({'id': page['id'], 'children': deepcopy(blocks)})
     return {"id": page["id"], "url": remote.get("url", "")}
 
-
 class _ReadPlanChanged(Exception):
     """A normal serial write is required; no write was attempted upstream."""
 
-
 class _ReadScopeStopped(Exception):
     pass
-
 
 def _same_read_graph(first, final):
     """Compare complete semantics; retain the unmodified physical responses."""
@@ -312,7 +294,6 @@ def _same_read_graph(first, final):
         if before != after:
             return False
     return True
-
 
 class _WorkspaceReadView:
     """One complete read graph, with writes prohibited and no persisted cache."""
@@ -357,7 +338,6 @@ class _WorkspaceReadView:
             raise _ReadPlanChanged()
         return requires_write
 
-
 def _history_candidates(old, detail):
     current = {lesson['source_id'] for lesson in detail['lessons']}
     active, historical = old.get('lectures', {}), old.get('historical_lectures', {})
@@ -377,7 +357,6 @@ def _history_candidates(old, detail):
             or len({item['id'] for item in result.values()}) != len(result)):
         raise ValueError('历史讲次来源重复；已有记录保留。')
     return result
-
 
 def _bind_history(settings, course_id, detail, old, value=None):
     """Only the calling operation obtains authenticated history provenance."""
@@ -405,7 +384,6 @@ def _bind_history(settings, course_id, detail, old, value=None):
         'course_id', 'account_namespace', 'account_owner_sha256', 'current_revision', 'current_snapshot_sha256', 'raw_history_sha256')}
     return result, value
 
-
 def _assert_history_scope(settings, histories, notion_token):
     if not histories:
         return
@@ -415,7 +393,6 @@ def _assert_history_scope(settings, histories, notion_token):
     for course_id, value in histories.items():
         recording_history.assert_fresh(settings, course_id,
             catalog.cached(Path(settings.data_dir), course_id), value)
-
 
 def _historical_projection(client, course, parent_id, detail):
     """Read every original historical page/block; never mutate or adopt one."""
@@ -489,7 +466,6 @@ def _historical_projection(client, course, parent_id, detail):
                        'notion_readback': readback, 'notion_readback_sha256': fingerprint(readback)}
     return result
 
-
 def historical_lecture(root, course_id, history_record, history):
     """A local verified history link; it grants no fresh projection authority."""
     from .. import catalog_snapshots as catalog, recording_history
@@ -536,7 +512,6 @@ def historical_lecture(root, course_id, history_record, history):
     except (KeyError, ValueError, TypeError, AttributeError):
         return None
 
-
 def _verify_historical_course(client, home_id, row, detail, observed):
     if not detail.get('_historical_targets'):
         return
@@ -555,7 +530,6 @@ def _verify_historical_course(client, home_id, row, detail, observed):
     page = client.get_page(parent)
     if page.get('archived') or page.get('in_trash') or not _page_parent_matches(page, known):
         raise ValueError('历史讲次原父目录不可读取；已有内容保留。')
-
 
 def _project_course(client, root, home, row, detail, state, state_path, recovery_state, observed):
     """The original verified operations, shared by probes and serial writers."""
@@ -600,7 +574,6 @@ def _project_course(client, root, home, row, detail, state, state_path, recovery
             **({'historical_lectures': historical, 'history_binding': deepcopy(detail['_history_binding'])}
                if historical else {})}
 
-
 def _workspace_source_state(root, home):
     from ..catalog_schema import fingerprint
     path = root / '.notion-workspace-v2' / fingerprint({'home': home['id']}) / 'source-state.json'
@@ -613,7 +586,6 @@ def _workspace_source_state(root, home):
     if not isinstance(state, dict):
         raise ValueError('新版 Notion 恢复记录格式无效，已停止重复写入。')
     return path, state
-
 
 class PendingWorkspaceReadPlan:
     """Own one diagnostic first graph; never prepare permits or perform writes."""
@@ -872,7 +844,6 @@ class PendingWorkspaceReadPlan:
         finally:
             self.close()
 
-
 def _readonly_refresh_views(client, rows, details, home, state, state_path, recovery_state,
                             observed, check_cancel, first_round=None):
     """Probe every original predicate twice, with at most four upstream reads."""
@@ -956,7 +927,6 @@ def _readonly_refresh_views(client, rows, details, home, state, state_path, reco
     return {key: _WorkspaceReadView(client, semaphore, stopped, snapshot=view.snapshot)
             for key, (view, _) in final.items()}, True
 
-
 @request_scope()
 def sync_workspace(settings, parent_id: str | None = None, *, course_id: str | None = None,
                     check_cancel=None, pending_read_plan=None, operation_nonce=None,
@@ -1003,6 +973,8 @@ def sync_workspace(settings, parent_id: str | None = None, *, course_id: str | N
         rows = writable
     if course_id is not None and len(rows) != 1:
         raise ValueError('当前教学网课程目录尚未完整确认，不能准备讲次。')
+    if not rows and not existing:
+        raise ValueError('请先更新课程目录，至少一门课程读取成功后再创建学习主页；账号和 Notion 连接已保留。')
     if existing:
         # Diagnose a damaged course identity with reads before obtaining a
         # writer permit. This cannot clear an unknown writer, adopt an
@@ -1128,7 +1100,6 @@ def sync_workspace(settings, parent_id: str | None = None, *, course_id: str | N
     _save(manifest_path(root), result)
     return result
 
-
 def move_workspace(settings, parent_id: str) -> dict:
     from . import workspace_profile
     if settings is None:
@@ -1159,7 +1130,6 @@ def move_workspace(settings, parent_id: str) -> dict:
         moved["active"] = True
         _save(manifest_path(root), moved)
         return moved
-
 
 @request_scope()
 def read_projection(settings, *, course_id: str | None = None) -> dict:

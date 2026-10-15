@@ -41,6 +41,7 @@ def ui():
     with playwright.sync_playwright() as driver:
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         page = browser.new_page(viewport={"width": 1100, "height": 760})
+        page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
         page.route("http://panel.test/**", serve)
         page.goto("http://panel.test/app")
         page.locator("#auth-email").wait_for()
@@ -118,6 +119,9 @@ def test_campus_enter_validates_before_saved_and_retains_failed_inputs(ui):
 def test_home_setup_destination_pending_and_ready_layout(ui, tmp_path):
     page, held, posted = ui
     signed_in_setup(page)
+    # This focused control test starts after directory verification; the first-run
+    # journey tests that prerequisite through actual clicks and API responses.
+    page.evaluate("window.__uiTest.state.campus.courses=[{id:'fixture',synced_at:'2026-10-14'}];window.__uiTest.render()")
     page.locator("#home-parent").select_option("parent-b")
     playwright.expect(page.locator(".home-setup-footer")).to_contain_text("保存到「课程资料」下面")
     page.locator(".home-setup").screenshot(path=str(tmp_path / "home-setup.png"))

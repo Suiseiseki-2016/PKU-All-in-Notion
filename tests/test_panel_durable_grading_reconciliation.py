@@ -1,18 +1,17 @@
-﻿"""Durable grading reconciliation across restart and ambiguous writes."""
+"""Durable grading reconciliation across restart and ambiguous writes."""
 from __future__ import annotations
 import json
 from pathlib import Path
 import httpx
 import pytest
 from pku_sync.notion import NotionClient
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     PHASE_COMPLETED, PHASE_INTENT, PHASE_RELAY_STARTED, PHASE_RELAY_SUCCEEDED,
     PHASE_RESULT_RECONCILED, PHASE_RESULT_VERIFIED, PHASE_WRONG_ANSWERS_VERIFIED,
     ExerciseGrader,
     GradeSettlementError, GradeTarget, GradingInput,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
-from pku_sync.panel.grading_api import GradeJobController
+from pku_sync.panel.grading_records import JsonGradingRecordStore
 
 CONTENT = json.dumps({"score": 72, "questions": [
     {"number": 1, "type": "选择", "score": 2, "max_score": 2},
@@ -125,14 +124,6 @@ def test_final_completion_persistence_failure_restarts_from_verified_phase(tmp_p
     assert result["status"] == "completed" and relay.calls == 1
     assert JsonGradingRecordStore(path).snapshot()[target().page_id]["phase"] == PHASE_COMPLETED
 
-def test_controller_recovers_pending_before_marker_confirmation():
-    class Service:
-        def __init__(self): self.directory_service = type("Directory", (), {"resolve_exercise_launch": lambda _self, _id: type("Launch", (), {"status": "opened"})()})()
-        def has_pending(self, _exercise_id): return True
-        def prepare(self, _exercise_id): return prepared(marker=True)
-        def grade(self, _prepared, *, force=False): return {"status": "completed", "exercise_id": "exercise-page", "title": "考前练习", "score": 72, "graded_at": "now", "points_charged": 3, "points_remaining": 17, "result_page_url": "https://www.notion.so/exercise-page"}
-    body, code = GradeJobController(Service()).start("exercise-page")
-    assert code == 202 and body["status"] == "running"
 
 def test_production_notion_mutations_return_created_ids_and_support_archive():
     calls = []
@@ -190,7 +181,7 @@ def test_restart_from_relay_started_is_explicitly_not_replayed(tmp_path):
     JsonGradingRecordStore(path).put(target().page_id, record)
     relay, adapter = Relay(), ExternalStateAdapter()
 
-    from pku_sync.panel.exercise_grader import GradeBlocked
+    from pku_sync.panel.quiz_grading_core import GradeBlocked
     with pytest.raises(GradeBlocked, match="\u65e0\u6cd5\u786e\u8ba4"):
         restart(path, relay, adapter).grade(prepared(marker=True))
 
@@ -198,7 +189,7 @@ def test_restart_from_relay_started_is_explicitly_not_replayed(tmp_path):
 
 
 def test_production_result_envelope_keeps_marker_and_cleanup_stops_at_user_content():
-    from pku_sync.panel.exercise_grader import (
+    from pku_sync.panel.quiz_grading_core import (
         _find_marker, _find_operation, _operation_result_markdown,
         _stale_result_blocks,
     )
@@ -249,7 +240,7 @@ def test_partial_wrong_answer_progress_is_durable_before_next_create(tmp_path):
 
 
 def test_wrong_answer_identity_prefers_explicit_logical_key():
-    from pku_sync.panel.exercise_grader import _wrong_answer_operation_key
+    from pku_sync.panel.quiz_grading_core import _wrong_answer_operation_key
     first = {"number": None, "wrong_answer_key": "source-question-a"}
     second = {"number": None, "wrong_answer_key": "source-question-b"}
     assert _wrong_answer_operation_key("operation", first) == "operation:source-question-a"
@@ -291,33 +282,12 @@ def test_production_cleanup_journal_reconciles_ambiguous_archive_after_restart(t
 
 
 
-def test_relay_started_controller_result_has_no_fabricated_settlement(tmp_path):
-    path = tmp_path / "relay-started-controller.json"
-    JsonGradingRecordStore(path).put(target().page_id, {
-        "version": 2, "status": "pending", "phase": PHASE_RELAY_STARTED,
-        "operation_id": "ambiguous", "page_id": target().page_id,
-        "answer_fingerprint": "answers-v1",
-    })
-    service = restart(path, Relay(), ExternalStateAdapter())
-    service.directory_service.resolve_exercise_launch = lambda _exercise_id: type("Launch", (), {"status": "opened"})()
-    service.prepare = lambda _exercise_id: prepared(marker=True)
-    controller = GradeJobController(service)
-    body, code = controller.start(target().page_id)
-    assert code == 202
-    import time
-    for _ in range(100):
-        result, _ = controller.snapshot(body["job_id"])
-        if result["status"] != "running":
-            break
-        time.sleep(0.005)
-    assert result["status"] == "blocked"
-    assert "points_charged" not in result and "points_remaining" not in result
 
 
 def test_partial_matching_result_envelope_blocks_without_second_append():
-    from pku_sync.panel.exercise_grader import RealGradingPageAdapter
+    from pku_sync.panel.quiz_grading_core import RealGradingPageAdapter
     from pku_sync.notion import markdown_to_blocks
-    import pku_sync.panel.exercise_grader as grading_module
+    import pku_sync.panel.quiz_grading_core as grading_module
 
     blocks = markdown_to_blocks("## \u6279\u6539\u7ed3\u679c\n\nPKU_GRADE_OPERATION:operation")
     class Client:
@@ -341,7 +311,7 @@ def test_partial_matching_result_envelope_blocks_without_second_append():
 
 
 def test_e2e_result_marker_is_preserved_in_operation_envelope():
-    from pku_sync.panel.exercise_grader import _operation_result_markdown
+    from pku_sync.panel.quiz_grading_core import _operation_result_markdown
     from pku_sync.notion import markdown_to_blocks
     blocks = markdown_to_blocks(_operation_result_markdown(
         "operation", CONTENT, score=72, graded_at="now", marker="E2E_GRADE_RESULT",
@@ -350,7 +320,7 @@ def test_e2e_result_marker_is_preserved_in_operation_envelope():
 
 
 def test_required_wrong_answers_block_completion_without_configured_hub():
-    from pku_sync.panel.exercise_grader import RealGradingPageAdapter, GradeBlocked
+    from pku_sync.panel.quiz_grading_core import RealGradingPageAdapter, GradeBlocked
     settings = type("Settings", (), {"notion_wrong_answer_hub_id": ""})()
     adapter = RealGradingPageAdapter(settings)
     assert adapter.verify_wrong_answer(target(), {"number": 2}, key="operation:q2", operation_id="operation") is False
@@ -384,7 +354,7 @@ def test_restart_from_wrong_answers_verified_rechecks_actual_external_state(tmp_
 
 
 def test_cleanup_does_not_archive_partial_or_user_authored_marker_section():
-    from pku_sync.panel.exercise_grader import _find_operation, _operation_result_markdown, _stale_result_blocks
+    from pku_sync.panel.quiz_grading_core import _find_operation, _operation_result_markdown, _stale_result_blocks
     from pku_sync.notion import markdown_to_blocks
     partial = markdown_to_blocks("## \u6279\u6539\u7ed3\u679c\n\n```text\nstudent code\n```")
     current = markdown_to_blocks(_operation_result_markdown("current", CONTENT, score=72, graded_at="now"))

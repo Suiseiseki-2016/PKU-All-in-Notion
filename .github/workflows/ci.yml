@@ -21,6 +21,9 @@ jobs:
   fake-suite:
     name: compileall + fake pytest suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Match the validated release runtime instead of the runner's newest Python.
+      UV_PYTHON: '3.12'
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +38,7 @@ jobs:
           enable-cache: true
 
       - name: Sync locked dependencies (all extras)
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
       - name: compileall typecheck
         run: uv run python -m compileall -q pku_sync

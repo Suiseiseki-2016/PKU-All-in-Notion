@@ -18,15 +18,11 @@ from fastapi.testclient import TestClient
 from pku_sync.panel.connection import (
     CONNECTED_COPY,
     DISCONNECTED_COPY,
-    DISCONNECTED_DIRECTORY_ACTION,
-    DISCONNECTED_DIRECTORY_COPY,
-    DISCONNECTED_DIRECTORY_TITLE,
     DISCONNECT_TOAST,
     RECONNECT_TOAST,
 )
-from pku_sync.panel.fake_workspace import PANEL_FORBIDDEN_STRINGS
+from grading_workspace import PANEL_FORBIDDEN_STRINGS
 from pku_sync.panel.student_ui import (
-    ACTIVATED_TOAST,
     EMPTY_CODE_NOTICE,
     PANEL_COPY,
     STUDENT_UI_PATH,
@@ -37,16 +33,11 @@ from pku_sync.panel.webapi import create_app
 
 def make_client() -> TestClient:
     from pku_sync.panel.connection import build_fake_connection_service
-    from pku_sync.panel.fake_directory import build_fake_directory
 
-    directory = build_fake_directory()
+
+    directory = None
     return TestClient(
-        create_app(
-            settings=SimpleNamespace(data_dir="data", platform_token=""),
-            runner=_NoopRunner(),
-            directory_service=directory,
-            connection_service=build_fake_connection_service(directory_service=directory),
-        )
+        create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=build_fake_connection_service(directory_service=directory))
     )
 
 
@@ -104,9 +95,8 @@ def test_student_ui_has_only_bounded_past_paper_reference_input():
         assert "contenteditable" not in text.lower(), name
     # Native quizzes accept student reference text; answers still live in
     # Notion. Allow only this explicitly labelled, bounded reference input.
-    assert assets["js"].count("<textarea ") == 1
-    assert '<textarea data-campus-quiz-paper maxlength="20000"' in assets["js"]
-    assert "学生上传的参考材料，不代表教学网正式要求。" in assets["js"]
+    assert "data-campus-quiz-paper" not in assets["js"]
+    assert "generateCampusQuiz" not in assets["js"]
     # redeem / legacy activation keep one plain text code field; auth uses
     # email + password inputs instead of free-form answer editors
     assert 'type="email"' in assets["js"]
@@ -146,75 +136,14 @@ def test_student_ui_never_carries_content_paths_or_tokens():
 # -- pinned onboarding copy ----------------------------------------------------
 
 
-def test_onboarding_copy_matches_the_approved_prototype():
-    onboarding = PANEL_COPY["onboarding"]
-    assert onboarding["eyebrow"] == "激活学习空间"
-    assert onboarding["title"] == "连接完成，只差一步"
-    assert onboarding["subtitle"] == "确认下方的学校空间，并输入兑换码完成激活。"
-    assert onboarding["progress"] == {
-        "aria_label": "开通进度：第3步，共3步",
-        "label": "开始使用",
-        "value": "3 / 3",
-    }
-    assert onboarding["code_label"] == "兑换码"
-    assert onboarding["code_placeholder"] == "输入 8–16 位兑换码"
-    assert onboarding["activate"] == "立即激活"
-    assert onboarding["code_help"] == (
-        "兑换码由课程助教或学校统一发放；开通凭据只保存在学校服务端，"
-        "不会出现在你的浏览器或设备中。"
-    )
-    assert onboarding["footer"] == "激活后即可开始建立课程索引，并随时在设置中管理 Notion 连接。"
-    assert onboarding["mini_status"] == "安全连接"
-    assert onboarding["aside"]["eyebrow"] == "PKU · 学习工作台"
-    assert onboarding["aside"]["title_lines"] == ["把每一堂课，", "变成可复习的知识。"]
-    assert onboarding["aside"]["lead"] == (
-        "连接你的 Notion 学习空间，自动整理讲次与资料索引。"
-        "阅读、笔记、练习与问答，都在 Notion 中完成。"
-    )
 
 
-def test_onboarding_shows_the_two_connection_rows_with_both_notion_states():
-    onboarding = PANEL_COPY["onboarding"]
-    assert onboarding["connection_list_label"] == "连接状态"
-    assert onboarding["campus"]["title"] == "北京大学"
-    assert onboarding["campus"]["detail"] == "校园身份已确认"
-    assert onboarding["notion"]["title"] == "Notion 学习空间"
-    assert onboarding["notion"]["revoke"] == "撤销连接"
-    assert onboarding["notion"]["reconnect"] == "连接 Notion"
-    connection = PANEL_COPY["connection"]
-    assert connection["connected"] == CONNECTED_COPY
-    assert connection["disconnected"] == DISCONNECTED_COPY
-    assert connection["disconnect_toast"] == DISCONNECT_TOAST
-    assert connection["reconnect_toast"] == RECONNECT_TOAST
 
 
-def test_onboarding_carries_exactly_the_four_approved_trust_items():
-    items = PANEL_COPY["onboarding"]["trust_items"]
-    assert len(items) == 4
-    assert [item["title"] for item in items] == [
-        "连接由你掌控",
-        "只同步你选中的内容",
-        "凭据不进入你的设备",
-        "Notion 可随时撤销",
-    ]
-    assert items[0]["detail"] == "添加或移除哪些连接，完全由你决定，只连接你需要的。"
-    assert items[1]["detail"] == "只有你明确选择的学习内容会被同步，不会触碰工作区里的其他页面。"
-    assert items[2]["detail"] == "课堂服务的访问凭据只保存在学校服务端，浏览器和本地设备中都不会出现。"
-    assert items[3]["detail"] == "连接可在设置里一键断开，已保存的笔记与练习记录不受影响。"
 
 
-def test_empty_code_and_activation_copy_are_pinned():
-    assert EMPTY_CODE_NOTICE == "请输入兑换码后再试一次。"
-    assert ACTIVATED_TOAST == "学习空间已激活，课程索引已就绪。"
-    assert PANEL_COPY["onboarding"]["empty_code_notice"] == EMPTY_CODE_NOTICE
-    assert PANEL_COPY["onboarding"]["activated_toast"] == ACTIVATED_TOAST
 
 
-def test_disconnected_directory_state_copy_is_shipped_to_the_browser():
-    directory = PANEL_COPY["directory"]["disconnected"]
-    assert directory["title"] == DISCONNECTED_DIRECTORY_TITLE
-    assert directory["body"] == DISCONNECTED_DIRECTORY_COPY
-    assert directory["action"] == DISCONNECTED_DIRECTORY_ACTION
 
 
 # -- the page ships the copy the browser renders from --------------------------
@@ -241,11 +170,12 @@ def test_engineering_panel_is_untouched_and_links_to_the_student_ui(tmp_path):
         platform_token="",
         transcription_backend="local",
     )
-    client = TestClient(webapi.create_app(settings, runner=_NoopRunner()))
+    client = TestClient(webapi.create_app(settings))
     page = client.get("/")
     assert page.status_code == 200
-    assert "PKU All in Notion 状态面板" in page.text  # engineering panel intact
-    assert STUDENT_UI_PATH in page.text  # discoverable student surface
+    assert "window.PANEL_COPY" in page.text
+    assert str(page.url).endswith(STUDENT_UI_PATH)
+    assert "跑 daily" not in page.text
 
 
 def test_responsive_navigation_and_accessibility_contract():
@@ -253,33 +183,16 @@ def test_responsive_navigation_and_accessibility_contract():
     assets = served_assets(make_client())
     page, css, script = assets["page"], assets["css"], assets["js"]
     for expected in (
-        ".sidebar { display: none; }", "html { min-width: 320px; }",
+        ".sidebar{ display: none; }", "html { min-width: 320px; }",
         "overflow-wrap: anywhere", ".course-card", "flex-direction: column",
-        ".material-row", "flex-wrap: wrap", ".exercise-toolbar, .exercise-row",
+        ".recording-row", "flex-wrap: wrap",
         "min-height: 44px", "button:focus-visible", "select:focus-visible",
     ):
-        assert expected in css, expected
+        assert "".join(expected.split()) in "".join(css.split()), expected
     for expected in (
         'class="mobile-overview"', 'data-action="open-dashboard"',
-        'aria-label="', 'aria-current="page"', 'aria-pressed="',
-        'aria-busy="true" aria-live="polite" role="status"',
-        'class="exercise-status ', "row.status_label",
+        'aria-label="', 'aria-current="page"', 'data-persistent-disclosure=',
+        'aria-busy=', 'role="status" aria-live="polite"',
     ):
         assert expected in script, expected
     assert '<div id="app" aria-live="polite"></div>' in page
-
-
-def test_material_processing_and_association_statuses_stay_distinct():
-    """Check mapping and styling together, using the existing asset helper."""
-    assets = served_assets(make_client())
-    script, css = assets["js"], assets["css"]
-    start = script.index("function materialRow(")
-    row = script[start : script.index("\n  }", start) + len("\n  }")]
-    for label, style in (
-        ("待阅读", "reading"), ("重点", "focus"),
-        ("待确认", "pending"), ("已索引", "indexed"),
-    ):
-        assert f'"{label}": "{style}"' in row, label
-        assert f".status-badge.{style}" in css, style
-    assert 'item.status === "已索引" ? "indexed" : "pending"' not in row
-    assert ".assoc.pending" in css

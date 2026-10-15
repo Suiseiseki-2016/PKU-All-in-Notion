@@ -11,7 +11,6 @@ from .campus_quiz import _hash, _journal_lock
 from .llm_json import extract_single_json_payload
 from .assignment_workflow import PreparationError, _assignment, _account, _requirements, _save_json
 
-
 def _extract(content, original):
     value = extract_single_json_payload(content)
     if not isinstance(value, dict) or set(value) != {'requirements', 'file_formats', 'filename_rules', 'uncertainties'}:
@@ -42,7 +41,6 @@ def _extract(content, original):
     if not value['requirements'] and not value['uncertainties']:
         raise ValueError('empty extraction without uncertainty')
     return value
-
 
 def analyze(settings, course_id, content_id, *, confirmed=False):
     if confirmed is not True:

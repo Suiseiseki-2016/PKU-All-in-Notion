@@ -107,6 +107,57 @@ def test_prepared_reads_preserve_each_identity_and_both_current_reads_with_origi
     assert [course for method, course, suffix, _ in calls if method == "POST" and suffix == "/projection"] == courses
 
 
+@pytest.mark.parametrize('changed', [False, True])
+def test_catalog_authority_restarts_only_expired_admission_with_fresh_reads(linked, monkeypatch, changed):
+    from pku_sync.panel.notion_home import _catalog_authority
+    settings, envelopes, calls, snapshots, _ = linked
+    monkeypatch.setattr(catalog, 'activate_account', lambda _: None)
+    monkeypatch.setattr(catalog, 'assert_portal_readable', lambda *a: None)
+    select = receipts._PreparedReadPhase.select
+    expired = []
+    def age_second(phase, config, expected):
+        if phase.position == 1 and not expired:
+            expired.append(True)
+            phase.entries[1]['read_at'] -= 40
+            if changed:
+                cid = envelopes[0]['snapshot']['course_id']
+                snapshots[cid] = {**snapshots[cid], 'revision': 4}
+        return select(phase, config, expected)
+    monkeypatch.setattr(receipts._PreparedReadPhase, 'select', age_second)
+    entered = []
+    def write():
+        with _catalog_authority(settings.data_dir, settings, list(snapshots)) as ids:
+            entered.append(ids)
+    if changed:
+        with pytest.raises(catalog.CatalogUnavailable):
+            write()
+        assert not entered
+    else:
+        write()
+        assert len(entered) == 1
+        first = envelopes[0]['snapshot']['course_id']
+        events = [(method, suffix) for method, course, suffix, _ in calls if course == first]
+        assert events.count(('POST', '/projection')) == 2
+        assert events.count(('POST', '/projection/release')) == 2
+        # Release the no-write attempt before acquiring again; all courses
+        # must pass fresh current checks before the writer is called once.
+        acquisitions = [i for i, event in enumerate(events) if event == ('POST', '/projection')]
+        assert events.index(('POST', '/projection/release')) < acquisitions[1]
+        assert sum(method == 'GET' for method, _ in events) >= 4
+    assert expired
+
+
+def test_catalog_authority_never_retries_writer_expiry(linked, monkeypatch):
+    from pku_sync.panel.notion_home import _catalog_authority
+    settings, envelopes, calls, snapshots, _ = linked
+    monkeypatch.setattr(catalog, 'activate_account', lambda _: None)
+    monkeypatch.setattr(catalog, 'assert_portal_readable', lambda *a: None)
+    with pytest.raises(receipts.PreparedReadExpired):
+        with _catalog_authority(settings.data_dir, settings, list(snapshots)):
+            raise receipts.PreparedReadExpired('writer must never be replayed')
+    assert sum(method == 'POST' and suffix == '/projection' for method, _, suffix, _ in calls) == len(envelopes)
+
+
 @pytest.mark.parametrize("mutation", ["token", "endpoint", "root", "age", "order", "snapshot"])
 def test_phase_binding_or_expiry_rejects_before_any_acquire_or_journal(linked, mutation, monkeypatch, tmp_path):
     settings, envelopes, calls, _, _ = linked

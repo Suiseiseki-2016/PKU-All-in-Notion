@@ -1,5 +1,6 @@
 """Course-summary snapshots: honest content, idempotent Notion writes."""
 from __future__ import annotations
+from tests.retired_data_support import seed_old_home
 
 import json
 from datetime import date, timedelta
@@ -85,7 +86,7 @@ def _write_note(root, index, markdown):
 
 
 def _publish(job, *, note_url="https://notion.so/note-1",
-             lecture_url="https://notion.so/lecture-1", home_id="home"):
+             lecture_url="https://notion.so/lecture-1", home_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"):
     from pku_sync.panel.recordings_api import recording_id
 
     (job.directory / "notion-publication.json").write_text(json.dumps({
@@ -103,6 +104,13 @@ class _FakeNotion:
         self.pages = pages if pages is not None else {}
         self.created = []
         self.blocks = {}
+        self.pages.setdefault("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parent": {"page_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}})
+        for parent, children in self.children.items():
+            for page in children:
+                self.pages.setdefault(page["id"], {**page, "parent": {"page_id": parent}})
+                if parent == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":
+                    self.blocks[page["id"]] = [notion_home._linked_paragraph(
+                        "查看教学网课程", "https://course.pku.edu.cn/#pku-course:campus-1")]
 
     def __enter__(self):
         return self
@@ -113,9 +121,12 @@ class _FakeNotion:
     def list_child_pages(self, parent):
         return list(self.children.get(parent, []))
 
+    def get_page(self, page_id):
+        return self.pages[page_id]
+
     def create_page(self, parent, title, *, children=None, retry=True):
         assert retry is False
-        page_id = f"page-{len(self.pages) + 1}"
+        page_id = f"page-{len(self.created) + 1}"
         self.created.append((parent, title))
         self.children.setdefault(parent, []).append(
             {"id": page_id, "title": title, "url": "https://notion.so/" + page_id})
@@ -128,12 +139,15 @@ class _FakeNotion:
 
 
 def _home(root):
-    notion_home._save_home(root, {"id": "home", "parent_id": "parent",
-                                  "url": "https://notion.so/home"})
+    from pku_sync.panel import notion_workspace
+    from pku_sync.catalog_schema import fingerprint
+    notion_workspace._save(notion_workspace.manifest_path(root), {
+        "schema": 2, "active": True, "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parent_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "url": "https://notion.so/home", "account_namespace": fingerprint({"session": "platform"})})
 
 
 def _tree():
-    return {"home": [{"id": "course-page", "title": "计算机网络",
+    return {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [{"id": "course-page", "title": "计算机网络",
                       "url": "https://notion.so/course-page"}]}
 
 
@@ -226,8 +240,8 @@ def test_summary_page_links_lectures_and_reuses_the_same_day(tmp_path):
 def test_summary_refuses_to_guess_when_the_course_page_is_missing(tmp_path):
     _campus(tmp_path)
     _home(tmp_path)
-    client = _FakeNotion({"home": []})
-    with pytest.raises(ValueError, match="还没有 Notion 课程页"):
+    client = _FakeNotion({"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": []})
+    with pytest.raises(ValueError, match="目录尚未验证"):
         course_summary.publish_course_summary(client, tmp_path, "campus-1")
     assert client.created == []
 
@@ -236,16 +250,20 @@ def test_summary_batch_keeps_going_when_one_course_fails(tmp_path, monkeypatch):
     _campus(tmp_path)
     _home(tmp_path)
 
-    def fake_publish(client, data_dir, course_id, *, day=None):
+    authority = course_summary._confirmed_course(tmp_path, "campus-1")[1]
+    original_course = course_summary.campus_course
+
+    def fake_publish(client, data_dir, course_id, *, day=None, **kwargs):
         if course_id == "broken":
             raise ValueError("Notion 拒绝写入")
         return {"course_id": course_id, "title": "t", "created": True,
-                "url": "https://notion.so/ok"}
+                "url": "https://notion.so/ok", "_summary_authority": authority,
+                "_course_page_id": "course-page"}
 
     monkeypatch.setattr(course_summary, "publish_course_summary", fake_publish)
     monkeypatch.setattr(course_summary, "campus_course",
-                        lambda data_dir, course_id: {"title": course_id})
-    monkeypatch.setattr(course_summary, "NotionClient", lambda token: _FakeNotion())
+                        lambda data_dir, course_id: {"title": course_id} if course_id == "broken" else original_course(data_dir, course_id))
+    monkeypatch.setattr(course_summary, "NotionClient", lambda token: _FakeNotion(_tree()))
     result = course_summary.publish_course_summaries(
         tmp_path, "token", ["campus-1", "broken"], on_progress=lambda *args: None)
     assert result["created"] == 1 and result["urls"] == ["https://notion.so/ok"]
@@ -259,14 +277,13 @@ def _settings(root, *, notion_token="token"):
 
 def _manager(tmp_path, monkeypatch, *, notion_token="token"):
     from fastapi.testclient import TestClient
-    from pku_sync.panel.fake_directory import build_fake_directory
+
     from pku_sync.panel.recordings_api import RecordingWorkManager, add_recording_routes
     from fastapi import FastAPI
 
     client_tree = _FakeNotion(_tree())
     monkeypatch.setattr(course_summary, "NotionClient", lambda token: client_tree)
-    manager = RecordingWorkManager(_settings(tmp_path, notion_token=notion_token),
-                                   build_fake_directory())
+    manager = RecordingWorkManager(_settings(tmp_path, notion_token=notion_token))
     app = FastAPI()
     add_recording_routes(app, manager)
     return TestClient(app), manager, client_tree
@@ -315,7 +332,7 @@ def test_summary_api_needs_notion_and_a_course(tmp_path, monkeypatch):
     assert client.post("/api/campus/courses/campus-1/summary").status_code == 409
     empty = tmp_path / "empty"
     empty.mkdir()
-    notion_home._save_home(empty, {"id": "home", "parent_id": "parent",
+    seed_old_home(empty, {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parent_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                                    "url": "https://notion.so/home"})
     client2, _m2, _t2 = _manager(empty, monkeypatch)
     assert client2.post("/api/campus/notion/summaries").status_code == 409

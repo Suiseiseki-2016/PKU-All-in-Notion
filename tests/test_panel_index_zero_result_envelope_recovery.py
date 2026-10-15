@@ -1,4 +1,4 @@
-﻿"""Regression coverage for index-zero grading-envelope recovery."""
+"""Regression coverage for index-zero grading-envelope recovery."""
 from __future__ import annotations
 
 import copy
@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-import pku_sync.panel.exercise_grader as grader_module
+import pku_sync.panel.quiz_grading_core as grader_module
 from pku_sync.notion import markdown_to_blocks
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     PHASE_COMPLETED,
     PHASE_RELAY_SUCCEEDED,
     ExerciseGrader,
@@ -20,7 +20,7 @@ from pku_sync.panel.exercise_grader import (
     _operation_result_markdown,
     _result_append_action,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
+from pku_sync.panel.grading_records import JsonGradingRecordStore
 
 CONTENT = json.dumps(
     {

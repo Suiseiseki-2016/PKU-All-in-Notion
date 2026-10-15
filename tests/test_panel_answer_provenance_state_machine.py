@@ -1,21 +1,22 @@
-﻿"""Additive coverage for answer provenance and marker-authoritative reruns."""
+"""Additive coverage for answer provenance and marker-authoritative reruns."""
 from __future__ import annotations
+from tests.grading_support import GradeRecords
+from tests.grading_support import FakeGradingPageAdapter
 
 import json
 from pathlib import Path
 
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     ANSWER_PROVENANCE_KNOWN,
     ANSWER_PROVENANCE_MARKER_ONLY,
     ANSWER_PROVENANCE_UNKNOWN,
     ExerciseGrader,
-    FakeGradingPageAdapter,
     GradingInput,
     GradeTarget,
     _answer_provenance,
 )
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
+
+from grading_workspace import EXERCISE_GENERATED
 
 
 def _piece(text):
@@ -125,7 +126,7 @@ def test_deleted_or_malformed_answers_are_unknown_not_marker_only():
 
 
 def test_marker_only_reconstructs_free_result_with_unknown_settlement_even_when_forced():
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     relay = _Relay()
     adapter = _ProvenanceAdapter(ANSWER_PROVENANCE_MARKER_ONLY)
@@ -148,7 +149,7 @@ def test_marker_only_reconstructs_free_result_with_unknown_settlement_even_when_
 
 
 def test_marker_only_does_not_trust_malformed_local_settlement_record():
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     directory.local_grading_records[EXERCISE_GENERATED] = {}
     relay = _Relay()
@@ -175,7 +176,7 @@ def test_marker_only_does_not_trust_malformed_local_settlement_record():
 
 
 def test_unknown_answer_provenance_never_reuses_marker_and_forced_rerun_is_metered():
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     relay = _Relay()
     adapter = _ProvenanceAdapter(ANSWER_PROVENANCE_UNKNOWN)
@@ -197,7 +198,8 @@ def test_unknown_answer_provenance_never_reuses_marker_and_forced_rerun_is_meter
     assert adapter.write_calls[-1].get("updated") is True
 
 
-def test_marker_reconstruction_ui_renders_unknown_settlement_copy():
-    script = (Path(__file__).parents[1] / "pku_sync" / "panel" / "static" / "app.js").read_text(encoding="utf-8")
-    assert 'typeof r.points_charged === "number"' in script
-    assert "COPY.directory.exercises.settlement_unknown" in script
+def test_marker_reconstruction_preserves_unknown_settlement_in_current_result():
+    from pku_sync.panel.quiz_grading_core import _reuse_result
+    result = _reuse_result({"score": 91}, _target(), settlement_known=False)
+    assert result["score"] == 91
+    assert result["points_charged"] is None and result["points_remaining"] is None

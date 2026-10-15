@@ -12,7 +12,7 @@ from pku_sync.panel import recordings_api
 @pytest.mark.parametrize('wrapped', [False, True])
 @pytest.mark.parametrize('kind', ['sync', 'catalog', 'process'])
 def test_disk_full_error_is_actionable_without_private_details(kind, wrapped, tmp_path):
-    manager = recordings_api.RecordingWorkManager(SimpleNamespace(data_dir=tmp_path), object())
+    manager = recordings_api.RecordingWorkManager(SimpleNamespace(data_dir=tmp_path))
     manager._work = recordings_api.Work(kind=kind, stage='读取教学网目录')
     def action():
         try:
@@ -30,7 +30,7 @@ def test_disk_full_error_is_actionable_without_private_details(kind, wrapped, tm
 
 
 def test_sqlite_full_is_identified_by_error_code(tmp_path):
-    manager = recordings_api.RecordingWorkManager(SimpleNamespace(data_dir=tmp_path), object())
+    manager = recordings_api.RecordingWorkManager(SimpleNamespace(data_dir=tmp_path))
     manager._work = recordings_api.Work(kind='sync', stage='保存目录')
     def action():
         exc = sqlite3.OperationalError('private database path')

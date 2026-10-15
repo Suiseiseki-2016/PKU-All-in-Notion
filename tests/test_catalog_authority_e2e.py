@@ -1,3 +1,4 @@
+from tests.retired_data_support import seed_old_home
 """Windows cross-repository contract acceptance, with local fake HTTP only."""
 from copy import deepcopy
 import json
@@ -100,7 +101,10 @@ class Notion:
         return [deepcopy(page) for page in self.pages.values() if page["parent"] == page_id]
 
     def list_children(self, page_id):
-        return deepcopy(self.blocks[page_id])
+        rows = deepcopy(self.blocks[page_id])
+        rows.extend({"id": page["id"], "type": "child_page", "child_page": {"title": page["title"]}}
+                    for page in self.pages.values() if page.get("parent") == page_id)
+        return rows
 
     def append_blocks(self, page_id, blocks, *, after=None, **kwargs):
         added = []
@@ -174,9 +178,10 @@ def test_real_refresh_contract_and_notion_self_heal_without_paid_calls(tmp_path,
     assert "local-private" not in json.dumps(canonical)
     notion = Notion()
     monkeypatch.setattr(notion_home, "NotionClient", lambda token: notion)
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    seed_old_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    bootstrap_current_workspace(tmp_path, s, notion, monkeypatch)
     notion_home.sync_catalog(tmp_path, "mock-notion", settings=s)
-    index = next(page for page in notion.pages.values() if page["title"] == "课堂记录")
+    index = next(page for page in notion.pages.values() if page["title"] == "每节课")
     rows = notion.blocks[index["id"]]
     visible = lambda row: json.dumps(row, ensure_ascii=False)
     assert any("2026-09-29" in visible(row) for row in rows)
@@ -187,7 +192,7 @@ def test_real_refresh_contract_and_notion_self_heal_without_paid_calls(tmp_path,
     recordings_api.sync_recording_index(s, lambda _: None)
     assert catalog.current(s, "_101545_1") == canonical
     assert len(campus_course(tmp_path, "_101545_1")["lessons"]) == 5
-    with pytest.raises(catalog.CatalogUnavailable, match="只读"):
+    with pytest.raises(catalog.CatalogUnavailable, match="已验证"):
         notion_home.sync_catalog(tmp_path, "mock-notion", settings=s)
     assert not list(tmp_path.rglob("video.mp4"))
     assert notion.pages["home"]["title"] == "旧主页保留"
@@ -228,7 +233,8 @@ def test_portal_lecture_rename_reuses_notion_source_page(tmp_path, monkeypatch, 
     recordings_api.sync_recording_index(s, lambda _: None)
     notion = Notion()
     monkeypatch.setattr(notion_home, "NotionClient", lambda token: notion)
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    seed_old_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    bootstrap_current_workspace(tmp_path, s, notion, monkeypatch)
     notion_home.sync_catalog(tmp_path, "mock-notion", settings=s)
     original = {page["id"] for page in notion.pages.values() if "2026-09-" in page["title"]}
     fake_portal(monkeypatch, title="教学网修订后的讲次名称")
@@ -238,24 +244,6 @@ def test_portal_lecture_rename_reuses_notion_source_page(tmp_path, monkeypatch, 
     assert original == renamed and len(renamed) == 5
 
 
-def test_incident_repair_touches_only_the_existing_classroom_index(tmp_path, monkeypatch, account_service):
-    fake_portal(monkeypatch)
-    s = settings(tmp_path)
-    s.notion_token = "mock-notion"
-    recordings_api.sync_recording_index(s, lambda _: None)
-    notion = Notion()
-    monkeypatch.setattr(notion_home, "NotionClient", lambda token: notion)
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "parent"})
-    notion_home.sync_catalog(tmp_path, "mock-notion", settings=s)
-    index = next(page for page in notion.pages.values() if page["title"] == "课堂记录")
-    notion.blocks[index["id"]] = [row for row in notion.blocks[index["id"]]
-                                   if "2026-09-29" not in json.dumps(row, ensure_ascii=False)]
-    other_content = {key: deepcopy(rows) for key, rows in notion.blocks.items() if key != index["id"]}
-    old_page_ids = set(notion.pages)
-    result = notion_home.repair_classroom_index(s, "_101545_1")
-    assert result["lectures_verified"] == 5 and result["blocks_added"] == 1
-    assert set(notion.pages) == old_page_ids
-    assert all(notion.blocks[key] == rows for key, rows in other_content.items())
 
 
 def test_observation_precedes_calendar_and_course_metadata_reads(tmp_path, monkeypatch, account_service):
@@ -324,7 +312,7 @@ def test_additive_workspace_preserves_legacy_tree_and_repairs_its_own_index(tmp_
     notion.pages["home"]["parent"] = parent
     notion.blocks["home"] = [{"id": "student", "type": "paragraph",
                                 "paragraph": {"rich_text": [{"text": {"content": "学生旧笔记"}}]}}]
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": parent})
+    seed_old_home(tmp_path, {"id": "home", "parent_id": parent})
     notion_home._save_source_state(tmp_path, {"keep": "旧同步摘要"})
     before_home = notion_home.home_path(tmp_path).read_bytes()
     before_state = notion_home._source_state_path(tmp_path).read_bytes()
@@ -371,7 +359,7 @@ def test_workspace_readback_failure_never_marks_the_projection_complete(tmp_path
     parent = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     notion.pages[parent] = {"id": parent, "title": "空间", "parent": None}
     notion.blocks[parent] = []
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    seed_old_home(tmp_path, {"id": "home", "parent_id": "parent"})
     old = notion_home.home_path(tmp_path).read_bytes()
     create = notion.create_page
     def lose_course_identity(*args, **kwargs):
@@ -385,7 +373,7 @@ def test_workspace_readback_failure_never_marks_the_projection_complete(tmp_path
     with pytest.raises(ValueError, match="身份写入后验证失败"):
         notion_workspace.sync_workspace(s, parent)
     assert not notion_workspace.saved_workspace(tmp_path).get("active")
-    assert notion_home.saved_home(tmp_path)["id"] == "home"
+    assert notion_home.saved_home(tmp_path) == {}
     assert notion_home.home_path(tmp_path).read_bytes() == old
     assert notion.blocks["home"] == []
     before_ids = set(notion.pages)
@@ -459,6 +447,11 @@ def test_legacy_partial_catalog_sync_keeps_verified_courses_usable(
         notion_token="mock-notion",
     )
     recordings_api.sync_recording_index(configured, lambda _: None)
+    store = Notion()
+    monkeypatch.setattr(notion_home, "NotionClient", lambda _: store)
+    monkeypatch.setattr(course_summary, "NotionClient", lambda _: store)
+    seed_old_home(tmp_path, {"id": "home", "parent_id": "parent"})
+    bootstrap_current_workspace(tmp_path, configured, store, monkeypatch)
     legacy_ids = {"_101577_1", "_104157_1"}
     for course_id in legacy_ids:
         folder = tmp_path / course_id
@@ -470,10 +463,6 @@ def test_legacy_partial_catalog_sync_keeps_verified_courses_usable(
     # Old installations predate this per-course read ledger. Remove only the
     # fixture's ledger, not any real student's data.
     (tmp_path / "portal-read-status.json").unlink()
-    store = Notion()
-    monkeypatch.setattr(notion_home, "NotionClient", lambda _: store)
-    monkeypatch.setattr(course_summary, "NotionClient", lambda _: store)
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": "parent"})
 
     with TestClient(create_app(settings=configured)) as client:
         response = client.get("/api/campus/courses")
@@ -529,7 +518,8 @@ def test_directory_refresh_keeps_verified_courses_usable_when_another_course_is_
     old_snapshot = catalog.current(s, '_104157_1')
     store = Notion()
     monkeypatch.setattr(notion_home, 'NotionClient', lambda _: store)
-    notion_home._save_home(tmp_path, {'id': 'home', 'parent_id': 'parent'})
+    seed_old_home(tmp_path, {'id': 'home', 'parent_id': 'parent'})
+    bootstrap_current_workspace(tmp_path, s, store, monkeypatch)
     notion_home.sync_catalog(tmp_path, 'mock-notion', settings=s)
     bad_page = next(page['id'] for page in store.pages.values() if page['title'] == '不可读课程')
     bad_blocks = deepcopy(store.blocks[bad_page])
@@ -540,7 +530,7 @@ def test_directory_refresh_keeps_verified_courses_usable_when_another_course_is_
     monkeypatch.setattr(materials, 'walk_materials', partial)
     monkeypatch.setattr(course_summary, 'publish_course_summaries', lambda *args, **kwargs:
                         {'created': 0, 'existing': 0, 'urls': [], 'failures': []})
-    manager = recordings_api.RecordingWorkManager(s, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(s)
     manager.start_sync()
     deadline = time.monotonic() + 10
     while manager.background_state()['state'] == 'running' and time.monotonic() < deadline:
@@ -582,7 +572,7 @@ def test_refresh_reports_projection_conflict_without_releasing_or_rebasing(
     route = '/v1/catalog/_101545_1'
     permit = account_service.post(route + '/projection', headers=headers,
                                  json={'revision': original['revision']}).json()
-    manager = recordings_api.RecordingWorkManager(configured, SimpleNamespace())
+    manager = recordings_api.RecordingWorkManager(configured)
     manager.start_sync('_101545_1')
     assert manager._finished.wait(10), 'Selected course task did not reach a terminal state'
     task = manager.state()
@@ -612,7 +602,7 @@ def test_unconfirmed_workspace_registration_stays_inactive_and_reuses_its_pendin
     parent = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     store.pages[parent] = {"id": parent, "title": "空间", "parent": None}
     store.blocks[parent] = []
-    notion_home._save_home(tmp_path, {"id": "home", "parent_id": parent})
+    seed_old_home(tmp_path, {"id": "home", "parent_id": parent})
     monkeypatch.setattr(notion_workspace, "NotionClient", lambda _: store)
     monkeypatch.setattr(notion_home, "available_parents", lambda _: [{"id": parent}])
     with monkeypatch.context() as failure:
@@ -620,7 +610,7 @@ def test_unconfirmed_workspace_registration_stays_inactive_and_reuses_its_pendin
         with pytest.raises(catalog.CatalogUnavailable, match="未切换"):
             notion_workspace.sync_workspace(s, parent)
     pending = notion_workspace.saved_workspace(tmp_path)
-    assert pending["active"] is False and notion_home.saved_home(tmp_path)["id"] == "home"
+    assert pending["active"] is False and notion_home.saved_home(tmp_path) == {}
     page_ids = set(store.pages)
     verified = notion_workspace.sync_workspace(s)
     assert verified["active"] and verified["id"] == pending["id"]
@@ -630,7 +620,7 @@ def test_unconfirmed_workspace_registration_stays_inactive_and_reuses_its_pendin
     store.blocks[destination] = []
     monkeypatch.setattr(notion_home, "available_parents", lambda _: [{"id": parent}, {"id": destination}])
     old_file = notion_home.home_path(tmp_path).read_bytes()
-    moved = notion_home.move_home(tmp_path, s.notion_token, destination, settings=s)
+    moved = notion_workspace.move_workspace(s, destination)
     assert moved["id"] == verified["id"] and moved["active"]
     assert store.pages[moved["id"]]["parent"] == destination
     assert notion_home.home_path(tmp_path).read_bytes() == old_file
@@ -686,3 +676,14 @@ def test_native_quiz_reads_accepted_remote_summary_on_new_device_by_official_ide
     with pytest.raises(campus_quiz.OrganizeBlocked, match="验收"):
         provider.resolve("_101545_1", [lesson["source_id"]])
     assert not list(second.data_dir.rglob("video.mp4"))
+
+
+def bootstrap_current_workspace(root, configuration, store, monkeypatch):
+    from pku_sync.panel import notion_workspace
+    parent = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    store.pages[parent] = {"id": parent, "title": "Current parent", "parent": None}
+    store.blocks[parent] = []
+    configuration.notion_token = "mock-notion"
+    monkeypatch.setattr(notion_workspace, "NotionClient", lambda _: store)
+    monkeypatch.setattr(notion_home, "available_parents", lambda _: [{"id": parent}])
+    return notion_workspace.sync_workspace(configuration, parent)

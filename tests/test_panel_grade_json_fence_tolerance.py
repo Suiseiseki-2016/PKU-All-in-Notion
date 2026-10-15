@@ -15,25 +15,26 @@ prose-wrapped content completes without a second relay call. All relays are
 deterministic fakes — no real LLM, Notion, or other spend.
 """
 from __future__ import annotations
+from tests.grading_support import GradeRecords
+from tests.grading_support import FakeGradingPageAdapter
 
 import copy
 import json
 
 import pytest
 
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     E2E_GRADE_QUESTION_RUBRIC,
     GRADE_RESULT_CONTRACT_VERSION,
     ExerciseGrader,
-    FakeGradingPageAdapter,
     GradeBlocked,
     GradeSettlementError,
     GradingInput,
     _score,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
+from pku_sync.panel.grading_records import JsonGradingRecordStore
+
+from grading_workspace import EXERCISE_GENERATED
 
 GRADED_AT = "2026-09-20T12:00:00+08:00"
 
@@ -114,7 +115,7 @@ class DirectoryStub:
 
 
 def make_grader(content: str):
-    directory = build_fake_directory()
+    directory = GradeRecords()
     directory.load()
     relay = Relay(content)
     adapter = ContractAdapter()

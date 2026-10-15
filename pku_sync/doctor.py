@@ -8,21 +8,25 @@
 专属接口；CLI / 磁盘探测走模块级入口，方便测试隔离。
 """
 
+
 from __future__ import annotations
 
+
 import shutil
+
+
 from dataclasses import dataclass
+
+
 from pathlib import Path
 
-from . import tui_data
+
+
+
 from .config import Settings, settings as default_settings
 
-# --- 注入点（测试里 monkeypatch） -------------------------------------------
 
 project_root = lambda: Path(__file__).resolve().parent.parent  # noqa: E731
-
-
-# --- 检查框架 ---------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -44,9 +48,6 @@ def fail(name: str, detail: str = "") -> Check:
     return Check(name, "fail", detail)
 
 
-# --- 各项检查 ---------------------------------------------------------------
-
-
 def check_env_file(s: Settings) -> Check:
     root_env = project_root() / ".env"
     if root_env.is_file() or Path(".env").is_file():
@@ -65,45 +66,12 @@ def check_credentials(s: Settings) -> Check:
     return ok("凭据")
 
 
-def check_dependencies(s: Settings) -> Check:
-    try:
-        import textual  # noqa: F401
-    except ImportError:
-        return warn("依赖", "textual 未安装，pku-sync tui 不可用（uv pip install -e .）")
-    return ok("依赖")
-
-
 def check_agent_host(s: Settings) -> Check:
     binary = {"factory": "droid"}.get(s.agent_host, s.agent_host)
     path = shutil.which(binary)
     if path:
         return ok("Agent 宿主", f"{s.agent_host}（{Path(path).name}）")
     return fail("Agent 宿主", f"找不到 {binary} CLI（{s.agent_host} 宿主靠它；确认已安装且在 PATH 上）")
-
-
-def check_daily_log(s: Settings) -> Check:
-    log = s.data_dir / "logs" / "latest.daily.log"
-    if not log.is_file():
-        return warn("最近 daily", "无日志（还没跑过？）")
-    status = tui_data.parse_daily_log(log.read_text("utf-8", errors="replace"))
-    if status.exit_code is None:
-        return fail("最近 daily", "日志缺 EXIT_CODE 尾标（可能被截断）")
-    if not status.ok:
-        return fail("最近 daily", f"EXIT_CODE={status.exit_code}（{status.started}）")
-    return ok("最近 daily", f"EXIT_CODE=0（{status.started}）")
-
-
-def check_reports(s: Settings) -> Check:
-    logs = s.data_dir / "logs"
-    stale = []
-    for prefix, label in (("review", "作业批阅"), ("lecture", "讲义建页")):
-        date = tui_data.report_date(tui_data.latest_report(logs, prefix))
-        fresh = tui_data.freshness(date)
-        if date is None or fresh not in ("今天", "昨天"):
-            stale.append(f"{label}: {fresh}")
-    if stale:
-        return warn("Agent 报告", "；".join(stale))
-    return ok("Agent 报告", "作业批阅/讲义建页均为近日")
 
 
 def check_disk(s: Settings) -> Check:
@@ -124,12 +92,10 @@ def check_disk(s: Settings) -> Check:
 ALL_CHECKS = [
     check_env_file,
     check_credentials,
-    check_dependencies,
     check_agent_host,
-    check_daily_log,
-    check_reports,
     check_disk,
 ]
+
 
 _ICONS = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]", "fail": "[red]✗[/red]"}
 

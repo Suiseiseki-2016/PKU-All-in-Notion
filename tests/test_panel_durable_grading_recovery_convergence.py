@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-import pku_sync.panel.exercise_grader as grader_module
+import pku_sync.panel.quiz_grading_core as grader_module
 from pku_sync.notion import markdown_to_blocks
-from pku_sync.panel.exercise_grader import (
+from pku_sync.panel.quiz_grading_core import (
     PHASE_COMPLETED,
     PHASE_RESULT_RECONCILED,
     PHASE_RESULT_VERIFIED,
@@ -22,8 +22,7 @@ from pku_sync.panel.exercise_grader import (
     RealGradingPageAdapter,
     _operation_result_markdown,
 )
-from pku_sync.panel.exercises import JsonGradingRecordStore
-from pku_sync.panel.grading_api import GradeJobController
+from pku_sync.panel.grading_records import JsonGradingRecordStore
 
 GRADED_AT = "2026-09-20T12:00:00+08:00"
 WRONG_CONTENT = json.dumps({"score": 72, "questions": [{"number": 2, "type": "判断", "score": 0, "max_score": 2}]}, ensure_ascii=False)
@@ -108,43 +107,8 @@ def restart(path: Path, relay: Relay, adapter: DependencyAdapter) -> ExerciseGra
     return ExerciseGrader(directory_service=Directory(path), relay=relay, page_adapter=adapter, clock=lambda: GRADED_AT)
 
 
-def wait(controller: GradeJobController, job_id: str) -> dict:
-    for _ in range(200):
-        body, _ = controller.snapshot(job_id)
-        if body["status"] != "running":
-            return body
-        time.sleep(0.005)
-    raise AssertionError("grading job did not finish")
 
 
-def test_controller_charged_dependency_failure_then_ordinary_retry_uses_no_relay(tmp_path):
-    path, relay, adapter = tmp_path / "grading.json", Relay(), DependencyAdapter()
-    first_service = restart(path, relay, adapter)
-    original_ensure = adapter.ensure_result
-
-    def fail_after_result(*args, **kwargs):
-        original_ensure(*args, **kwargs)
-        adapter.dependency_available = False
-
-    adapter.ensure_result = fail_after_result
-    controller = GradeJobController(first_service)
-    started, code = controller.start(target().page_id)
-    assert code == 202
-    failed = wait(controller, started["job_id"])
-    assert failed == {"status": "failed", "reason": "错题数据库暂时不可用。", "retryable": True, "points_charged": 3.0, "points_remaining": 17.0}
-    assert JsonGradingRecordStore(path).snapshot()[target().page_id]["phase"] == PHASE_RESULT_RECONCILED
-    assert relay.calls == 1
-
-    adapter.ensure_result = original_ensure
-    adapter.dependency_available = True
-    retry_controller = GradeJobController(restart(path, relay, adapter))
-    retried, code = retry_controller.start(target().page_id)
-    assert code == 202
-    completed = wait(retry_controller, retried["job_id"])
-    assert completed["status"] == "completed"
-    assert completed["points_charged"] == 3.0 and completed["points_remaining"] == 17.0
-    assert relay.calls == 1
-    assert JsonGradingRecordStore(path).snapshot()[target().page_id]["phase"] == PHASE_COMPLETED
 
 
 def test_postcharge_result_without_wrong_answers_skips_dependency(tmp_path):
@@ -304,33 +268,6 @@ def test_conflicting_token_ownership_never_mutates_realistic_page(monkeypatch):
     assert client.blocks == answers + conflict
 
 
-def test_fake_recovery_fixture_fails_charged_then_retries_without_second_relay():
-    from fastapi.testclient import TestClient
-    from pku_sync.panel.fake_directory import build_fake_directory
-    from pku_sync.panel.fake_workspace import EXERCISE_GENERATED
-    from pku_sync.panel.platform_bridge import FakePlatformBridge
-    from pku_sync.panel.webapi import create_app
-
-    directory = build_fake_directory("grade-recovery")
-    relay = FakePlatformBridge(activated=True, llm_points=20.0, grade_with_wrong_answer=True)
-    grader = grader_module.make_fake_grading_service(
-        directory, relay, fail_wrong_answer_preflight_once=True
-    )
-    client = TestClient(create_app(
-        directory_service=directory, platform_service=relay, grading_service=grader
-    ))
-    assert client.get("/api/directory").status_code == 200
-    started = client.post(f"/api/exercises/{EXERCISE_GENERATED}/grade").json()
-    failed = wait(client.app.state.grade_jobs, started["job_id"])
-    assert failed["status"] == "failed"
-    assert failed["points_charged"] == 3.0 and failed["points_remaining"] == 17.0
-    assert len(relay.llm_calls) == 1
-
-    retried = client.post(f"/api/exercises/{EXERCISE_GENERATED}/grade").json()
-    completed = wait(client.app.state.grade_jobs, retried["job_id"])
-    assert completed["status"] == "completed"
-    assert completed["points_charged"] == 3.0 and completed["points_remaining"] == 17.0
-    assert len(relay.llm_calls) == 1
 
 
 def test_postcharge_recovery_ignores_newly_incomplete_answers(tmp_path):

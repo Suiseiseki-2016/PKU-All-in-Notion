@@ -23,6 +23,10 @@ _prepared_reads = ContextVar('phase_scoped_catalog_prepared_reads', default=None
 _READ_MAX_AGE_SECONDS = 20.0
 
 
+class PreparedReadExpired(catalog.CatalogUnavailable):
+    """Only a read optimization expired; no stale result may authorize writes."""
+
+
 class _PreparedReadPhase:
     def __init__(self, settings, entries):
         self.binding = catalog._read_binding(settings)
@@ -49,10 +53,12 @@ class _PreparedReadPhase:
             self.closed = True
             raise catalog.CatalogUnavailable('准备读取只能按原课程顺序使用一次。')
         entry = self.entries[self.position]
-        if (fingerprint(expected) != entry['expected_sha256']
-                or time.monotonic() - entry['read_at'] > _READ_MAX_AGE_SECONDS):
+        if fingerprint(expected) != entry['expected_sha256']:
             self.closed = True
-            raise catalog.CatalogUnavailable('课程准备读取已过期、快照变化或课序不一致。')
+            raise catalog.CatalogUnavailable('课程快照或准备顺序已变化，请重新更新这门课；登录状态不受影响。')
+        if time.monotonic() - entry['read_at'] > _READ_MAX_AGE_SECONDS:
+            self.closed = True
+            raise PreparedReadExpired('课程准备读取已过期，请重新读取；登录状态不受影响。')
         self.active = entry
         self.position += 1
 
@@ -62,7 +68,7 @@ class _PreparedReadPhase:
             return None
         if time.monotonic() - self.active['read_at'] > _READ_MAX_AGE_SECONDS:
             self.closed = True
-            raise catalog.CatalogUnavailable('课程准备读取已过期；请重新读取。')
+            raise PreparedReadExpired('课程准备读取已过期，请重新读取；登录状态不受影响。')
         if kind in self.active['consumed']:
             self.closed = True
             raise catalog.CatalogUnavailable('课程准备读取不能重复消费。')

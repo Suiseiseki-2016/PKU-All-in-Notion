@@ -26,20 +26,16 @@ _MAX_TOTAL = 40 * 1024 * 1024
 _PAGE_ID = re.compile(r"([0-9a-fA-F]{32})(?:$|[?/#])")
 _CONTENT_ID = re.compile(r"^_\d+_\d+$")
 
-
 class PreparationError(ValueError):
     pass
-
 
 class ConfirmSubmission(BaseModel):
     draft_id: str
     sha256: str
     confirmed: bool
 
-
 class ConfirmRequirements(BaseModel):
     confirmed: bool = False
-
 
 def _page_id(value: str) -> str:
     parsed = urlsplit(value.strip())
@@ -53,12 +49,10 @@ def _page_id(value: str) -> str:
         raise PreparationError("Notion 链接中没有可识别的页面 ID。")
     return found.group(1)
 
-
 def _rich_text(block: dict) -> str:
     kind = block.get("type") or ""
     return "".join(part.get("plain_text") or (part.get("text") or {}).get("content", "")
                    for part in (block.get(kind) or {}).get("rich_text") or [])
-
 
 def export_notion_answer(client: NotionClient, page_id: str) -> tuple[str, str, list[str], list[str]]:
     page = client.get_page(page_id)
@@ -112,7 +106,6 @@ def export_notion_answer(client: NotionClient, page_id: str) -> tuple[str, str, 
         raise PreparationError("导出的答案超过 1 MB，请先拆分或改用手动文件。")
     return title, body, python_blocks, sorted(set(warnings))
 
-
 def _assignment(root: Path, course_id: str, content_id: str) -> dict:
     if not _CONTENT_ID.fullmatch(content_id):
         raise PreparationError("作业目标 ID 无效。")
@@ -123,35 +116,29 @@ def _assignment(root: Path, course_id: str, content_id: str) -> dict:
         raise PreparationError("目录中找不到唯一且可提交的正式作业，请先更新课程目录。")
     return matches[0]
 
-
 def _draft_dir(root: Path, draft_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{32}", draft_id):
         raise PreparationError("草稿编号无效。")
     return root / "submission-drafts" / draft_id
-
 
 def _save_json(path: Path, payload: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1), "utf-8")
     temporary.replace(path)
 
-
 def _account(settings):
     username = str(getattr(settings, 'pku_username', '') or '').strip()
     return hashlib.sha256(username.encode('utf-8')).hexdigest() if username else ''
 
-
 def _assert_account(metadata, settings):
     if not metadata.get('portal_account_sha256') or metadata['portal_account_sha256'] != _account(settings):
         raise PreparationError('教学网账号已变化或旧草稿未绑定账号，请重新准备并预览。')
-
 
 def _requirements(assignment):
     fields = {key: assignment.get(key, '') for key in
               ('content_id', 'source_id', 'title', 'source', 'instructions', 'due_at',
                'files', 'source_links')}
     return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
-
 
 def verified_draft_download(settings, draft_id, *, expected_sha256=None, course_id=None, content_id=None):
     root = Path(settings.data_dir)
@@ -192,7 +179,6 @@ def verified_draft_download(settings, draft_id, *, expected_sha256=None, course_
         raise PreparationError('草稿状态尚未核验，请重新准备并预览。')
     return metadata, archive, payload
 
-
 def _verified_saved_receipt(metadata):
     receipt = metadata.get('receipt')
     if not isinstance(receipt, dict) or metadata.get('state') != 'submitted':
@@ -203,7 +189,6 @@ def _verified_saved_receipt(metadata):
             and receipt.get('content_id') == metadata.get('content_id')
             and bool(receipt.get('verified_at')) and isinstance(html, str) and bool(html)
             and hashlib.sha256(html.encode('utf-8')).hexdigest() == receipt.get('review_history_sha256'))
-
 
 @contextmanager
 def _submission_lock(root, course_id, content_id, owner):
@@ -220,7 +205,6 @@ def _submission_lock(root, course_id, content_id, owner):
     finally:
         conn.rollback()
         conn.close()
-
 
 def add_assignment_routes(app: FastAPI, manager, *, fence_factory=None) -> None:
     if fence_factory is None:
@@ -512,7 +496,6 @@ def execute_submission(settings, course_id, content_id, body, *, fence_factory=N
     with _submission_lock(root, course_id, content_id, _account(settings)):
         return _execute_submission_locked(settings, course_id, content_id, body, fence_factory)
 
-
 def _execute_submission_locked(settings, course_id, content_id, body, fence_factory):
     root = Path(settings.data_dir)
     assignment = _assignment(root, course_id, content_id)
@@ -590,8 +573,6 @@ def _execute_submission_locked(settings, course_id, content_id, body, fence_fact
     metadata["assignment_title"] = assignment["title"]
     _save_json(folder / "draft.json", metadata)
     return _submission_result(metadata, body.draft_id)
-
-
 
 def _submission_result(metadata, draft_id):
     return {'state': 'submitted', 'receipt': metadata['receipt'],

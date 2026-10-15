@@ -22,6 +22,7 @@ def ui():
     with playwright.sync_playwright() as p:
         browser=p.chromium.launch(**browser_launch_options(),headless=True)
         page=browser.new_page()
+        page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
         def serve(route):
             path=urlsplit(route.request.url).path
             if route.request.method=='POST':
@@ -34,7 +35,7 @@ def ui():
         page.route('**/*',serve)
         page.goto('http://panel.test/app')
         page.wait_for_function('!!window.__home')
-        page.evaluate("""() => {const s=window.__home.state;s.activated=true;s.quota={email:'fixture@example.com',email_verified:true};s.connection.connected=true;s.view='dashboard';s.campus.parentId='todo';s.campus.parents=[{id:'todo',title:'TODO LIST'}];window.__home.render();}""")
+        page.evaluate("""() => {const s=window.__home.state;s.activated=true;s.quota={email:'fixture@example.com',email_verified:true};s.connection.connected=true;s.view='campus-account';s.campus.parentId='todo';s.campus.parents=[{id:'todo',title:'TODO LIST'}];window.__home.render();}""")
         yield page,reply,posts
         browser.close()
 

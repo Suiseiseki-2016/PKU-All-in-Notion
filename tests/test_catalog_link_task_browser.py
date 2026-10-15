@@ -54,6 +54,7 @@ def test_save_link_receives_catalog_task_and_exposes_actual_failure(accepted_sta
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page()
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route('http://panel.test/**', serve)
             page.goto('http://panel.test/')
             page.evaluate('copy => { window.PANEL_COPY=copy; }', PANEL_COPY)

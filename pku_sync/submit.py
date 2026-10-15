@@ -38,7 +38,7 @@ from urllib.parse import urlsplit, parse_qs, urlencode
 
 from bs4 import BeautifulSoup
 
-from .tui_data import parse_due
+from .course_data import parse_due
 
 NONCE_KEY = "blackboard.platform.security.NonceUtil.nonce.ajax"
 TEXT_FIELD = "studentSubmission.text"

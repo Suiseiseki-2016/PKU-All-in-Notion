@@ -13,8 +13,8 @@ STATIC = Path(__file__).parents[1] / "pku_sync/panel/static"
 
 
 @pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_account_controls_survive_refresh_and_quiz_offers_a_next_step():
-    """Check keyboard settings access and recovery from a disabled quiz action."""
+def test_account_controls_survive_refresh_with_unfinished_quizzes_hidden():
+    """Check keyboard settings access while unfinished quiz controls remain hidden."""
     script = (STATIC / 'app.js').read_text('utf-8')
     script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
         'window.__layout = {state: state, render: render};})();'
@@ -31,6 +31,7 @@ def test_account_controls_survive_refresh_and_quiz_offers_a_next_step():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={'width': 1100, 'height': 760})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route('**/*', serve)
             page.goto('http://panel.test')
             page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
@@ -44,7 +45,7 @@ def test_account_controls_survive_refresh_and_quiz_offers_a_next_step():
                 s.campus.course={id:'course',title:'课程',lessons:[],unassigned_materials:[],all_materials:[],
                     assignments:[],announcements:[],announcement_tasks:[]};
                 s.view='campus-course';s.campus.section='quizzes';s.campus.courseId='course';
-                s.campusQuiz.ready=true; window.__layout.render();
+                window.__layout.render();
             }''')
             account = page.locator('.sidebar [data-persistent-disclosure="desktop-account"]')
             assert not account.evaluate('el => el.open')
@@ -58,13 +59,10 @@ def test_account_controls_survive_refresh_and_quiz_offers_a_next_step():
             account.locator('summary').click()
             page.evaluate('window.__layout.render()')
             assert not account.evaluate('el => el.open')
-            assert page.get_by_role('button', name='生成学习小测', exact=True).is_disabled()
-            page.get_by_role('button', name='查看本课讲次', exact=True).click()
-            assert page.get_by_role('heading', name='每节课', exact=True).is_visible()
-            page.evaluate('''() => { const s=window.__layout.state;
-                s.campus.section='quizzes'; s.campus.home=null; window.__layout.render(); }''')
-            page.get_by_role('button', name='打开课程设置', exact=True).click()
-            assert page.locator('.campus-settings').evaluate('el => el.open')
+            assert page.locator('[data-center="quizzes"]').count() == 0
+            assert page.get_by_role('button', name='生成学习小测', exact=True).count() == 0
+            page.locator('.sidebar [data-action="campus-account-settings"]').click()
+            assert page.get_by_role('heading', name='连接设置', exact=True).is_visible()
             page.set_viewport_size({'width':390,'height':844})
             mobile = page.locator('.mobile-account-menu')
             mobile.locator(':scope > summary').click()
@@ -156,6 +154,7 @@ def test_portal_first_layout_and_account_settings():
         browser = driver.chromium.launch(**browser_launch_options(), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("**/*", serve)
             page.goto("http://panel.test")
             page.evaluate("copy => { window.PANEL_COPY = copy; }", PANEL_COPY)
@@ -174,11 +173,8 @@ def test_portal_first_layout_and_account_settings():
             assert page.get_by_role("heading", name="我的课程").is_visible()
             assert page.locator('[data-action="open-course"]').count() == 0
             assert "旧缓存课程" not in page.locator(".main").inner_text()
-            page.locator('.sidebar [data-action="open-library"]').click()
-            assert page.get_by_role("heading", name="旧学习资料").is_visible()
-            assert "旧缓存课程" in page.locator(".main").inner_text()
-            page.locator('.sidebar [data-action="open-dashboard"]').click()
-            assert page.locator('[data-action="open-course"]').count() == 0
+            assert page.locator('[data-action="open-library"]').count() == 0
+            assert page.locator('.sidebar-more').count() == 0
             page.evaluate("""() => {
                 const s = window.__layout.state;
                 s.activated = true; s.quota = {active:true};
@@ -189,11 +185,10 @@ def test_portal_first_layout_and_account_settings():
                 s.view = 'dashboard'; window.__layout.render();
             }""")
             assert page.get_by_role("heading", name="我的课程").is_visible()
-            assert "欢迎使用" in page.locator(".main").inner_text()
             assert "5 节课 · 1 项正式作业 · 2 则通知" in page.locator(".course-card").inner_text()
-            assert not page.locator(".campus-settings").evaluate("el => el.open")
+            assert page.locator(".campus-settings").count() == 0
             page.locator('.sidebar [data-action="campus-account-settings"]').click()
-            assert page.locator(".campus-settings").evaluate("el => el.open")
+            assert page.get_by_role('heading', name='连接设置', exact=True).is_visible()
             assert page.get_by_role("button", name="更换账号").is_visible()
             page.evaluate("""() => {
                 const s = window.__layout.state;
@@ -207,7 +202,7 @@ def test_portal_first_layout_and_account_settings():
                     announcements:[],announcement_tasks:[],summary:{}};
                 window.__layout.render();
             }""")
-            assert page.locator('.campus-centers a').count() == 4
+            assert page.locator('.campus-centers a').count() == 3
             assert page.locator('#course-assignments, #course-notices, #course-quizzes, .recording-row').count() == 0
             assert page.locator(".campus-centers").evaluate(
                 "el => !!(el.compareDocumentPosition(document.querySelector('#course-lessons')) & Node.DOCUMENT_POSITION_FOLLOWING)")
@@ -229,84 +224,19 @@ def test_portal_first_layout_and_account_settings():
             page.locator('[data-center="notices"]').click()
             assert page.get_by_role("heading", name="通知中心").is_visible()
             page.locator('[data-action="campus-course-home"]').click()
-            page.locator('[data-center="quizzes"]').click()
-            assert page.get_by_role("heading", name="小测中心", exact=True).is_visible()
+            assert page.locator('[data-center="quizzes"]').count() == 0
             assert page.locator(".campus-settings").count() == 0
             assert writes == []
-            page.evaluate("""() => {
-                const s = window.__layout.state;
-                s.campus.home = {id:'old-home',parent_id:'parent',url:'https://www.notion.so/old-home'};
-                s.campus.parentId = 'parent'; window.__layout.render();
-            }""")
-            page.get_by_role('button', name='课程设置', exact=True).click()
-            assert page.locator('.campus-settings').evaluate('el => el.open')
-            page.locator('.home-setup-advanced > summary').click()
-            page.get_by_role("button", name="创建附加新版主页").click()
-            playwright.expect(page.get_by_role("button", name="打开主页", exact=True)).to_have_attribute(
-                "data-url", "https://www.notion.so/new-home")
-            assert page.evaluate("window.__layout.state.campus.home.id") == "new-home"
-            assert page.evaluate("window.__layout.state.campus.legacyHome.id") == "old-home"
-            assert page.get_by_role("button", name="打开旧主页（回滚）").get_attribute("data-url") == "https://www.notion.so/old-home"
-            assert writes == ["http://panel.test/api/campus/notion/workspace"]
-            page.locator('[data-action="campus-course-home"]').click()
-            page.locator('[data-center="quizzes"]').click()
-            page.get_by_role('button', name='刷新小测中心').click()
-            page.locator('[data-campus-quiz-source="pku:recording:stable5"]').wait_for()
-            assert page.locator('[data-campus-quiz-source="pku:recording:stable4"]').is_disabled()
-            page.locator('[data-campus-quiz-source="pku:recording:stable5"]').check()
-            page.get_by_text('参考往年题（可选）', exact=True).click()
-            page.locator('[data-campus-quiz-paper-file]').set_input_files({'name': 'past-paper.txt',
-                'mimeType': 'text/plain', 'buffer': '学生上传参考题'.encode('utf-8')})
-            playwright.expect(page.locator('[data-campus-quiz-paper]')).to_have_value('学生上传参考题')
-            page.once('dialog', lambda dialog: dialog.dismiss())
-            page.get_by_role('button', name='生成学习小测', exact=True).click()
-            assert generated == []
-            page.once('dialog', lambda dialog: dialog.accept())
-            page.get_by_role('button', name='生成学习小测', exact=True).click()
-            page.get_by_role('heading', name='第五讲学习小测').wait_for()
-            assert generated == [{'lecture_ids': ['pku:recording:stable5'], 'prior_paper': '学生上传参考题', 'confirmed': True}]
-            assert page.get_by_role('button', name='打开小测并作答').get_attribute('data-url') == 'https://www.notion.so/quiz-page'
-            # Exercise native confirmation semantics as well as the ordinary
-            # browser dialogs above. A pending native choice cannot POST.
-            page.evaluate('window.__TAURI_INTERNALS__ = {}')
-            page.get_by_role('button', name='批改小测', exact=True).click()
-            page.locator('[data-product-confirmation]').wait_for()
-            page.wait_for_timeout(100)
-            assert graded == []
-            assert '1–5 AI 点' in page.locator('#product-confirmation-message').inner_text()
-            page.locator('[data-confirmation-decision="cancel"]').click()
-            assert graded == []
-            page.get_by_role('button', name='批改小测', exact=True).click()
-            page.locator('[data-product-confirmation]').wait_for()
-            assert graded == []
-            page.locator('[data-confirmation-decision="confirm"]').click()
-            page.evaluate('delete window.__TAURI_INTERNALS__')
-            playwright.expect(page.locator('#course-quizzes')).to_contain_text('学习评分：70/100 · 本次 2 AI 点')
-            assert graded == [{'confirmed': True, 'force': False}]
-            page.get_by_role('button', name='查看作答与批改历史').wait_for()
-            assert page.get_by_role('button', name='查看作答与批改历史').get_attribute('data-url') == 'https://www.notion.so/grade-history'
-            page.get_by_role('button', name='打开复习记录').wait_for()
-            assert page.get_by_role('button', name='打开复习记录').get_attribute('data-url') == 'https://www.notion.so/review-page'
-            page.once('dialog', lambda dialog: dialog.accept('已重新复习并理解概念'))
-            page.locator('[data-review="review-page"]').click()
-            page.get_by_text('已有复习记录', exact=True).wait_for()
-            assert reviewed == [{'confirmed': True, 'note': '已重新复习并理解概念'}]
-            page.once('dialog', lambda dialog: dialog.accept('整份小测已复盘'))
-            page.locator('[data-review="grade-history"]').click()
-            page.get_by_text('已记录复习', exact=True).wait_for()
-            assert history_reviewed == [{'confirmed': True, 'note': '整份小测已复盘'}]
-            page.evaluate("""() => {
-                window.__layout.state.campusQuiz.grades['quiz-page'].recovered_from_relay = true;
-                window.__layout.render();
-            }""")
-            assert '原任务已结算 2 AI 点，恢复未新增扣费' in page.locator('#course-quizzes').inner_text()
+            assert page.get_by_role('button', name='打开旧主页（回滚）').count() == 0
+            assert page.get_by_role('button', name='创建附加新版主页').count() == 0
+            assert generated == graded == reviewed == history_reviewed == []
+            page.evaluate("window.__layout.state.view='campus-course'; window.__layout.render()")
             page.evaluate("""() => {
                 window.__layout.state.campus.receipts = [{assignment_title:'第一次正式作业',
                     archive_name:'answer.pdf',verified_at:'2026-10-04T08:00:00Z',
                     download_url:'/api/campus/submission-drafts/receipt-id/receipt'}];
                 window.__layout.render();
             }""")
-            page.locator('[data-action="campus-course-home"]').click()
             page.locator('[data-center="assignments"]').click()
             page.get_by_text('本机教学网回执记录', exact=True).click()
             assert page.get_by_role('link', name='下载教学网正式回执').get_attribute('href') == '/api/campus/submission-drafts/receipt-id/receipt'
@@ -323,18 +253,7 @@ def test_portal_first_layout_and_account_settings():
             assert page.get_by_role('link', name='下载教学网正式回执').get_attribute('href') == '/api/campus/submission-drafts/pending-receipt/receipt'
             assert receipt_recovered == ['recovered']
             assert not any(url.endswith('/submit') for url in writes)
-            page.evaluate("""() => {
-                window.__layout.state.campus.course.official_assessments = [{title:'教学网期中测验',body_text:'在教学网完成正式题目',
-                    status_label:'请在教学网核对测验截止时间、作答与提交状态。',
-                    source_url:'https://course.pku.edu.cn/webapps/blackboard/content/listContent.jsp?course_id=_1_1&content_id=_10_1'}];
-                window.__layout.render();
-            }""")
-            page.locator('[data-action="campus-course-home"]').click()
-            page.locator('[data-center="quizzes"]').click()
-            assert page.get_by_role('heading', name='教学网正式测验', exact=True).count() == 1
-            assert page.get_by_role('heading', name='学习小测', exact=True).count() == 1
-            assert page.get_by_role('heading', name='教学网期中测验', exact=True).count() == 1
-            assert 'listContent.jsp' in page.get_by_role('link', name='查看教学网测验原目录').get_attribute('href')
+            assert page.locator('[data-center="quizzes"]').count() == 0
             page.evaluate("""() => {
                 window.__layout.state.campus.course.assignments = [{content_id:'formal-assignment',
                     title:'第一次正式作业',source:'content-tree',instructions:'按原要求提交'}];
@@ -372,6 +291,7 @@ def usage_guidance_renderer():
         browser=driver.chromium.launch(**browser_launch_options(),headless=True)
         try:
             page=browser.new_page(viewport={'width':1100,'height':760})
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             posts=[]
             def serve(route):
                 path=urlsplit(route.request.url).path

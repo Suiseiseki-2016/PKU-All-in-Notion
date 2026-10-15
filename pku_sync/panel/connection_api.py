@@ -12,7 +12,6 @@ from fastapi import HTTPException
 
 from .connection import ConnectionBusy, ConnectionService
 
-
 def add_connection_routes(app, service: ConnectionService) -> None:
     @app.get("/api/connection")
     def connection_state() -> dict:
@@ -28,6 +27,5 @@ def add_connection_routes(app, service: ConnectionService) -> None:
             return service.connect()
         except ConnectionBusy as exc:
             raise HTTPException(status_code=409, detail=exc.message) from exc
-
 
 __all__ = ["add_connection_routes"]

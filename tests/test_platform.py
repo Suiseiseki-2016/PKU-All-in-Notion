@@ -393,9 +393,10 @@ def test_profile_bootstraps_remote_from_safe_local_home(monkeypatch, tmp_path):
 
     monkeypatch.setattr(platform, "_put", fake_put)
 
-    assert platform.sync_account_profile(s)["status"] == "pushed"
-    assert sent["json"] == {"revision": 0, "profile": {"notion_home": home}}
-    encoded = json.dumps(sent["json"])
+    assert platform.sync_account_profile(s)["status"] == "current"
+    assert sent == {}
+    assert json.loads((tmp_path / "notion-learning-home.json").read_text("utf-8")) == home
+    encoded = json.dumps(sent)
     assert "local-notion-secret" not in encoded
     assert "local-pku-secret" not in encoded
     assert "account-session" not in encoded
@@ -424,16 +425,14 @@ def test_profile_pulls_accessible_remote_home_and_keeps_backup(monkeypatch, tmp_
             200, json={"revision": 7, "profile": {"notion_home": remote}}
         ),
     )
-    monkeypatch.setattr(platform, "_notion_home_accessible", lambda *args: True)
 
     assert platform.sync_account_profile(s) == {
         "available": True,
-        "status": "pulled",
+        "status": "current",
         "revision": 7,
     }
-    assert json.loads(path.read_text("utf-8")) == remote
-    backup = tmp_path / "notion-learning-home.pre-account-sync.json"
-    assert json.loads(backup.read_text("utf-8")) == local
+    assert json.loads(path.read_text("utf-8")) == local
+    assert not (tmp_path / "notion-learning-home.pre-account-sync.json").exists()
 
 
 def test_profile_does_not_replace_home_without_notion_access(monkeypatch, tmp_path):
@@ -464,5 +463,5 @@ def test_profile_does_not_replace_home_without_notion_access(monkeypatch, tmp_pa
         ),
     )
 
-    assert platform.sync_account_profile(s)["status"] == "notion_reconnect_required"
+    assert platform.sync_account_profile(s)["status"] == "current"
     assert json.loads(path.read_text("utf-8")) == local

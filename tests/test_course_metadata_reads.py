@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from pku_sync.materials import ToolUnavailable
-from pku_sync.tui_data import read_course_metadata
+from pku_sync.course_data import read_course_metadata
 
 
 def readers():

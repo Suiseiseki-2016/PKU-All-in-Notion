@@ -12,10 +12,8 @@ from ..note_quality import ambiguous_public_key_segment
 
 _RAC = re.compile(r"(?<![A-Za-z])rac\s*算法", re.I)
 
-
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
 
 def _read(job: RecordingJob) -> tuple[bytes, dict]:
     raw = (job.directory / "transcript.json").read_bytes()
@@ -23,7 +21,6 @@ def _read(job: RecordingJob) -> tuple[bytes, dict]:
     if not isinstance(transcript, dict) or not isinstance(transcript.get("segments"), list):
         raise ValueError("本机转写格式无法校对。")
     return raw, transcript
-
 
 def review_marker(job: RecordingJob) -> dict:
     try:
@@ -33,10 +30,8 @@ def review_marker(job: RecordingJob) -> dict:
         return {}
     return marker if isinstance(marker, dict) and marker.get("corrected_sha256") == _digest(raw) else {}
 
-
 def review_pending(job: RecordingJob) -> bool:
     return bool(review_marker(job).get("needs_regeneration"))
-
 
 def review_status(job: RecordingJob, key: str) -> dict:
     try:
@@ -64,7 +59,6 @@ def review_status(job: RecordingJob, key: str) -> dict:
             "excerpt": spoken[:500], "video_url": f"/api/recordings/{key}/preview",
         }
     return result
-
 
 def confirm_rsa(job: RecordingJob, *, segment_index: int, transcript_sha256: str,
                 confirmed_spoken_term: str, confirmed: bool) -> dict:
@@ -110,7 +104,6 @@ def confirm_rsa(job: RecordingJob, *, segment_index: int, transcript_sha256: str
         path.write_bytes(raw)
         raise
     return {"status": "corrected", "pending_regeneration": marker["needs_regeneration"]}
-
 
 def clear_regeneration_pending(job: RecordingJob) -> None:
     marker = review_marker(job)

@@ -10,7 +10,6 @@ FAKE_TRANSCRIBE_SECONDS = 3600
 FAKE_LLM_POINTS = 100.0
 FAKE_AUTH_EMAIL = "demo@example.com"
 
-
 class RealPlatformBridge:
     durable_metered_jobs = True
     operation_context_supported = True
@@ -90,7 +89,6 @@ class RealPlatformBridge:
     def grade(self, prompt: str, *, operation_context=None) -> dict:
         from ..platform import llm
         return llm("grade", prompt, self._settings, operation_context=operation_context)
-
 
 class FakePlatformBridge:
     """Seeded fake with deterministic local metering and no network.
@@ -297,7 +295,6 @@ class FakePlatformBridge:
             ),
             "points_charged": self._points_charged,
         }
-
 
 __all__ = ["FAKE_TRANSCRIBE_SECONDS", "FAKE_LLM_POINTS", "FAKE_AUTH_EMAIL",
            "RealPlatformBridge", "FakePlatformBridge"]

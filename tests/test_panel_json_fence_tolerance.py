@@ -28,14 +28,15 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from pku_sync.panel.exercise_organizer import (
-    ExerciseOrganizer,
-    MemoryOrganizeRecordStore,
-    OrganizeBlocked,
-    QUESTION_TYPES,
-)
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import COURSE_NET, NET_L1, build_panel_workspace
+from pku_sync.panel.quiz_contract import OrganizeBlocked, QUESTION_TYPES, bound_relay_content
+from pku_sync.panel.campus_quiz import CampusQuizService
+from test_campus_quiz import Client
+from contextlib import nullcontext
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from types import SimpleNamespace
+
+from grading_workspace import COURSE_NET, NET_L1, build_panel_workspace
 from pku_sync.panel.webapi import create_app
 
 
@@ -54,31 +55,8 @@ class RawContentRelay:
         return {"content": self.content, "points_charged": 2.0}
 
 
-class FakePages:
-    def __init__(self):
-        self.calls: list[dict] = []
-
-    def create_page(self, parent_page_id: str, title: str, *, children: list[dict]):
-        self.calls.append(
-            {"parent_page_id": parent_page_id, "title": title, "children": children}
-        )
-        number = len(self.calls)
-        return {
-            "id": f"2c000001-0000-4000-8000-{number:012d}",
-            "url": f"https://www.notion.so/fence-{number}",
-            "last_edited_time": "2026-09-20T08:00:00.000Z",
-        }
 
 
-class FakeNotes:
-    def for_scope(self, *, course_title: str, lecture_titles: list[str]) -> list[dict]:
-        return [
-            {
-                "title": lecture_titles[0],
-                "source": "课堂录像笔记",
-                "notes": "分层与端到端。",
-            }
-        ]
 
 
 def valid_quiz_payload() -> str:
@@ -96,20 +74,6 @@ def valid_quiz_payload() -> str:
     )
 
 
-def make_organizer(content: str, *, parse_failure_dir=None, e2e_enabled: bool = False):
-    directory = build_fake_directory(workspace=build_panel_workspace())
-    relay = RawContentRelay(content)
-    pages = FakePages()
-    organizer = ExerciseOrganizer(
-        directory_service=directory,
-        relay=relay,
-        page_adapter=pages,
-        notes_provider=FakeNotes(),
-        record_store=MemoryOrganizeRecordStore(),
-        parse_failure_dir=parse_failure_dir,
-        e2e_enabled=e2e_enabled,
-    )
-    return organizer, relay, pages
 
 
 def wait_for_organize_result(client: TestClient, job_id: str) -> dict:
@@ -172,10 +136,11 @@ def test_second_fence_is_rejected_without_page_or_identity_record():
         organizer.organize(COURSE_NET, [NET_L1])
 
     assert relay.calls == 1 and pages.calls == []
-    # No record or registration survived the rejection: a good retry is fresh.
+    # A charged invalid response stays frozen; retry must not charge again.
     relay.content = payload
-    retried = organizer.organize(COURSE_NET, [NET_L1])
-    assert retried["reused"] is False and len(pages.calls) == 1
+    with pytest.raises(OrganizeBlocked): organizer.organize(COURSE_NET, [NET_L1])
+    assert relay.calls == 1 and pages.calls == []
+
 
 
 def test_nested_fence_is_rejected_without_page_creation():
@@ -379,84 +344,46 @@ def test_over_bound_prose_around_one_object_is_rejected_without_page_creation():
     assert relay.calls == 1 and pages.calls == []
 
 
-def test_parse_failure_persists_bounded_read_only_raw_content(tmp_path):
-    failure_dir = tmp_path / "panel" / "organize_failures"
-    raw = "这是整理说明，但里面没有任何 JSON 对象。"
-    organizer, relay, pages = make_organizer(raw, parse_failure_dir=failure_dir)
-
-    with pytest.raises(OrganizeBlocked, match="AI 返回的练习格式不完整，请重试。"):
-        organizer.organize(COURSE_NET, [NET_L1])
-
-    files = sorted(failure_dir.glob("*.txt"))
-    assert len(files) == 1
-    # The capture holds exactly the bounded raw relay content — the only
-    # writer input is the metered relay response, so no credentials can
-    # appear by construction.
-    assert files[0].read_text(encoding="utf-8") == raw
-    assert stat.S_IMODE(os.stat(files[0]).st_mode) & 0o222 == 0
-    assert relay.calls == 1 and pages.calls == []
 
 
-def test_parse_failure_capture_is_bounded_to_the_first_eight_kib(tmp_path):
-    failure_dir = tmp_path / "organize_failures"
+
+
+
+
+
+class CampusSources:
+    def course(self, course_id):
+        assert course_id == COURSE_NET
+        return {"course_id": course_id, "course_title": "计算机网络", "workspace_id": "current-home", "quiz_center_id": "quiz-center"}
+    def resolve(self, course_id, lecture_ids):
+        assert lecture_ids == [NET_L1]
+        return {**self.course(course_id), "notes": [{"title": "第一讲", "source_id": "stable-first", "note_id": "verified-note", "remote_sha256": "accepted", "blocks": []}]}
+
+class RecordingClient(Client):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+    def create_page(self, parent, title, *, children, retry):
+        self.calls.append({"parent": parent, "title": title, "children": children})
+        return super().create_page(parent, title, children=children, retry=retry)
+
+class CurrentGeneration:
+    def __init__(self, service, directory):
+        self.service = service
+        self.directory = directory
+    def organize(self, course_id, lectures):
+        return {**self.service.generate(course_id, lectures, confirmed=True), "status": "completed"}
+
+def make_organizer(content):
+    directory = TemporaryDirectory()
+    relay, pages = RawContentRelay(content), RecordingClient()
+    service = CampusQuizService(SimpleNamespace(data_dir=Path(directory.name)), relay,
+        sources=CampusSources(), client_factory=lambda: nullcontext(pages))
+    return CurrentGeneration(service, directory), relay, pages
+
+def test_current_diagnostic_capture_keeps_unicode_and_byte_boundary():
     raw = "没有任何对象的超长说明。" * 2000
-
-    organizer, _relay, _pages = make_organizer(raw, parse_failure_dir=failure_dir)
-
-    with pytest.raises(OrganizeBlocked, match="AI 返回的练习格式不完整，请重试。"):
-        organizer.organize(COURSE_NET, [NET_L1])
-
-    files = sorted(failure_dir.glob("*.txt"))
-    assert len(files) == 1
-    data = files[0].read_bytes()
-    assert len(data) <= 8192
-    assert raw.encode("utf-8").startswith(data)
-    data.decode("utf-8")  # never a torn codepoint
-
-
-def test_blocked_parse_failure_attaches_bounded_raw_content_only_in_e2e_mode(tmp_path):
-    raw = "整理说明：这里没有任何 JSON 对象。"
-    organizer, _relay, _pages = make_organizer(
-        raw, parse_failure_dir=tmp_path / "failures", e2e_enabled=True
-    )
-
-    with pytest.raises(OrganizeBlocked) as raised:
-        organizer.organize(COURSE_NET, [NET_L1], e2e_mode=True)
-
-    assert raised.value.raw_content == raw
-
-    with pytest.raises(OrganizeBlocked) as raised_normal:
-        organizer.organize(COURSE_NET, [NET_L1])
-
-    assert raised_normal.value.raw_content == ""
-
-
-def test_api_blocked_payload_echoes_raw_content_only_in_e2e_mode(tmp_path):
-    raw = "整理说明：这里没有任何 JSON 对象。"
-    organizer, _relay, _pages = make_organizer(
-        raw, parse_failure_dir=tmp_path / "failures", e2e_enabled=True
-    )
-    client = TestClient(create_app(organizer_service=organizer))
-
-    started = client.post(
-        "/api/exercises/organize",
-        json={"course_id": COURSE_NET, "lecture_ids": [NET_L1], "e2e_mode": True},
-    )
-    assert started.status_code == 202
-    result = wait_for_organize_result(client, started.json()["job_id"])
-    assert result["status"] == "blocked"
-    assert result["reason"] == "AI 返回的练习格式不完整，请重试。"
-    assert result["raw_content"] == raw
-
-    started = client.post(
-        "/api/exercises/organize",
-        json={"course_id": COURSE_NET, "lecture_ids": [NET_L1]},
-    )
-    result = wait_for_organize_result(client, started.json()["job_id"])
-    # Normal-mode payloads stay byte-identical to today: reason, retryable,
-    # and nothing else.
-    assert result == {
-        "status": "blocked",
-        "reason": "AI 返回的练习格式不完整，请重试。",
-        "retryable": True,
-    }
+    bounded = bound_relay_content(raw).encode('utf-8')
+    assert len(bounded) <= 8192 and raw.encode('utf-8').startswith(bounded)
+    bounded.decode('utf-8')
+    assert bound_relay_content('\ud800') == '?'

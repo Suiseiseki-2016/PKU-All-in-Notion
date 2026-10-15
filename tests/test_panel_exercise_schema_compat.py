@@ -1,36 +1,17 @@
-from __future__ import annotations
-
-from types import SimpleNamespace
-
 from fastapi.testclient import TestClient
-
-from pku_sync.panel.exercises import exercise_row
-from pku_sync.panel.fake_directory import build_fake_directory
-from pku_sync.panel.fake_workspace import build_panel_workspace
+from pku_sync.config import Settings
 from pku_sync.panel.webapi import create_app
 
+def test_retired_exercise_routes_remain_unavailable(tmp_path):
+    client = TestClient(create_app(Settings(_env_file=None, data_dir=tmp_path)))
+    for path in ("/api/directory", "/api/exercises", "/api/exercises/grade/status"):
+        assert client.get(path).status_code == 404
+    assert client.post("/api/exercises/example/grade").status_code == 404
 
-LEGACY_EXERCISE_KEYS = {
-    "id", "url", "title", "course", "scope", "status", "status_label", "score",
-}
-
-
-def test_ordinary_fake_directory_rows_keep_legacy_schema():
-    service = build_fake_directory(workspace=build_panel_workspace())
-    payload = TestClient(create_app(directory_service=service)).get("/api/directory").json()
-    assert payload["exercises"]
-    assert all(set(row) == LEGACY_EXERCISE_KEYS for row in payload["exercises"])
-
-
-def test_true_mismatch_row_keeps_warning_flag_and_ui_alert_surface():
-    entity = SimpleNamespace(
-        id="exercise-mismatch", url="https://example.test/exercise-mismatch",
-        title="?????", course="?????", marker_present=False,
-        answer_present=True,
-    )
-    row = exercise_row(entity, local_record={"status": "graded"})
-    assert row["mismatch_notice"] is True
-    html = TestClient(create_app(directory_service=build_fake_directory(workspace=build_panel_workspace()))).get("/app").text
-    app_js = TestClient(create_app(directory_service=build_fake_directory(workspace=build_panel_workspace()))).get("/app/app.js").text
-    assert "mismatch_notice" in html
-    assert 'role="alert"' in app_js
+def test_retired_home_data_is_preserved_without_activating_old_mode(tmp_path):
+    from pku_sync.panel.notion_home import saved_home
+    path = tmp_path / 'notion-learning-home.json'
+    path.write_text('{"id":"old","parent_id":"parent"}', 'utf-8')
+    before = path.read_bytes()
+    assert saved_home(tmp_path) == {}
+    assert path.read_bytes() == before

@@ -16,7 +16,6 @@ def course_tree(tmp_path: Path) -> LocalCourseTools:
     (course / "announcements").mkdir(parents=True)
     (course / "materials" / "第一讲").mkdir(parents=True)
     (course / "recordings" / "2026-09-01_第1-2节" / "keyframes").mkdir(parents=True)
-    (root / "logs").mkdir()
     (course / "course.json").write_text(
         json.dumps(
             {
@@ -50,8 +49,6 @@ def course_tree(tmp_path: Path) -> LocalCourseTools:
     (rec / "notes.md").write_text("# 笔记\n" + "内容" * 20, "utf-8")
     (rec / "keyframes").mkdir()
     (rec / "keyframes" / "a.jpg").write_bytes(b"jpg")
-    (root / "logs" / "latest.daily.log").write_text("EXIT_CODE=0\n", "utf-8")
-    (root / "logs" / "summary_20260915.md").write_text("# 简报\n无新增\n", "utf-8")
     return LocalCourseTools(root)
 
 
@@ -72,7 +69,6 @@ def test_list_files_filters_sections(tmp_path):
     materials = tools.list_files("计算机网络", "materials")
     assert [row["path"] for row in materials] == ["计算机网络/materials/第一讲/_index.md"]
     all_paths = {row["path"] for row in tools.list_files()}
-    assert "logs/latest.daily.log" in all_paths
     assert "计算机网络/announcements/通知.md" in all_paths
 
 
@@ -89,14 +85,11 @@ def test_read_text_limits_and_blocks_escape(tmp_path):
         tools.read_text("计算机网络/recordings/2026-09-01_2026-09-01第1-2节/keyframes/a.jpg")
 
 
-def test_recording_and_daily_status(tmp_path):
+def test_recording_status(tmp_path):
     tools = course_tree(tmp_path)
     rows = tools.recording_status()
     assert rows[0]["status"] == "notes_ready"
     assert rows[0]["keyframes"] == 1
-    daily = tools.daily_status()
-    assert daily["latest_log"]["content"] == "EXIT_CODE=0\n"
-    assert "无新增" in daily["latest_summary"]["content"]
 
 
 def test_unknown_section_and_bad_course_folder(tmp_path):

@@ -10,7 +10,6 @@ from ..catalog_snapshots import recording_source_id
 
 _PREFIX = "PKU 总结验收版本 · "
 
-
 def _marker(block):
     if block.get("type") != "paragraph":
         return None
@@ -24,7 +23,6 @@ def _marker(block):
         return None
     return value if isinstance(value, dict) and value.get("schema") == 2 else None
 
-
 def _content_rows(client, page_id):
     rows = []
     for block in client.list_children(page_id):
@@ -37,16 +35,13 @@ def _content_rows(client, page_id):
         rows.append({"type": kind, kind: body})
     return rows
 
-
 def document_fingerprint(client, page_id):
     """Hash the complete visible body, including nested content and formatting."""
     return content_fingerprint(_content_rows(client, page_id))
 
-
 def content_fingerprint(rows):
     encoded = json.dumps(_normalize_content(rows), ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
 
 def canonical_content_rows(rows):
     """Keep visible content while excluding Notion response metadata.
@@ -64,7 +59,6 @@ def canonical_content_rows(rows):
         clean.append({"type": kind, kind: body})
     return _normalize_content(clean)
 
-
 def _normalize_content(rows):
     def normalize(value):
         if isinstance(value, list):
@@ -81,7 +75,6 @@ def _normalize_content(rows):
         return value
     return normalize(rows)
 
-
 def published_status(client, note_id, source_id):
     markers = [_marker(row) for row in client.list_children(note_id)]
     marker = next((value for value in reversed(markers) if value is not None), {})
@@ -94,7 +87,6 @@ def published_status(client, note_id, source_id):
                     and not page.get("archived") and not page.get("in_trash")
                     and marker.get("remote_sha256") == document_fingerprint(client, note_id))
     return {**marker, "accepted": accepted}
-
 
 def accept_published(job, *, client, notes_sha256, confirmed):
     if not confirmed:
@@ -130,7 +122,6 @@ def accept_published(job, *, client, notes_sha256, confirmed):
     temporary.replace(path)
     return {**verified, **status(job)}
 
-
 def status(job) -> dict:
     path = job.directory / "notes.md"
     try:
@@ -150,7 +141,6 @@ def status(job) -> dict:
             "accepted_at": marker.get("accepted_at", "") if accepted else "",
             "schema": marker.get("schema"), "note_id": marker.get("note_id", ""),
             "remote_sha256": marker.get("remote_sha256", "")}
-
 
 def accept(job, *, notes_sha256: str, confirmed: bool) -> dict:
     if not confirmed:

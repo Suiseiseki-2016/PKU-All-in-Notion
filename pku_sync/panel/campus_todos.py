@@ -13,7 +13,6 @@ _DATE = re.compile(
 _DELIVERY = re.compile(r"提交|上交|交至|交到|发送|填报|递交|交付")
 _BEIJING = timezone(timedelta(hours=8))
 
-
 def announcement_source_url(course_id: str, announcement_id: str = "") -> str:
     """The browser list anchors each announcement by its stable Blackboard ID."""
     base = ("https://course.pku.edu.cn/webapps/blackboard/execute/announcement"
@@ -23,7 +22,6 @@ def announcement_source_url(course_id: str, announcement_id: str = "") -> str:
         return base + "#" + announcement_id
     return base
 
-
 def _posted_year(posted_at: str, month: int) -> int:
     try:
         posted = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
@@ -32,7 +30,6 @@ def _posted_year(posted_at: str, month: int) -> int:
         return posted.year + int(month < posted.month - 6)
     except ValueError:
         return datetime.now(_BEIJING).year
-
 
 def announcement_tasks(course_id: str, notices: list[dict]) -> list[dict]:
     """Extract only lines with both a date and an explicit delivery instruction.
@@ -76,7 +73,6 @@ def announcement_tasks(course_id: str, notices: list[dict]) -> list[dict]:
                     "source_url": announcement_source_url(course_id, notice_id),
                 })
     return sorted(tasks, key=lambda item: (item["due_at"], item["title"]))
-
 
 def distinct_announcement_tasks(course_id: str, notices: list[dict],
                                 assignments: list[dict]) -> list[dict]:
