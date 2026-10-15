@@ -1141,6 +1141,10 @@ class NativeRun:
             except Exception as exc:
                 self.blockers.append(exc.code if isinstance(exc, ResourceBlocked)
                                      else "measurement_failed_" + type(exc).__name__)
+        try:
+            self.oracle.close()
+        except Exception as exc:
+            self.blockers.append('independent_oracle_cleanup_failed_' + type(exc).__name__)
         files = []
         if measurement_file is not None:
             files.append({"role": "oracle", "path": measurement_file.relative_to(

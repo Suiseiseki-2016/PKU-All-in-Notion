@@ -43,6 +43,7 @@ def test_missing_full_journey_resources_block_before_measurements_and_actions(ru
 
 
 def test_upgrade_preserves_registry_and_requires_normal_close(run, tmp_path, monkeypatch):
+    monkeypatch.setattr(core.sys, 'platform', 'win32')
     from product_e2e import windows_install
     artifact = tmp_path / 'candidate.exe'
     artifact.write_bytes(b'candidate')
@@ -353,6 +354,7 @@ def test_full_driver_retains_failed_graceful_quit_even_after_cleanup(run, monkey
 
 @pytest.mark.parametrize('normal_exit', [True, False])
 def test_forced_cleanup_never_passes_normal_native_quit(run, monkeypatch, normal_exit):
+    monkeypatch.setattr(core.subprocess, 'CREATE_NO_WINDOW', 0, raising=False)
     calls = []
     attempts = []
     def wait(timeout):

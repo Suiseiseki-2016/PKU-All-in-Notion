@@ -2,7 +2,10 @@
 from pathlib import Path
 import subprocess
 import tempfile
-import winreg
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 from .core import ResourceBlocked, installed_version, process_inventory, sha256
 
@@ -12,6 +15,8 @@ ISOLATED_REGISTRY_KEYS = (
 
 
 def install_isolated(artifact, installed, test_root):
+    if winreg is None:
+        raise ResourceBlocked('actual_windows_registry_required_for_installation')
     artifact, installed, test_root = Path(artifact).resolve(), Path(installed).resolve(), Path(test_root).resolve()
     if (not test_root.is_relative_to(Path(tempfile.gettempdir()).resolve())
             or not installed.is_relative_to(test_root) or installed.name != 'pku-desktop.exe'):

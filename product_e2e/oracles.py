@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -51,9 +52,22 @@ class Oracle:
         self.requests: list[dict] = []
         self._secrets: set[str] = set()
         self._sequence = 0
+        self._clients = {}
+        self._client_stack = ExitStack()
         self.options = config.get("oracles", {})
         if not isinstance(self.options, dict):
             raise ResourceBlocked("oracle_configuration_invalid")
+
+    def close(self):
+        self._client_stack.close()
+        self._clients.clear()
+
+    def _client(self, service, tls):
+        key = (service, str(self.options.get('portal', {}).get('ca_bundle', '')) if service == 'portal' else '')
+        if key not in self._clients:
+            self._clients[key] = self._client_stack.enter_context(httpx.Client(
+                timeout=httpx.Timeout(20, connect=8), follow_redirects=False, trust_env=False, verify=tls))
+        return self._clients[key]
 
     def _credential(self, name: str) -> str:
         credentials = self.config.get("credentials", {})
@@ -162,19 +176,18 @@ class Oracle:
         # No inherited proxy, TLS downgrade, redirect, app transport or write.
         started, status, body = time.monotonic(), None, bytearray()
         try:
-            with httpx.Client(timeout=httpx.Timeout(20, connect=8), follow_redirects=False,
-                              trust_env=False, verify=tls) as client:
-                with client.stream("GET", "https://" + HOSTS[service] + path,
-                                   headers=headers, params=params) as response:
-                    self.hosts.add(HOSTS[service])
-                    status = response.status_code
-                    for chunk in response.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > 4 * 1024 * 1024:
-                            raise OracleError("metadata_response_too_large", service=service)
-                    status = response.status_code
-                    content_type = response.headers.get("content-type", "").lower()
-                    retry_after = response.headers.get('Retry-After', '')
+            client = self._client(service, tls)
+            with client.stream("GET", "https://" + HOSTS[service] + path,
+                               headers=headers, params=params) as response:
+                self.hosts.add(HOSTS[service])
+                status = response.status_code
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 4 * 1024 * 1024:
+                        raise OracleError("metadata_response_too_large", service=service)
+                status = response.status_code
+                content_type = response.headers.get("content-type", "").lower()
+                retry_after = response.headers.get('Retry-After', '')
         except httpx.HTTPError as exc:
             self._record_transport_failure(service, path, exc, started, status, body)
             raise OracleError("transport_unavailable", service=service) from None

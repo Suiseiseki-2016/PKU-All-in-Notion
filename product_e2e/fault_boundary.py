@@ -222,25 +222,24 @@ class AccountFaultBoundary:
         elif variant == 'offline':
             proof.update(failure_observed=True, mechanism='disconnect-original-owned-native-connection')
         elif variant == 'dns':
-            # .invalid is reserved and must be unresolved before forwarding
-            # credentials. The actual delegated request must independently
-            # fail in DNS as well; a side probe alone is not sufficient.
-            try:
-                socket.getaddrinfo('pku-e2e-unresolvable.invalid', 443)
-            except socket.gaierror:
-                pass
-            else:
-                raise ResourceBlocked('dns_failure_not_observed')
-            with httpx.Client(timeout=10, trust_env=False) as client:
-                try:
-                    client.request(method, 'https://pku-e2e-unresolvable.invalid' + path,
-                                   content=body, headers=headers)
-                except httpx.TransportError as exc:
-                    proof['error_chain'] = self._error_chain(exc)
-                    proof['failure_observed'] = any(row['type'] == 'gaierror' for row in proof['error_chain'])
+            from .dns_fault import OwnedDNS, DNSHTTPTransport
+            with OwnedDNS() as resolver:
+                transport = DNSHTTPTransport(resolver)
+                with httpx.Client(timeout=10, trust_env=False, transport=transport) as client:
+                    try:
+                        client.request(method, 'https://pku.aeoluswu.info' + path,
+                                       content=body, headers=headers)
+                    except httpx.TransportError as exc:
+                        proof['error_chain'] = self._error_chain(exc)
+                        proof['failure_observed'] = bool(resolver.queries) and transport.requests == [{
+                            'method': method, 'host': 'pku.aeoluswu.info', 'path': urlsplit(path).path,
+                            'body_sha256': proof['request_body_sha256']}] and any(
+                                row['type'] == 'gaierror' for row in proof['error_chain'])
+                proof['dns_queries'] = list(resolver.queries)
+                proof['delegated_requests'] = list(transport.requests)
             if not proof['failure_observed']:
                 raise ResourceBlocked('dns_failure_not_observed')
-            proof['mechanism'] = 'original-request-through-unresolvable-dns'
+            proof['mechanism'] = 'original-request-through-owned-nxdomain-resolver'
         elif variant == 'proxy':
             with socket.socket() as reserved:
                 reserved.bind(('127.0.0.1', 0))

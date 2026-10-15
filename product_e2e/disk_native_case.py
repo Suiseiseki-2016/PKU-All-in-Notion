@@ -1,6 +1,7 @@
 """Provision the real NTFS fault for the complete Windows native runner."""
 from copy import deepcopy
 from pathlib import Path
+import json
 import shutil
 import tempfile
 
@@ -79,7 +80,13 @@ class DiskCase:
             except Exception as exc:
                 result['blockers'].append('owned_disk_cleanup_failed_' + type(exc).__name__)
         directory = Path(self.original['run_dir']) / 'JOURNEY-06-fault/actual-ntfs-volume'
-        for row in self.boundary.export(directory):
+        exported = self.boundary.export(directory)
+        observations = directory / 'native-physical-write-observations.json'
+        observations.write_text(json.dumps(getattr(self.boundary, 'observations', []), indent=2), 'utf-8')
+        exported.append({'path': observations.name, 'sha256': sha256(observations)})
+        if result.get('fault_variants', {}).get('disk-full') is True and not getattr(self.boundary, 'observations', []):
+            result['blockers'].append('actual_disk_failure_observation_missing')
+        for row in exported:
             path = directory / row['path']
             result['evidence'].append({'role': 'runtime', 'path': path.relative_to(self.original['run_dir']).as_posix(),
                                        'sha256': row['sha256']})
