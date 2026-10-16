@@ -1,4 +1,4 @@
-"""A new user's verified campus login survives a failed Notion preparation."""
+"""A new user's campus setup works without workspace preparation."""
 import json
 from urllib.parse import urlsplit
 
@@ -9,7 +9,7 @@ from pku_sync.panel.student_ui import student_page, STATIC_DIR
 playwright = pytest.importorskip('playwright.sync_api')
 
 
-def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
+def test_new_account_can_sync_and_browse_without_workspace_preparation():
     configured = False
     synced = False
     writes = []
@@ -67,11 +67,8 @@ def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
             page.locator('[data-action="recording-save-credentials"]').click()
             playwright.expect(page.locator('[data-action="recording-edit-credentials"]')).to_be_visible()
             page.locator('.campus-setup [data-action="recording-sync"]').click()
-            create = page.locator('[data-action="campus-create-workspace"]')
-            playwright.expect(create).to_be_enabled()
-            create.click()
-            playwright.expect(page.locator('.home-setup-error')).to_contain_text('登录状态不受影响')
-            playwright.expect(create).to_be_enabled()
+            assert page.locator('[data-action="campus-create-workspace"]').count() == 0
+            assert 'Notion' not in page.locator('body').inner_text()
             assert configured and page.locator('#auth-form').count() == 0
             page.locator('.sidebar [data-action="open-dashboard"]').click()
             playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
@@ -81,8 +78,8 @@ def test_new_account_can_browse_and_retry_after_workspace_snapshot_failure():
             assert page.locator('#auth-form').count() == 0
             page.locator('.sidebar [data-action="campus-account-settings"]').click()
             playwright.expect(page.locator('[data-action="recording-edit-credentials"]')).to_be_visible()
-            page.locator('[data-action="campus-create-workspace"]').click()
-            playwright.expect(page.locator('.home-setup-error')).to_contain_text('登录状态不受影响')
-            assert writes == ['/api/recordings/credentials', '/api/recordings/sync', '/api/campus/notion/workspace', '/api/campus/notion/workspace']
+            assert page.locator('[data-action="campus-create-workspace"]').count() == 0
+            assert 'Notion' not in page.locator('body').inner_text()
+            assert writes == ['/api/recordings/credentials', '/api/recordings/sync']
         finally:
             browser.close()

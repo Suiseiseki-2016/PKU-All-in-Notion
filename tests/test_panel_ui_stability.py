@@ -126,8 +126,8 @@ def test_rapid_navigation_and_card_click_stability_in_edge(panel):
             disclosures.first.locator("[data-action=campus-material-ignore]").click()
             pw.expect(page.locator("[data-action=campus-material-restore]")).to_have_count(1)
             assert mutations == [dict(lecture_id="", ignore=True)]
-        page.get_by_role("button", name="课程设置", exact=True).click()
-        pw.expect(page.locator(".campus-settings")).to_be_visible()
+        assert page.get_by_role("button", name="课程设置", exact=True).count() == 0
+        assert 'Notion' not in page.locator('body').inner_text()
         action(page, "open-dashboard")
         pw.expect(page.locator(".course-card")).to_have_count(3)
         assert errors == []

@@ -106,8 +106,12 @@ def _from_rest(client: httpx.Client) -> list[Course]:
     for membership in resp.json().get("results", []):
         if not isinstance(membership, dict):
             continue
+        if (membership.get("availability") or {}).get("available") == "No":
+            continue
         course = membership.get("course") or {}
         if not isinstance(course, dict):
+            continue
+        if (course.get("availability") or {}).get("available") == "No":
             continue
         course_id = course.get("id") or membership.get("courseId") or ""
         if not isinstance(course_id, str) or not course_id:

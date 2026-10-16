@@ -19,11 +19,12 @@ def settings(tmp_path):
     )
 
 
-@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902"])
+@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-max"])
 def test_notes_explicit_cloud_model_binds_payload_key_and_lost_enqueue(monkeypatch, tmp_path, model):
     s = settings(tmp_path)
     s.platform_token = "opaque-token"
     s.notes_model = model
+    model = "qwen3.8-max-0902" if model == "qwen3.8-max" else model
     sent = []
     job_id = "f" * 32
     def post(url, **kwargs):
@@ -74,14 +75,15 @@ def test_notes_unknown_explicit_cloud_model_rejected_before_any_post_or_state(mo
     assert list(tmp_path.iterdir()) == []
 
 
-def test_notes_plus_budget_is_full_system_and_user_before_any_post_or_state(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-max"])
+def test_notes_budget_is_full_system_and_user_before_any_post_or_state(monkeypatch, tmp_path, model):
     s = settings(tmp_path)
     s.platform_token = "opaque-token"
-    s.notes_model = "qwen3.7-plus"
+    s.notes_model = model
     monkeypatch.setattr(platform, "_post", lambda *a, **kw: pytest.fail("oversize model submitted"))
     monkeypatch.setattr(platform, "_llm_job_state_path", lambda *a, **kw: pytest.fail("oversize model touched state"))
-    with pytest.raises(platform.PlatformError, match="30000"):
-        platform.llm("notes", "原" * 29999, s, system="系统")
+    with pytest.raises(platform.PlatformError, match="200000"):
+        platform.llm("notes", "a" * 199999, s, system="系统")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -114,7 +116,7 @@ def test_notes_plus_exact_budget_and_other_operations_keep_legacy_contract(monke
         httpx.Response(202, json={"job_id": "e" * 32}))[1])
     monkeypatch.setattr(platform, "_get", lambda *a, **kw: httpx.Response(200,
         json={"job_id": "e" * 32, "status": "succeeded", "content": "候选", "points_charged": .01}))
-    platform.llm("notes", "原" * 29999, s, system="核")
+    platform.llm("notes", "a" * 199999, s, system="核")
     assert sent[-1]["model"] == "qwen3.7-plus"
     s.notes_model = "unknown"
     platform.llm("quiz", "题目", s, system="核验")

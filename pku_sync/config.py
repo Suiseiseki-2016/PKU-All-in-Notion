@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     openai_base_url: str = "https://openrouter.ai/api/v1"
     openai_api_key: str = ""
-    notes_model: str = "qwen/qwen3.5-397b-a17b"
+    notes_model: str = "qwen3.7-plus"
     notes_strategy: Literal["transcript", "topics"] = "transcript"
     notes_merge_model: str = ""  # legacy model-merge recovery; new topic notes assemble locally
     # Legacy settings retained so existing .env files still load. The current

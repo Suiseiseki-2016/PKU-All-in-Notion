@@ -210,12 +210,20 @@ def test_courseware_overflow_is_rejected_before_any_paid_part_without_cropping(t
 
 
 def test_impossible_whole_source_merge_is_rejected_before_any_charge(tmp_path):
-    lecture = {"segments": [{"start": 0, "end": 1200, "text": "原文" * 16000}]}
+    lecture = {"segments": [{"start": 0, "end": 1200, "text": "原文" * 45000}]}
     with pytest.raises(RuntimeError, match="超过模型或传输容量"):
         notes.write_topic_notes(lecture, tmp_path / "notes.md", config(), "课程",
             ask=lambda *a: pytest.fail("impossible merge billed parts"),
             merge_ask=lambda *a: pytest.fail("source truncated"), merge_model="qwen3.7-plus")
     assert not (tmp_path / ".notes-parts").exists()
+
+
+@pytest.mark.parametrize('model',['qwen3.7-plus','qwen3.8-max','qwen3.8-max-0902'])
+def test_topic_merge_and_transcript_capacity_accept_full_inputs_above_30000(model):
+    payload={'transcript':[{'start':0,'end':1200,'text':'原文'*16000}]}
+    expected=json.dumps(payload,ensure_ascii=False)
+    assert notes._topic_capacity(notes.MERGE_SYSTEM,payload,model,{})==expected
+    assert notes._capacity(payload,model,{})==expected
 
 
 @pytest.mark.parametrize("change", ["source", "part", "merge", "body"])
@@ -403,7 +411,7 @@ def test_multibyte_capacity_is_checked_before_first_paid_window(tmp_path):
     assert calls == [] and not (tmp_path / ".notes-parts").exists()
 
 
-@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus"])
+@pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-max"])
 def test_large_individual_segment_keeps_every_original_character(tmp_path, model):
     text='"\\原讲述' * 7000
     transcript={"segments":[{"start":0,"end":1200,"text":text}]}

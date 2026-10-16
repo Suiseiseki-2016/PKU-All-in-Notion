@@ -101,8 +101,8 @@ def _merge_payload(title, transcript, records, identity, courseware=None):
 
 def _topic_capacity(system, payload, model, context):
     prompt = json.dumps(payload, ensure_ascii=False)
-    limit = 30000 if model == "qwen3.7-plus" else 200000
-    selected = model if model in SELECTABLE_NOTE_MODELS else None
+    limit = 200000
+    selected = "qwen3.8-max-0902" if model == "qwen3.8-max" else (model if model in SELECTABLE_NOTE_MODELS else None)
     if (len(system) + len(prompt) > limit or llm_request_body_size(
             "notes", system, prompt, model=selected, operation_context=context) > LLM_REQUEST_MAX_BYTES):
         raise RuntimeError("完整笔记整理输入超过模型或传输容量，未裁剪来源；已完成分段保留。")
@@ -306,8 +306,8 @@ def _payload(title, parts, index, identity):
 
 def _capacity(payload, model, context):
     prompt = json.dumps(payload, ensure_ascii=False)
-    limit = 30000 if model == "qwen3.7-plus" else 200000
-    selected = model if model in SELECTABLE_NOTE_MODELS else None
+    limit = 200000
+    selected = "qwen3.8-max-0902" if model == "qwen3.8-max" else (model if model in SELECTABLE_NOTE_MODELS else None)
     if (len(SYSTEM) + len(prompt) > limit
             or llm_request_body_size("notes", SYSTEM, prompt, model=selected,
                 operation_context=context) > LLM_REQUEST_MAX_BYTES):

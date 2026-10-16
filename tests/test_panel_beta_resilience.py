@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -171,6 +172,384 @@ def test_mcp_semantic_tools_and_panel_hub(tmp_path):
     assert tomllib.loads(codex['config_snippet'])['mcp_servers']['pku-sync']['env']['DATA_DIR'] == tmp_path.as_posix()
 
 
+@pytest.mark.parametrize('metadata', ['catalog', 'recording', 'missing', 'malformed', 'scalar'])
+def test_knowledge_search_lecture_identity_and_source_priority(tmp_path, metadata):
+    folder = tmp_path / '计算机网络'
+    recordings = folder / 'recordings'
+    recordings.mkdir(parents=True)
+    (folder / 'course.json').write_text(json.dumps({'course_id': 'net', 'name': '计算机网络'}), 'utf8')
+    entry = {'course_id': 'net', 'title': '第三讲：可靠传输', 'recorded_at': '2026-10-08 08:00:00'}
+    (recordings / 'index.json').write_text(json.dumps([entry] if metadata == 'catalog' else []), 'utf8')
+    directory = collect_jobs(tmp_path, 'net')[0].directory if metadata == 'catalog' else recordings / 'opaque-id'
+    directory.mkdir(parents=True)
+    if metadata in {'recording', 'malformed', 'scalar'}:
+        value = json.dumps(entry) if metadata == 'recording' else '{broken' if metadata == 'malformed' else 'null'
+        (directory / 'recording.json').write_text(value, 'utf8')
+    text = '滑动窗口 可靠传输 TCP'
+    (directory / 'notes.md').write_text(text, 'utf8')
+    (directory / 'transcript.json').write_text(json.dumps({'segments': [{'text': text}]}), 'utf8')
+    for section in ('assignments', 'announcements'):
+        (folder / section).mkdir()
+        (folder / section / 'index.json').write_text(json.dumps([{'instructions': text}]), 'utf8')
+    tools = LocalCourseTools(tmp_path)
+    hits = tools.search_course_knowledge('滑动窗口，可靠传输；tcp', 'net')
+    assert [hit['source_type'] for hit in hits] == ['notes', 'assignments', 'announcements', 'transcript']
+    for hit in (hits[0], hits[-1]):
+        assert hit['title'] == (entry['title'] if metadata in {'catalog', 'recording'} else directory.name)
+        if metadata in {'catalog', 'recording'}:
+            assert hit['date'] == '2026-10-08'
+        else:
+            assert 'date' not in hit
+    # Content relevance still takes priority over the source-type tie breaker.
+    (directory / 'transcript.json').write_text(json.dumps({'text': text + ' ' + text}), 'utf8')
+    assert tools.search_course_knowledge('TCP')[0]['source_type'] == 'transcript'
+
+
+@pytest.mark.parametrize('separator', [' ', '\n', ',', '，', '、', '。', ';', '；', ':', '：', '!', '！', '?', '？', '/', '|'])
+def test_knowledge_search_splits_chinese_query_punctuation(tmp_path, separator):
+    _, job = seed(tmp_path)
+    (job.directory / 'notes.md').write_text('滑动窗口和可靠传输', 'utf8')
+    tools = LocalCourseTools(tmp_path)
+    hits = tools.search_course_knowledge(separator.join(['滑动窗口', '可靠传输']))
+    assert len(hits) == 1 and hits[0]['source_type'] == 'notes'
+    assert hits[0]['title'] == job.recording.title
+    assert tools.search_course_knowledge(separator * 2) == []
+
+
+def test_knowledge_search_source_priority_across_courses(tmp_path):
+    first, first_job = seed(tmp_path, 'Alpha', 'alpha')
+    second, second_job = seed(tmp_path, 'Beta', 'beta')
+    for job in (first_job, second_job):
+        (job.directory / 'notes.md').write_text('可靠传输', 'utf8')
+    (first_job.directory / 'transcript.json').write_text(json.dumps({'text': '可靠传输'}), 'utf8')
+    for folder, section in ((first, 'assignments'), (second, 'announcements')):
+        (folder / section).mkdir()
+        (folder / section / 'index.json').write_text(json.dumps([{'text': '可靠传输'}]), 'utf8')
+    hits = LocalCourseTools(tmp_path).search_course_knowledge('可靠传输')
+    assert [(hit['source_type'], hit['course']) for hit in hits] == [
+        ('notes', 'Alpha'), ('notes', 'Beta'), ('assignments', 'Alpha'),
+        ('announcements', 'Beta'), ('transcript', 'Alpha')]
+
+
+def test_in_place_lesson_filter_in_edge():
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state: state, render: render};})();')
+    errors, requests = [], []
+
+    def serve(route):
+        path = urlsplit(route.request.url).path
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width, initial-scale=1"><div id="app"></div><div id="toast"></div>')
+        else:
+            requests.append(path)
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = {active:true};
+                s.connection.connected = true; s.campus.configured = true;
+                s.view = 'campus-course'; s.campus.courseId = 'course'; s.campus.section = 'home';
+                s.campus.course = {id:'course', title:'计算机网络', lessons:[],
+                    unassigned_materials:[], all_materials:[], assignments:[],
+                    announcements:[], announcement_tasks:[], summary:{}};
+                window.__beta.render();
+            }''')
+            search = page.locator('#course-lessons > .section-label > [data-campus-lesson-filter]')
+            cards = page.locator('#course-lessons [data-lesson-card]')
+            lessons = [
+                {'id': 'date', 'title': '开学导论', 'date': '2026-09-10', 'materials': [],
+                 'notes_available': False, 'notion_note_url': 'https://www.notion.so/legacy-note'},
+                {'id': 'topic', 'title': '第二讲', 'date': '2026-09-17', 'note_topic': 'TCP 可靠传输', 'materials': []},
+                {'id': 'material', 'title': '第三讲', 'date': '2026-09-24', 'materials': [{'title': '滑动窗口 Slides.pdf'}, {}]},
+                {'id': 'title', 'title': 'DNS 协议', 'materials': []},
+            ]
+            for count in (0, 1, 2, 3, 4, 16, 32):
+                rows = lessons[:count] if count <= 4 else [dict(lessons[n % 4], id=f'lesson-{n}') for n in range(count)]
+                page.evaluate('rows => {window.__beta.state.campus.course.lessons = rows; window.__beta.render()}', rows)
+                pw.expect(search).to_have_count(int(count >= 4))
+                pw.expect(cards).to_have_count(count)
+            page.evaluate('rows => {window.__beta.state.campus.course.lessons = rows; window.__beta.render()}', lessons)
+            pw.expect(page.locator('[data-lesson-card="date"] .recording-published')).to_have_count(0)
+            pw.expect(search).to_have_attribute('aria-label', '筛选讲次')
+            for query, lesson_id in [('09-10', 'date'), (' tcp ', 'topic'), ('sLiDeS', 'material'), ('滑动窗口', 'material'), ('dns', 'title')]:
+                search.fill(query)
+                pw.expect(search).to_be_focused()
+                pw.expect(search).to_have_value(query)
+                pw.expect(cards).to_have_count(1)
+                pw.expect(cards).to_have_attribute('data-lesson-card', lesson_id)
+            search.fill('')
+            search.press_sequentially('TCP')
+            assert search.evaluate('(el) => [el.selectionStart, el.selectionEnd]') == [3, 3]
+            search.press('ArrowLeft')
+            search.press('Backspace')
+            pw.expect(search).to_have_value('TP')
+            assert search.evaluate('(el) => [el.selectionStart, el.selectionEnd]') == [1, 1]
+            search.fill('TCP')
+            search.evaluate("el => el.setSelectionRange(0, 2, 'backward')")
+            page.evaluate('window.__beta.render()')
+            pw.expect(search).to_be_focused()
+            assert search.evaluate('(el) => [el.selectionStart, el.selectionEnd, el.selectionDirection]') == [0, 2, 'backward']
+            for query in ('不存在的主题', '\"><img src=x onerror=alert(1)>'):
+                search.fill(query)
+                pw.expect(cards).to_have_count(0)
+                pw.expect(search).to_be_visible()
+                pw.expect(search).to_be_focused()
+                pw.expect(search).to_have_value(query)
+                pw.expect(page.locator('#course-lessons .empty-materials')).to_have_text('没有找到匹配的讲次。')
+                pw.expect(page.locator('#course-lessons img')).to_have_count(0)
+                assert '暂时没有录像' not in page.locator('#course-lessons').inner_text()
+            page.set_viewport_size({'width': 390, 'height': 900})
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert search.evaluate('(el) => el.getBoundingClientRect().right <= innerWidth')
+            search.fill('   ')
+            pw.expect(cards).to_have_count(4)
+            pw.expect(page.locator('#course-lessons .empty-materials')).to_have_count(0)
+            search.fill('')
+            pw.expect(cards).to_have_count(4)
+            page.evaluate("window.__beta.state.campus.dateQuery = 'absent'; window.__beta.state.campus.lessonId = 'date'")
+            for section in ('lecture', 'materials', 'assignments', 'notices', 'settings'):
+                page.evaluate('section => {window.__beta.state.campus.section = section; window.__beta.render()}', section)
+                pw.expect(page.locator('[data-campus-lesson-filter]')).to_have_count(0)
+                if section == 'lecture':
+                    pw.expect(page.locator('#course-lessons .recording-row')).to_have_count(1)
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.view = 'dashboard';
+                s.campus.courses = [{id:'course', title:'计算机网络', code:'CS101', recordings:4}];
+                window.__beta.render();
+            }''')
+            course_search = page.locator('[data-campus-search]')
+            course_search.fill('计算机网络')
+            for start, end, direction in ((1, 1, 'forward'), (1, 4, 'backward'), (0, 5, 'forward')):
+                course_search.evaluate('(el, range) => el.setSelectionRange(...range)', [start, end, direction])
+                page.evaluate('window.__beta.render()')
+                pw.expect(course_search).to_be_focused()
+                pw.expect(course_search).to_have_value('计算机网络')
+                assert course_search.evaluate('(el) => [el.selectionStart, el.selectionEnd, el.selectionDirection]') == [start, end, direction]
+            course_search.press('x')
+            pw.expect(course_search).to_have_value('x')
+            pw.expect(course_search).to_be_focused()
+            assert requests == []
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('width', [1440, 390, 320])
+def test_local_reading_search_and_material_filter_in_edge(width):
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    from grading_workspace import PANEL_FORBIDDEN_STRINGS
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state, render, openCampusCourse};})();')
+    markdown = ('## TCP theorem\n' + 'Local context.\n' * 35 +
+                'TCP tcp **TCP**\nUse a+b, <term> & formula.\n' + 'Background.\n' * 35 +
+                '![TCP diagram](/assets/TCP-diagram.svg)\n## Details\nLocal review.')
+    course = {
+        'id': 'course', 'title': '计算机网络',
+        'lessons': [{'id': 'first', 'title': '可靠传输', 'notes_available': True,
+                     'transcript_available': True, 'materials': [
+                         {'index': 0, 'title': '窗口讲义', 'body_text': '流量控制', 'files': ['Transport.pdf']}]}],
+        'unassigned_materials': [
+            {'index': 1, 'title': '课程大纲', 'category': 'information', 'body_text': '考核权重', 'files': []},
+            {'index': 2, 'title': '补充练习', 'body_text': '拥塞算法', 'files': []},
+            {'index': 3, 'title': '参考附件', 'files': ['Review-Handout.pdf']}],
+        'assignments': [], 'announcements': [], 'announcement_tasks': [], 'summary': {},
+    }
+    errors, requests = [], []
+
+    def serve(route):
+        path = urlsplit(route.request.url).path
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width, initial-scale=1"><div id="app"></div><div id="toast"></div>')
+        elif path.endswith(('/summary-preview', '/note-preview')):
+            requests.append(path)
+            route.fulfill(json={'markdown': markdown, 'visuals': []})
+        elif path == '/assets/TCP-diagram.svg':
+            route.fulfill(content_type='image/svg+xml', body=
+                '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"></svg>')
+        elif path == '/api/campus/courses/course':
+            requests.append(path)
+            route.fulfill(json=course)
+        else:
+            requests.append(path)
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 900})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''course => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = {active:true};
+                s.connection.connected = true; s.campus.configured = true;
+                s.view = 'campus-course'; s.campus.courseId = course.id;
+                s.campus.course = course; s.campus.section = 'materials';
+                window.__beta.render();
+            }''', course)
+            material_search = page.locator('[data-campus-material-filter]')
+            materials = page.locator('[data-materials-linked] > ul > li, '
+                                     '[data-materials-info] > ul > li, [data-materials-unassigned] > ul > li')
+            # The threshold includes linked and unassigned materials together.
+            for count in (0, 1, 2, 3):
+                page.evaluate('''rows => {
+                    window.__beta.state.campus.course.unassigned_materials = rows;
+                    window.__beta.render();
+                }''', course['unassigned_materials'][:count])
+                pw.expect(material_search).to_have_count(int(count == 3))
+            for query, title in [('窗口', '窗口讲义'), ('流量', '窗口讲义'), ('transport.PDF', '窗口讲义'),
+                                 ('可靠传输', '窗口讲义'), ('大纲', '课程大纲'), ('考核权重', '课程大纲'),
+                                 ('拥塞', '补充练习'), ('review-HANDOUT', '参考附件')]:
+                material_search.fill(' ' + query + ' ')
+                pw.expect(material_search).to_be_focused()
+                pw.expect(materials).to_have_count(1)
+                pw.expect(materials.locator('strong')).to_have_text(title)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            material_search.fill('')
+            material_search.press_sequentially('Transport')
+            pw.expect(material_search).to_have_value('Transport')
+            for start, end, direction in ((2, 2, 'forward'), (1, 5, 'backward')):
+                material_search.evaluate('(el, range) => el.setSelectionRange(...range)', [start, end, direction])
+                page.evaluate('window.__beta.render()')
+                pw.expect(material_search).to_be_focused()
+                assert material_search.evaluate('(el) => [el.selectionStart, el.selectionEnd, el.selectionDirection]') == [start, end, direction]
+            material_search.press('x')
+            pw.expect(material_search).to_have_value('Txport')
+            for query in ('无此资料', '\"><img src=x onerror=alert(1)>'):
+                material_search.fill(query)
+                pw.expect(materials).to_have_count(0)
+                pw.expect(page.locator('.empty-materials')).to_have_text('没有找到匹配的课程资料。')
+                pw.expect(material_search).to_be_focused()
+                pw.expect(page.locator('img')).to_have_count(0)
+            material_search.fill('   ')
+            pw.expect(materials).to_have_count(4)
+            pw.expect(page.locator('.empty-materials')).to_have_count(0)
+            summary_toggle = page.locator('.materials-summary-panel [data-action="campus-preview-course-summary"]')
+            reader = page.locator('.materials-summary-panel .lecture-note-reader')
+            summary_toggle.click()
+            pw.expect(reader.locator('.study-markdown')).to_contain_text('Local review.')
+            pw.expect(summary_toggle).to_have_text('收起课程总结')
+            assert page.evaluate('window.__beta.state.campus.section') == 'materials'
+            assert requests == ['/api/campus/courses/course/summary-preview']
+            summary_toggle.click()
+            pw.expect(reader).to_have_count(0)
+            summary_toggle.click()
+            pw.expect(reader.locator('[data-reader-search]')).to_be_visible()
+            # Both local summary and lecture readers share safe highlighting and focus handling.
+            for section in ('materials', 'lecture'):
+                if section == 'lecture':
+                    page.evaluate('''() => {
+                        window.__beta.state.campus.section = 'home'; window.__beta.render();
+                    }''')
+                    page.locator('[data-action="campus-open-lesson"]').click()
+                reader = page.locator('.lecture-note-reader')
+                search = reader.locator('[data-reader-search]')
+                content = reader.locator('.study-markdown')
+                image_attributes = content.locator('img').evaluate('(el) => Array.from(el.attributes, a => [a.name, a.value])')
+                search.fill('')
+                search.press_sequentially('tCp')
+                pw.expect(search).to_be_focused()
+                pw.expect(search).to_have_value('tCp')
+                assert search.evaluate('(el) => [el.selectionStart, el.selectionEnd]') == [3, 3]
+                pw.expect(content.locator('mark.study-search-hit')).to_have_count(5)
+                pw.expect(reader.locator('[data-reader-search-count]')).to_have_text('找到 5 处')
+                hits = content.locator('mark.study-search-hit')
+                active = content.locator('mark.study-search-hit-active[data-active-search-hit="true"]')
+                pw.expect(active).to_have_count(1)
+                pw.expect(hits.nth(0)).to_have_class('study-search-hit study-search-hit-active')
+                for key, index in [('Enter', 1), ('Enter', 2), ('Shift+Enter', 1),
+                                   ('Shift+Enter', 0), ('Shift+Enter', 4), ('Enter', 0)]:
+                    search.press(key)
+                    pw.expect(search).to_be_focused()
+                    pw.expect(search).to_have_value('tCp')
+                    pw.expect(active).to_have_count(1)
+                    pw.expect(hits.nth(index)).to_have_attribute('data-active-search-hit', 'true')
+                    assert active.evaluate('''el => {
+                        const r = el.getBoundingClientRect();
+                        return r.top >= 0 && r.bottom <= innerHeight;
+                    }''')
+                search.press('Shift+Enter')
+                search.fill('TCP ')
+                pw.expect(hits.nth(0)).to_have_attribute('data-active-search-hit', 'true')
+                search.press('Escape')
+                pw.expect(search).to_have_value('')
+                pw.expect(search).to_be_focused()
+                pw.expect(content.locator('mark')).to_have_count(0)
+                pw.expect(reader.locator('[data-reader-search-count]')).to_have_count(0)
+                search.fill('tCp')
+                pw.expect(hits.nth(0)).to_have_attribute('data-active-search-hit', 'true')
+                assert active.evaluate('el => getComputedStyle(el).backgroundColor') == 'rgb(250, 204, 21)'
+                for start, end, direction in ((1, 1, 'forward'), (0, 2, 'backward')):
+                    search.evaluate('(el, range) => el.setSelectionRange(...range)', [start, end, direction])
+                    page.evaluate('window.__beta.render()')
+                    pw.expect(search).to_be_focused()
+                    assert search.evaluate('(el) => [el.selectionStart, el.selectionEnd, el.selectionDirection]') == [start, end, direction]
+                search.press('x')
+                pw.expect(search).to_have_value('xp')
+                for query, count in [(' TCP ', 5), ('a+b', 1), ('<term>', 1), ('src', 0),
+                                     ('alt', 0), ('note-sec', 0), ('img', 0), ('[.*', 0),
+                                     ('\"><img onerror=alert(1)>', 0)]:
+                    search.fill(query)
+                    pw.expect(search).to_be_focused()
+                    pw.expect(content.locator('mark.study-search-hit')).to_have_count(count)
+                    pw.expect(reader.locator('[data-reader-search-count]')).to_have_text(f'找到 {count} 处' if count else '无匹配')
+                    search.press('Enter')
+                    pw.expect(search).to_be_focused()
+                    pw.expect(active).to_have_count(int(count > 0))
+                    assert content.locator('img').evaluate('(el) => Array.from(el.attributes, a => [a.name, a.value])') == image_attributes
+                    pw.expect(content.locator('#note-sec-1')).to_have_text('TCP theorem')
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                for query in ('', '   '):
+                    search.fill(query)
+                    pw.expect(content.locator('mark')).to_have_count(0)
+                    pw.expect(reader.locator('[data-reader-search-count]')).to_have_count(0)
+                for needle in PANEL_FORBIDDEN_STRINGS:
+                    assert needle not in page.locator('#app').inner_text()
+                assert page.locator('#app a[href^="http"]').count() == 0
+            # Opening a course clears the material filter for its next visit.
+            page.evaluate("window.__beta.state.campus.materialQuery = 'old'; window.__beta.openCampusCourse('course')")
+            pw.expect(page.locator('.course-summary-spotlight')).to_be_visible()
+            assignment_center = page.locator('.campus-centers [data-center="assignments"]')
+            pw.expect(assignment_center.locator('.center-count')).to_have_text('0 项记录')
+            assert assignment_center.get_attribute('data-urgent-assignments') is None
+            assert page.evaluate('window.__beta.state.campus.materialQuery') == ''
+            assert errors == []
+        finally:
+            browser.close()
+
+
 def seed_keyframe_materials(root):
     from test_slide_alignment import _write_pdf, _deck_rectangles, _projector_capture
     cv2 = pytest.importorskip('cv2')
@@ -277,6 +656,324 @@ def test_source_preparation_matches_existing_keyframes_offline(tmp_path):
     assert paths[0].is_relative_to(folder / 'materials/.lecture-sources')
 
 
+def test_inline_lecture_pager_and_note_outline_in_edge():
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state: state, render: render};})();')
+    long_heading = '章节内容' * 40 + ' <img onerror="window.noteXss = true"> & 复习'
+    notes = {
+        'first': '## **基础**\n正文\n### `例题`\n正文\n#### 细节\n```\n## 代码中的标题\n```\n'
+                 '```python\nif a < b:\n    print("<button> & 代码")',
+        'middle': '## **基础**\n' + '正文\n\n' * 35 + '### `例题`\n正文\n## ' + long_heading,
+        'last': '只有正文，没有章节标题。',
+    }
+    errors = []
+
+    def serve(route):
+        path = urlsplit(route.request.url).path
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width, initial-scale=1"><div id="app"></div><div id="toast"></div>')
+        elif path.endswith('/note-preview'):
+            route.fulfill(json={'markdown': notes[path.split('/')[-2]], 'visuals': []})
+        else:
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.add_init_script("Object.defineProperty(navigator, 'clipboard', {value:{writeText: async text => {window.copiedStudyText = text;}}})")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = {active:true};
+                s.connection.connected = true; s.campus.configured = true;
+                s.view = 'campus-course'; s.campus.courseId = 'course';
+                s.campus.course = {id:'course', title:'测试课程',
+                    lessons:[{id:'first', title:'第一讲', materials:[], notes_available:true,
+                        transcript_available:true}], unassigned_materials:[], all_materials:[],
+                    assignments:[], announcements:[], announcement_tasks:[], summary:{}};
+                s.campus.section = 'lecture'; s.campus.lessonId = 'first';
+                window.__beta.render();
+            }''')
+            pw.expect(page.locator('.breadcrumb-pager')).to_have_count(0)
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.campus.course.lessons.push({...s.campus.course.lessons[0], id:'middle', title:'第二讲'});
+                s.campus.section = 'home'; window.__beta.render();
+            }''')
+            pw.expect(page.locator('.breadcrumb-pager')).to_have_count(0)
+            page.locator('[data-action="campus-open-lesson"][data-recording="first"]').click()
+            pager = page.locator('.breadcrumb > .breadcrumb-pager')
+            prev = pager.get_by_role('button', name='上一讲', exact=True)
+            next_ = pager.get_by_role('button', name='下一讲', exact=True)
+            pw.expect(prev).to_be_disabled()
+            pw.expect(prev).to_have_attribute('data-recording', '')
+            pw.expect(next_).to_be_enabled()
+            pw.expect(next_).to_have_attribute('data-recording', 'middle')
+            pw.expect(prev).to_have_attribute('title', '上一讲 ([)')
+            pw.expect(next_).to_have_attribute('title', '下一讲 (])')
+            pw.expect(page.locator('.study-markdown h3')).to_have_text('例题')
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
+            pw.expect(page.locator('.study-markdown [id^="note-sec-"]')).to_have_count(2)
+            code_wraps = page.locator('.study-markdown .study-code-wrap')
+            pw.expect(code_wraps).to_have_count(2)
+            code_copy = code_wraps.last.locator('[data-action="campus-copy-code"]')
+            pw.expect(code_wraps.last.locator('pre > code')).to_have_text('if a < b:\n    print("<button> & 代码")')
+            pw.expect(code_wraps.last.locator('code button')).to_have_count(0)
+            pw.expect(code_copy).to_have_css('opacity', '0')
+            code_wraps.last.hover()
+            pw.expect(code_copy).to_have_css('opacity', '1')
+            code_copy.click()
+            pw.expect(page.locator('#toast')).to_have_text('已复制代码，可直接粘贴')
+            assert page.evaluate('window.copiedStudyText') == 'if a < b:\n    print("<button> & 代码")\n'
+            code_wraps.first.hover()
+            code_wraps.first.locator('[data-action="campus-copy-code"]').click()
+            assert page.evaluate('window.copiedStudyText') == '## 代码中的标题\n'
+            page.mouse.move(0, 0)
+            page.keyboard.press('Tab')
+            code_copy.focus()
+            pw.expect(code_copy).to_have_css('opacity', '1')
+            touch_page = browser.new_page(has_touch=True, viewport={'width': 390, 'height': 900})
+            try:
+                touch_page.set_content(code_wraps.last.evaluate('(el) => el.outerHTML'))
+                touch_page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+                assert touch_page.evaluate('matchMedia("(hover: none)").matches')
+                pw.expect(touch_page.locator('.study-code-copy')).to_have_css('opacity', '1')
+            finally:
+                touch_page.close()
+            page.evaluate('document.activeElement.blur()')
+            page.keyboard.press('[')
+            assert page.evaluate('window.__beta.state.campus.lessonId') == 'first'
+            page.keyboard.press(']')
+            pw.expect(page.locator('.note-outline')).to_be_visible()
+            assert page.evaluate('window.__beta.state.campus.lessonId') == 'middle'
+            page.keyboard.press('[')
+            pw.expect(code_wraps).to_have_count(2)
+            assert page.evaluate('window.__beta.state.campus.lessonId') == 'first'
+            next_.click()
+            pw.expect(next_).to_be_disabled()
+            pw.expect(next_).to_have_attribute('data-recording', '')
+            pw.expect(prev).to_be_enabled()
+            outline = page.get_by_role('navigation', name='笔记章节导航')
+            pw.expect(outline).to_be_visible()
+            links = outline.locator('.note-outline-link')
+            pw.expect(links).to_have_text(['基础', '例题', long_heading])
+            pw.expect(outline.locator('strong, code, img')).to_have_count(0)
+            assert page.evaluate('window.noteXss === undefined')
+            assert page.locator('.study-markdown h2, .study-markdown h3').evaluate_all(
+                '(items) => items.map(item => item.id)') == ['note-sec-1', 'note-sec-2', 'note-sec-3']
+            page.evaluate('''() => {
+                const scroll = Element.prototype.scrollIntoView;
+                Element.prototype.scrollIntoView = function(options) {
+                    window.noteScroll = {id:this.id, reader:this.matches('.lecture-note-reader'), options};
+                    scroll.call(this, options);
+                };
+            }''')
+            links.last.click()
+            assert page.evaluate('window.noteScroll') == {
+                'id': 'note-sec-3', 'reader': False, 'options': {'block': 'start'}}
+            pw.expect(page.locator('#note-sec-3')).to_be_in_viewport()
+            footer = page.locator('.study-markdown > .note-outline-footer:last-child')
+            pw.expect(footer).to_have_count(1)
+            footer.get_by_role('button', name='返回目录与工具栏', exact=True).click()
+            assert page.evaluate('window.noteScroll') == {
+                'id': '', 'reader': True, 'options': {'block': 'start'}}
+            pw.expect(page.locator('.lecture-note-reader .reader-toolbar')).to_be_in_viewport()
+            pw.expect(outline).to_be_in_viewport()
+            page.set_viewport_size({'width': 390, 'height': 900})
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert outline.evaluate('(el) => el.scrollWidth <= el.clientWidth')
+            assert links.evaluate_all('(items) => items.every(el => el.scrollWidth <= el.clientWidth)')
+            prev.click()
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
+            next_.click()
+            pw.expect(outline).to_be_visible()
+            assert links.evaluate_all('(items) => items.map(el => el.dataset.target)') == [
+                'note-sec-1', 'note-sec-2', 'note-sec-3']
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.campus.course.lessons.push({...s.campus.course.lessons[0], id:'last', title:'第三讲'});
+                window.__beta.render();
+            }''')
+            pw.expect(prev).to_be_enabled()
+            pw.expect(next_).to_be_enabled()
+            pw.expect(next_).to_have_attribute('data-recording', 'last')
+            for markup in ('<input>', '<textarea></textarea>', '<select><option>课程</option></select>',
+                           '<div contenteditable="true"><span tabindex="0">编辑笔记</span></div>'):
+                page.evaluate('''markup => {
+                    const editor = document.createElement('div'); editor.id = 'shortcut-editor';
+                    editor.innerHTML = markup; document.body.appendChild(editor);
+                    (editor.querySelector('span') || editor.firstElementChild).focus();
+                }''', markup)
+                for key in ('[', ']'):
+                    page.keyboard.press(key)
+                    assert page.evaluate('window.__beta.state.campus.lessonId') == 'middle'
+                page.locator('#shortcut-editor').evaluate('(el) => el.remove()')
+            page.evaluate('''() => {
+                const dialog = document.createElement('dialog'); dialog.id = 'shortcut-dialog';
+                dialog.innerHTML = '<button>关闭</button>'; document.body.appendChild(dialog); dialog.show();
+            }''')
+            for key in ('[', ']'):
+                page.keyboard.press(key)
+                assert page.evaluate('window.__beta.state.campus.lessonId') == 'middle'
+            page.locator('#shortcut-dialog').evaluate('(el) => el.remove()')
+            for options in ({'ctrlKey': True}, {'metaKey': True}, {'altKey': True}, {'prevented': True}):
+                for key in ('[', ']'):
+                    page.evaluate('''({key, options}) => {
+                        const event = new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true, ...options});
+                        if (options.prevented) event.preventDefault();
+                        document.body.dispatchEvent(event);
+                    }''', {'key': key, 'options': options})
+                    assert page.evaluate('window.__beta.state.campus.lessonId') == 'middle'
+            next_.click()
+            pw.expect(page.locator('.study-markdown')).to_contain_text('只有正文')
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
+            pw.expect(next_).to_be_disabled()
+            page.evaluate('document.activeElement.blur()')
+            page.keyboard.press(']')
+            assert page.evaluate('window.__beta.state.campus.lessonId') == 'last'
+            page.evaluate("window.__beta.state.campus.lessonId = 'missing'; window.__beta.render()")
+            pw.expect(pager).to_have_count(0)
+            for section in ('home', 'materials', 'assignments', 'notices', 'settings'):
+                page.evaluate('section => {window.__beta.state.campus.section = section; window.__beta.render()}', section)
+                pw.expect(pager).to_have_count(0)
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_assignment_format_suggestions_and_filename_template_in_edge():
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state: state, render: render};})();')
+    analysis = {'requirements': [{'quote': '请按要求提交答案'}],
+                'file_formats': [{'value': 'PDF', 'quote': '只上传 PDF'}],
+                'filename_rules': [{'quote': '文件名为“学号_姓名.zip”。'}], 'uncertainties': []}
+    calls, errors = [], []
+
+    def serve(route):
+        path = urlsplit(route.request.url).path
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                          '<!doctype html><meta charset="utf-8"><div id="app"></div><div id="toast"></div>')
+        elif path.endswith('/requirements'):
+            assert route.request.method == 'POST'
+            assert route.request.post_data_json == {'confirmed': True}
+            calls.append(path)
+            route.fulfill(json={'analysis': analysis, 'points_charged': .01})
+        else:
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''() => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = {active:true}; s.connection.connected = true;
+                s.campus.configured = true; s.view = 'campus-course'; s.campus.courseId = 'course';
+                s.campus.course = {id:'course', title:'测试课程', lessons:[],
+                    unassigned_materials:[], all_materials:[], announcements:[], announcement_tasks:[],
+                    assignments:[{content_id:'assignment', title:'正式作业'}], summary:{}};
+                s.campus.section = 'assignments'; s.campus.submission.selectedId = 'assignment';
+                window.__beta.render();
+            }''')
+            analyze = page.get_by_role('button', name='AI 识别作业要求', exact=True)
+            mode = page.locator('#assignment-prepare-form [name="submission_mode"]')
+            apply_rule = page.locator('[data-assignment-requirements] [data-action="campus-apply-filename-rule"]')
+            archive = page.locator('#assignment-prepare-form [name="archive_name"]')
+
+            def recognize():
+                with page.expect_response('**/requirements'):
+                    analyze.click()
+                pw.expect(analyze).to_be_enabled()
+
+            pw.expect(mode).to_have_value('zip')
+            recognize()
+            pw.expect(mode).to_have_value('single_file')
+            pw.expect(apply_rule).to_have_count(0)
+            pw.expect(page.locator('[data-assignment-requirements] li')).to_have_text([
+                '请按要求提交答案', '文件名为“学号_姓名.zip”。'])
+            mode.select_option('zip')
+            pw.expect(apply_rule).to_have_text('套用命名规则')
+            pw.expect(apply_rule).to_have_attribute('data-filename-template', '学号_姓名.zip')
+            apply_rule.click()
+            pw.expect(archive).to_have_value('学号_姓名.zip')
+            pw.expect(archive).to_be_focused()
+            archive.fill('123_张同学.zip')
+            recognize()
+            pw.expect(mode).to_have_value('zip')
+            pw.expect(archive).to_have_value('123_张同学.zip')
+
+            archive.fill('')
+            page.locator('[name="attachments"]').set_input_files(
+                {'name': 'answer.pdf', 'mimeType': 'application/pdf', 'buffer': b'answer'})
+            recognize()
+            pw.expect(mode).to_have_value('zip')
+            pw.expect(page.locator('[data-assignment-attachments]')).to_contain_text('answer.pdf')
+            page.locator('[name="attachments"]').set_input_files([])
+            mode.select_option('single_file')
+            analysis['file_formats'].append({'value': 'ZIP', 'quote': '或打包 ZIP'})
+            recognize()
+            pw.expect(mode).to_have_value('zip')
+
+            for quote, expected in [
+                ('文件名为学号姓名.zip', '学号姓名.zip'),
+                ('“学号_姓名_第1次作业”。', '学号_姓名_第1次作业.zip'),
+                ('命名为「学号_姓名.ZIP」。', '学号_姓名.ZIP'),
+                ('文件名为“学号_<姓名>.zip”。', '学号_<姓名>.zip'),
+            ]:
+                analysis['filename_rules'] = [{'quote': ''}, {'quote': quote}]
+                recognize()
+                pw.expect(apply_rule).to_have_attribute('data-filename-template', expected)
+                pw.expect(page.locator('[data-assignment-requirements] li').last).to_have_text(quote)
+                apply_rule.click()
+                pw.expect(archive).to_have_value(expected)
+                pw.expect(archive).to_be_focused()
+                archive.fill('')
+
+            analysis['file_formats'] = []
+            analysis['filename_rules'] = []
+            mode.select_option('single_file')
+            recognize()
+            pw.expect(mode).to_have_value('single_file')
+            mode.select_option('zip')
+            pw.expect(apply_rule).to_have_count(0)
+            assert len(calls) == 9
+            assert errors == []
+        finally:
+            browser.close()
+
+
 def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
     pw = pytest.importorskip('playwright.sync_api')
     from browser_support import EDGE, browser_launch_options
@@ -306,13 +1003,18 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
     }
 
     def decorate_course(body):
-        body['summary'] = {'url': 'https://www.notion.so/course-summary'}
+        body['title'] = 'Networks/CS:101 (CS101)'
+        body['summary'] = {'title': 'Networks 课程总结', 'url': 'https://www.notion.so/course-summary'}
         body['unassigned_materials'].append({'index': 99, 'title': '课程基本信息',
                                              'category': 'information', 'files': [],
                                              'body_text': '安全设计 <基础> 与课程考核说明'})
         body['assignments'] = [
             {'title': '正文截止作业', 'instructions': '10月22日23：30 前提交'},
-            {'title': '日历测试', 'source': 'calendar', 'instructions': ''}]
+            {'title': '日历测试', 'source': 'calendar', 'instructions': '',
+             'due_at': (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat()},
+            *[{'title': title, 'due_at': (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()}
+              for title, hours in [('今天截止作业', 12), ('两天后截止作业', 48), ('远期作业', 96), ('过期作业', -1)]],
+            {'title': '无效日期作业', 'due_at': 'invalid'}]
         return body
 
     def serve(route):
@@ -392,8 +1094,8 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             pw.expect(page.locator('.lesson-topic-line')).to_have_text('TCP 可靠传输')
             assert '核心主业' not in page.content()
             assert '扩展工具：' not in page.content()
-            page.locator('[data-action="campus-open-summary"]').click()
-            pw.expect(page.locator('#toast')).to_contain_text(PANEL_COPY['launch']['opened_external'])
+            pw.expect(page.locator('[data-action="campus-open-summary"]')).to_have_count(0)
+            assert 'https://www.notion.so/course-summary' not in page.content()
             pw.expect(page.locator('.course-summary-spotlight')).to_be_visible()
             with page.expect_response(lambda response: response.url.endswith('/healthy/summary')):
                 page.locator('[data-action="campus-course-summary"]').click()
@@ -410,6 +1112,15 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             assert page.locator('[data-action="campus-copy-markdown"]').is_visible()
             page.locator('[data-action="campus-copy-markdown"]').click()
             assert 'TCP' in page.evaluate('window.copiedStudyText')
+            download_button = page.locator('.reader-toolbar [data-action="campus-download-markdown"]')
+            pw.expect(download_button).to_be_visible()
+            pw.expect(download_button).to_have_text('下载 .md')
+            with page.expect_download() as download_event:
+                download_button.click()
+            summary_download = download_event.value
+            assert summary_download.suggested_filename == 'Networks-CS-101-课程总结.md'
+            assert Path(summary_download.path()).read_text('utf8') == page.evaluate('window.copiedStudyText')
+            pw.expect(page.locator('#toast')).to_have_text('已下载 Markdown 文件')
             assert page.locator('.campus-centers').bounding_box()['height'] < 65
             page.screenshot(path=str(tmp_path / 'summary-workbench.png'), full_page=True)
             page.locator('[data-action="campus-toggle-preview"]').click()
@@ -424,6 +1135,14 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             assert boxes[1]['x'] > boxes[0]['x']
             page.locator('[data-action="campus-copy-markdown"]').click()
             assert page.evaluate('window.copiedStudyText') == (job.directory / 'notes.md').read_text('utf8')
+            pw.expect(download_button).to_be_visible()
+            with page.expect_download() as download_event:
+                download_button.click()
+            note_download = download_event.value
+            lesson_title = client.get('/api/campus/courses/healthy').json()['lessons'][0]['title']
+            assert note_download.suggested_filename == f'Networks-CS-101-{lesson_title}.md'
+            assert Path(note_download.path()).read_bytes() == page.evaluate('window.copiedStudyText').encode('utf8')
+            pw.expect(page.locator('#toast')).to_have_text('已下载 Markdown 文件')
             page.set_viewport_size({'width': 390, 'height': 900})
             images.last.scroll_into_view_if_needed()
             assert images.last.bounding_box()['y'] > images.first.bounding_box()['y']
@@ -447,14 +1166,32 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             page.locator('[data-action="campus-copy-markdown"]').click()
             pw.expect(page.locator('#toast')).to_contain_text('已复制笔记 Markdown，可直接粘贴或发送给 AI')
             # HTML in generated notes remains literal text.
-            (job.directory / 'notes.md').write_text('# TCP\n<script>window.noteXss = true</script>\n![标准图片](/api/campus/courses/healthy/recordings/' + recordings_api.recording_id(job) + '/frames/frame.jpg)\n![恶意图片](javascript:alert(1))\n```\n![代码图片](/do-not-load.jpg)\n```', 'utf8')
+            (job.directory / 'notes.md').write_text(
+                '# TCP\n<script>window.noteXss = true</script>\n'
+                '- 拥塞控制\n  - 慢开始与拥塞避免\n'
+                '吞吐率公式 $\\alpha + \\beta \\leq \\frac{W}{RTT}$：\n'
+                '$$CWND_{n+1} = CWND_n + \\frac{1}{CWND_n}$$\n'
+                '| 阶段 | 窗口变化 |\n| --- | --- |\n| 慢开始 | 指数增长 |\n'
+                '![标准图片](/api/campus/courses/healthy/recordings/' + recordings_api.recording_id(job) + '/frames/frame.jpg)\n'
+                '![恶意图片](javascript:alert(1))\n```\n![代码图片](/do-not-load.jpg)\n```',
+                'utf8',
+            )
             page.locator('[data-action="campus-toggle-preview"]').click()
             page.locator('[data-action="campus-preview-lecture-note"]').click()
             pw.expect(page.locator('.study-markdown')).to_contain_text('<script>')
             assert page.evaluate('window.noteXss === undefined')
+            pw.expect(page.locator('.study-markdown .study-subitem')).to_contain_text('慢开始与拥塞避免')
+            pw.expect(page.locator('.study-markdown .math-inline .math-frac')).to_have_count(1)
+            pw.expect(page.locator('.study-markdown .math-block .math-frac')).to_have_count(1)
+            pw.expect(page.locator('.study-markdown .study-table th').first).to_have_text('阶段')
+            pw.expect(page.locator('.study-markdown .study-table td').nth(1)).to_have_text('指数增长')
             pw.expect(page.locator('.study-markdown .note-visual-card img')).to_have_count(1)
             pw.expect(page.locator('.study-markdown img')).to_have_attribute('alt', '标准图片')
             assert 'javascript:' not in page.locator('.study-markdown img').get_attribute('src')
+            page.locator('.study-markdown .note-visual-card img').click()
+            pw.expect(page.locator('dialog.note-lightbox[open]')).to_be_visible()
+            page.locator('dialog.note-lightbox').click()
+            pw.expect(page.locator('dialog.note-lightbox[open]')).to_have_count(0)
             page.locator('[data-action="campus-course-home"]').click()
             page.locator('[data-center="materials"]').click()
             pw.expect(page.locator('[data-materials-info]')).to_contain_text('课程基本信息')
@@ -464,9 +1201,16 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             pw.expect(page.locator('.materials-summary-panel .course-summary-control')).to_be_visible()
             pw.expect(page.locator('.materials-summary-copy')).to_contain_text('汇总已关联课件、课堂笔记与作业要求')
             page.locator('[data-action="campus-course-home"]').click()
+            assignment_center = page.locator('.campus-centers [data-center="assignments"]')
+            pw.expect(assignment_center.locator('.center-count')).to_have_text('7 项记录 · 2 项即将截止')
+            pw.expect(assignment_center).to_have_attribute('data-urgent-assignments', '2')
             page.locator('[data-center="assignments"]').click()
             pw.expect(page.locator('#course-assignments')).to_contain_text('截止：10月22日23：30 前提交（正文提及）')
             pw.expect(page.locator('#course-assignments .status-badge.focus')).to_have_count(0)
+            pw.expect(page.locator('[data-deadline-urgency="today"]')).to_have_text('今天截止')
+            pw.expect(page.locator('[data-deadline-urgency="soon"]')).to_have_text('即将截止')
+            for title in ('正文截止作业', '日历测试', '远期作业', '过期作业', '无效日期作业'):
+                pw.expect(page.locator('#course-assignments li').filter(has_text=title).locator('[data-deadline-urgency]')).to_have_count(0)
             calendar = page.locator('#course-assignments li').filter(has_text='日历测试')
             pw.expect(calendar).to_contain_text('来自教学网日历提醒，尚未关联到正式作业')
             assert '尚无可验证的提交目标' not in calendar.inner_text()

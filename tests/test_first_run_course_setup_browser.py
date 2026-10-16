@@ -11,7 +11,7 @@ playwright = pytest.importorskip('playwright.sync_api')
 
 @pytest.mark.parametrize('width', [390, 1280])
 @pytest.mark.parametrize('failed_catalog', ['empty', 'read_only'])
-def test_empty_account_can_sync_retry_then_create_home_from_welcome(width, failed_catalog, tmp_path):
+def test_empty_account_can_sync_retry_and_use_local_courses_from_welcome(width, failed_catalog, tmp_path):
     configured, synced, home = False, False, None
     sync_attempts, writes = 0, []
     course = {'id': '_fixture_1', 'title': '测试课程', 'recordings': 0,
@@ -80,20 +80,18 @@ def test_empty_account_can_sync_retry_then_create_home_from_welcome(width, faile
             sync = page.locator('.campus-setup [data-action="recording-sync"]')
             playwright.expect(sync).to_be_enabled()
             create = page.locator('[data-action="campus-create-workspace"]')
-            playwright.expect(create).to_be_disabled()
+            assert create.count() == 0
             sync.click()
             playwright.expect(page.locator('[data-background-sync]')).to_contain_text('教学网暂时无法读取')
             playwright.expect(sync).to_be_enabled()
-            playwright.expect(create).to_be_disabled()
+            assert create.count() == 0
             assert configured and writes == ['/api/recordings/credentials', '/api/recordings/sync']
             page.screenshot(path=str(tmp_path / f'failed-sync-{width}.png'), full_page=True)
             sync.click()
-            playwright.expect(page.locator('.campus-setup')).to_contain_text('下一步：Notion 学习主页')
-            playwright.expect(create).to_be_enabled()
-            create.click()
-            playwright.expect(page.locator('.home-ready-badge')).to_be_visible()
-            assert writes == ['/api/recordings/credentials', '/api/recordings/sync',
-                              '/api/recordings/sync', '/api/campus/notion/workspace']
+            playwright.expect(page.locator('.campus-setup')).to_contain_text('已就绪')
+            assert create.count() == 0
+            assert 'Notion' not in page.locator('body').inner_text()
+            assert writes == ['/api/recordings/credentials', '/api/recordings/sync', '/api/recordings/sync']
             assert page.locator('#auth-form').count() == 0
             page.screenshot(path=str(tmp_path / f'home-ready-{width}.png'), full_page=True)
             page.reload()

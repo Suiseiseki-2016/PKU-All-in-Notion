@@ -443,6 +443,23 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .section-label h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
 .section-label p { margin: 0; color: var(--muted); font-size: 12px; }
+.lesson-filter-input {
+  flex: 0 1 230px;
+  width: 230px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.lesson-filter-input::placeholder { color: var(--muted); }
+.lesson-filter-input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
 
 .course-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
@@ -513,6 +530,7 @@ h1, h2, h3, p { margin-top: 0; }
   border: 0;
   font-weight: 750;
 }
+.breadcrumb-pager { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
 .panel {
   padding: 21px;
   background: var(--paper);
@@ -624,6 +642,7 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .status-badge.reading { color: var(--muted); background: #f1f4f2; }
 .status-badge.indexed { color: var(--green); background: #edf7ef; }
+.status-badge.urgent { background: #fef3c7; color: #92400e; border: 1px solid rgba(146, 64, 14, 0.2); }
 .status-badge.focus { color: #8a6937; background: var(--gold-pale); }
 .status-badge.pending { color: var(--blue); background: var(--blue-pale); }
 .materials-hint { margin: 12px 0 0; color: #84938c; font-size: 11px; line-height: 1.65; }
@@ -1006,7 +1025,31 @@ h1, h2, h3, p { margin-top: 0; }
 .campus-centers .center-count, .campus-centers .center-arrow { position: static; margin: 0; font-size: 11px; color: var(--muted); }
 .lecture-note-reader { flex: 0 0 100%; width: 100%; min-width: 0; margin-top: 20px; padding: 20px clamp(16px, 4vw, 48px); background: #fffefa; border: 1px solid #e6e5db; border-radius: 12px; }
 .reader-toolbar { justify-content: flex-end; padding-bottom: 12px; border-bottom: 1px solid #eeece4; }
+.reader-search-input {
+  flex: 0 1 180px;
+  width: 180px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+.reader-search-input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.reader-search-count { color: var(--muted); font-size: 12px; }
+mark.study-search-hit { background: #fef08a; color: inherit; padding: 0 2px; border-radius: 3px; }
+.study-markdown mark.study-search-hit-active { background: #facc15; outline: 2px solid #ca8a04; }
 .study-markdown { max-width: 760px; margin: 24px auto; color: #29332e; line-height: 1.9; font-size: 15px; overflow-wrap: anywhere; }
+.note-outline { display: flex; flex-wrap: wrap; gap: 6px; max-width: 100%; margin-bottom: 20px; }
+.note-outline-footer { display: flex; justify-content: flex-end; margin-top: 24px; padding-top: 12px; border-top: 1px solid #eeece4; }
+.note-outline-link { min-width: 0; max-width: 100%; padding: 5px 11px; border: 1px solid #dce5dc; border-radius: 999px; background: #f3f7f2; color: var(--green-deep); font: inherit; font-size: 12px; line-height: 1.5; text-align: left; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
+.note-outline-link:hover { background: #eaf2e9; }
+.note-outline-link:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .study-markdown h2, .study-markdown h3, .study-markdown h4 { color: #203e30; line-height: 1.5; margin: 1.5em 0 .6em; }
 .study-markdown h2 { font-size: 23px; border-bottom: 1px solid #e3e8df; padding-bottom: 10px; }
 .study-markdown h3 { font-size: 19px; }
@@ -1014,6 +1057,13 @@ h1, h2, h3, p { margin-top: 0; }
 .study-markdown li { margin: .4em 0 .4em 1.4em; }
 .study-markdown blockquote, .mcp-hub blockquote { margin: 18px 0; padding: 12px 18px; border-left: 3px solid #aac5b3; background: #f3f7f2; line-height: 1.8; }
 .study-markdown pre, .mcp-hub pre { max-width: 100%; overflow: auto; padding: 18px; background: #f1f4f1; border: 1px solid #dde5dd; border-radius: 10px; font-size: 12px; line-height: 1.7; }
+.study-code-wrap { position: relative; }
+.study-code-copy { position: absolute; top: 8px; right: 8px; padding: 4px 8px; border: 1px solid #dde5dd; border-radius: 6px; background: #fff; color: var(--muted); font: inherit; font-size: 11px; line-height: 1.5; cursor: pointer; opacity: 0; }
+.study-code-wrap:hover .study-code-copy, .study-code-copy:focus-visible { opacity: 1; }
+.study-code-copy:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+@media (hover: none) {
+  .study-code-copy { opacity: 1; }
+}
 .mcp-hub { max-width: 980px; }
 .mcp-hub pre { white-space: pre-wrap; word-break: break-all; }
 .mcp-hub h1 { font-size: clamp(24px, 4vw, 34px); }
@@ -1025,6 +1075,7 @@ h1, h2, h3, p { margin-top: 0; }
   .campus-centers { gap: 6px; }
   .campus-centers .extensions-label { flex-basis: 100%; }
   .lecture-note-reader { flex-basis: auto; padding: 14px; }
+  .reader-search-input { margin-left: 0; }
 }
 .product-confirmation h2 { margin-top: 0; font-size: 20px; }
 .product-confirmation p { white-space: pre-wrap; line-height: 1.65; }
@@ -1036,11 +1087,13 @@ h1, h2, h3, p { margin-top: 0; }
 .materials-summary-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; flex-wrap: wrap; }
 .materials-summary-copy { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .materials-summary-copy span { color: var(--muted); font-size: 13px; }
+.materials-filter-bar { margin: 18px 0 13px; }
 .sidebar-status .status-line[data-block="updater"],
 .sidebar .account-card[data-block="update"] {
   border: 0; background: transparent; padding: 2px 6px; font-size: 11px;
   color: var(--muted); opacity: 0.78;
 }
+section[data-materials-linked] > ul,
 section[data-materials-info] > ul,
 section[data-materials-unassigned] > ul {
   list-style: none;
@@ -1073,6 +1126,7 @@ section[data-materials-unassigned] > ul {
   height: auto;
   display: block;
   border-bottom: 1px solid #e6ede6;
+  cursor: zoom-in;
 }
 .note-visual-card figcaption {
   font-size: 12px;
@@ -1092,3 +1146,97 @@ section[data-materials-unassigned] > ul {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.study-markdown li.study-subitem {
+  margin-left: 2.8em;
+  list-style-type: circle;
+}
+.study-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 16px 0;
+  border: 1px solid #dce5dc;
+  border-radius: 10px;
+  background: #fff;
+}
+.study-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.study-table th,
+.study-table td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid #e8eee8;
+  vertical-align: top;
+}
+.study-table th {
+  background: #f3f7f2;
+  color: var(--green-deep);
+  font-weight: 700;
+}
+.study-table tr:last-child td {
+  border-bottom: 0;
+}
+.math-inline {
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+  padding: 0 2px;
+  color: #1d362d;
+}
+.math-block {
+  font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+  font-size: 16px;
+  text-align: center;
+  margin: 14px 0;
+  padding: 12px 16px;
+  background: #f7faf6;
+  border: 1px solid #e2ebe2;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.math-frac {
+  display: inline-grid;
+  vertical-align: middle;
+  text-align: center;
+  font-size: .9em;
+  padding: 0 2px;
+}
+.math-num {
+  border-bottom: 1px solid currentColor;
+  padding: 0 2px;
+  line-height: 1.15;
+}
+.math-den {
+  padding: 0 2px;
+  line-height: 1.15;
+}
+.note-lightbox {
+  max-width: min(94vw, 1280px);
+  max-height: 92vh;
+  padding: 14px;
+  border: 1px solid #dce5dc;
+  border-radius: 14px;
+  background: #fffefa;
+  box-shadow: var(--shadow);
+  cursor: zoom-out;
+}
+.note-lightbox::backdrop {
+  background: rgba(20, 32, 28, .65);
+}
+.note-lightbox img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 68px);
+  width: auto;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 8px;
+}
+.note-lightbox p {
+  margin: 10px 0 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+

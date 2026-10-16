@@ -223,9 +223,8 @@ def test_disk_full_after_merge_restores_exact_output_without_new_model_call(tmp_
 
 
 @pytest.mark.parametrize('bad', [
-    {'units':[{'title':'漏首段', 'first_segment':1, 'reference_segments':[], 'courseware_indices':[]}]},
     {'units':[{'title':'布尔编号', 'first_segment':False, 'reference_segments':[], 'courseware_indices':[]}]},
-    {'units':[{'title':'越界', 'first_segment':0, 'reference_segments':[3], 'courseware_indices':[]}]},
+    {'units':[{'title':'越界', 'first_segment':3, 'reference_segments':[], 'courseware_indices':[]}]},
     {'units':[{'title':'重复', 'first_segment':0, 'reference_segments':[], 'courseware_indices':[]},
               {'title':'重叠','first_segment':0,'reference_segments':[], 'courseware_indices':[]}]}])
 def test_invalid_plan_has_one_durable_repair_before_any_unit_work(tmp_path, bad):
@@ -243,6 +242,75 @@ def test_invalid_plan_has_one_durable_repair_before_any_unit_work(tmp_path, bad)
     assert notes.record_issues(target, lecture()) == []
     notes.write_notes(lecture(), target, config(), '课程', ask=lambda *a:pytest.fail('rebilled'),
         merge_ask=lambda *a:pytest.fail('rebilled'))
+
+
+def test_plan_repair_with_leading_podium_segments_anchors_first_unit_to_zero_and_reuses_paid_cache(tmp_path):
+    original = {'segments': [
+        {'start': 65.96, 'end': 75.86, 'text': '欢迎使用多媒体教学系统，请开启讲台设备。'},
+        {'start': 71.77, 'end': 75.87, 'text': '讲台设备已准备就绪。'},
+        {'start': 310.12, 'end': 321.74, 'text': '下面继续讲解可靠数据传输协议 RDT3.0。'}]}
+    raw = json.dumps({'units': [{'title': 'RDT3.0 可靠数据传输协议', 'first_segment': 2,
+        'reference_segments': [], 'courseware_indices': []}]}, ensure_ascii=False)
+    target, cfg, calls = tmp_path / 'notes.md', config(), []
+    cache = tmp_path / '.notes-parts' / notes.POLICY
+    identity = notes.fingerprint({'campus_account': cfg.pku_username,
+                                  'operation': cfg._metered_operation_context})
+    payload = notes._plan_input('课程', original['segments'], [], identity)
+
+    def paid_plan(system, prompt):
+        calls.append(system)
+        assert system in {notes.PLAN_SYSTEM, notes.REPAIR_SYSTEM}
+        return raw
+
+    # Reproduce the old failure and leave both already-paid responses on disk.
+    with pytest.raises(RuntimeError, match='未能恢复'):
+        notes._structured(cache, 'plan', payload, cfg.notes_model, identity,
+            cfg._metered_operation_context, paid_plan,
+            lambda response: notes._units(response, len(original['segments']), 0))
+    assert calls == [notes.PLAN_SYSTEM, notes.REPAIR_SYSTEM]
+    paid = {path: path.read_bytes() for path in cache.glob('*.json')}
+    assert len(paid) == 2
+
+    def ask(system, prompt):
+        calls.append(system)
+        assert system == notes.UNIT_SYSTEM
+        unit = json.loads(prompt)
+        assert unit['unit'] == 0
+        assert unit['original_transcript'] == original['segments']
+        return 'RDT3.0 的完整课堂讲解。'
+
+    def combine(system, prompt):
+        calls.append(system)
+        assert system == notes.MERGE_SYSTEM
+        unit = json.loads(prompt)['unit_drafts'][0]
+        assert (unit['first_segment'], unit['last_segment']) == (0, 2)
+        assert unit['original_transcript'] == original['segments']
+        return merge(total=1)
+
+    assert notes.write_notes(original, target, cfg, '课程', ask=ask, merge_ask=combine,
+                             assembly='model-merge') == target
+    assert calls == [notes.PLAN_SYSTEM, notes.REPAIR_SYSTEM, notes.UNIT_SYSTEM, notes.MERGE_SYSTEM]
+    assert all(path.read_bytes() == content for path, content in paid.items())
+    report = json.loads(report_path(target).read_text('utf-8'))
+    primary, units = notes._resolved(cache, report['plan_request'], report['plan_response'], 'plan',
+        lambda response: notes._units(response, 3, 0, allow_leading_gap=True),
+        repair_validate=lambda response: notes._units(response, 3, 0, allow_leading_gap=True))
+    assert primary['response'] == raw
+    assert report['plan_request'] == report['plan_response']
+    assert units[0]['first_segment'] == 0 and units[0]['last_segment'] == 2
+    assert notes.record_issues(target, original) == []
+    body = target.read_bytes()
+    saved = {path: path.read_bytes() for path in tmp_path.rglob('*.json')}
+    target.unlink()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('already-paid knowledge notes were submitted again')
+
+    assert notes.write_notes(original, target, cfg, '课程', ask=forbidden, merge_ask=forbidden,
+                             assembly='model-merge') == target
+    assert target.read_bytes() == body
+    assert all(path.read_bytes() == content for path, content in saved.items())
+    assert notes.record_issues(target, original) == []
 
 
 def test_failed_merge_format_repair_never_rebills_primary_response(tmp_path):
@@ -308,7 +376,7 @@ def test_provenance_changes_cannot_claim_paid_result_integrity(tmp_path, change)
 
 
 def test_impossible_complete_source_merge_refuses_before_first_charge(tmp_path):
-    original={'segments':[{'start':0,'end':1200,'text':'原讲述'*12000}]}
+    original={'segments':[{'start':0,'end':1200,'text':'原讲述'*30000}]}
     with pytest.raises(RuntimeError,match='超过模型或传输容量'):
         notes.write_notes(original, tmp_path/'notes.md', config(), '课程',
             ask=lambda *a:pytest.fail('oversized billed'), merge_ask=lambda *a:pytest.fail('oversized billed'),
@@ -480,21 +548,109 @@ def test_starts_define_complete_inclusive_ranges_without_model_end_arithmetic():
 @pytest.mark.parametrize('field,values',[
     ('reference_segments',[True]),('reference_segments',[3]),('reference_segments',[0]),
     ('reference_segments','1'),('courseware_indices',[False]),('courseware_indices',[1]),
-    ('courseware_indices',[0,0])])
-def test_invalid_lookup_metadata_fails_before_editing_and_never_repeats_paid_repair(tmp_path,field,values):
+    ('courseware_indices',[0,0]),('reference_segments',None),('courseware_indices',None),
+    ('reference_segments',[{},[],True,-1,3,0]),('courseware_indices',[{},[],False,-1,1])])
+def test_lookup_metadata_is_healed_without_repeating_paid_work(tmp_path,field,values):
     row={'title':'完整知识点','first_segment':0,'reference_segments':[],'courseware_indices':[]}
     row[field]=values
     calls=[]
     def ask(system,prompt):
         calls.append(system)
-        assert system in {notes.PLAN_SYSTEM,notes.REPAIR_SYSTEM}
-        return json.dumps({'units':[row]})
-    for _ in range(2):
-        with pytest.raises(RuntimeError,match='未能恢复'):
-            notes.write_notes(lecture(),tmp_path/'notes.md',config(),'课程',ask=ask,
-                merge_ask=lambda *a:pytest.fail('invalid source indices reached merge'),
-                source_context=[{'text':'原课件'}])
-    assert calls==[notes.PLAN_SYSTEM,notes.REPAIR_SYSTEM]
+        if system == notes.PLAN_SYSTEM:
+            return json.dumps({'units':[row]})
+        if system == notes.REPAIR_SYSTEM:
+            return plan(total=1)
+        payload=json.loads(prompt)
+        assert payload['original_transcript']==lecture()['segments']
+        assert payload['reference_context']==[]
+        assert len(payload['courseware'])==(1 if values==[0,0] else 0)
+        return '完整知识点正文。'
+    target=tmp_path/'notes.md'
+    notes.write_notes(lecture(),target,config(),'课程',ask=ask,source_context=[{'text':'原课件'}])
+    expected=[notes.PLAN_SYSTEM]+([notes.REPAIR_SYSTEM] if isinstance(values,str) else [])+[notes.UNIT_SYSTEM]
+    assert calls==expected
+    assert notes.record_issues(target,lecture(),[{'text':'原课件'}])==[]
+    target.unlink()
+    notes.write_notes(lecture(),target,config(),'课程',ask=lambda *a:pytest.fail('rebilled'),
+                      source_context=[{'text':'原课件'}])
+    assert calls==expected
+
+
+def test_primary_plan_sanitizes_titles_anchors_start_and_preserves_lookup_order():
+    raw=json.dumps({'units':[
+        {'title':'  引入\r\n说明  ','first_segment':1,
+         'reference_segments':[4,4,3,0,True,-1,5,'2'], 'courseware_indices':[2,0,2,False,3]},
+        {'title':'后续','first_segment':3,'reference_segments':None,'courseware_indices':None}]})
+    units=notes._units(raw,5,3,allow_leading_gap=True)
+    assert units==[
+        {'title':'引入  说明','first_segment':0,'last_segment':2,
+         'reference_segments':[4,3],'courseware_indices':[2,0]},
+        {'title':'后续','first_segment':3,'last_segment':4,
+         'reference_segments':[],'courseware_indices':[]}]
+
+
+@pytest.mark.parametrize('window,expected', [(480,[(0,2),(3,4),(5,5)]),(200,[(0,1),(2,3),(4,4),(5,5)])])
+def test_fallback_units_cover_every_source_in_elapsed_time_windows(window,expected):
+    original=[{'start':t,'end':t+20,'text':str(i)} for i,t in enumerate([65,100,350,545,550,1100])]
+    units=notes._fallback_units(original,window)
+    assert [(u['first_segment'],u['last_segment']) for u in units]==expected
+    assert [u['title'] for u in units]==[f'课堂讲述（第 {i+1} 部分）' for i in range(len(units))]
+    assert all(u['reference_segments']==u['courseware_indices']==[] for u in units)
+    assert notes._fallback_units([])==[]
+
+
+@pytest.mark.parametrize('raw,repair', [('not-json','still not-json'),('', ''),
+    (json.dumps({'units':[{'title':'错误编号','first_segment':True}]}),'{}')])
+def test_failed_plan_and_repair_fall_back_and_restore_without_rebilling(tmp_path,monkeypatch,raw,repair):
+    target=tmp_path/'notes.md'
+    original={'segments':[{'start':i*200,'end':i*200+100,'text':f'原讲述{i}'} for i in range(5)]}
+    calls=[]
+    def ask(system,prompt):
+        calls.append(system)
+        if system==notes.PLAN_SYSTEM:return raw
+        if system==notes.REPAIR_SYSTEM:return repair
+        assert system==notes.UNIT_SYSTEM
+        payload=json.loads(prompt)
+        assert payload['original_transcript']==original['segments'][payload['unit']:payload['unit']+1]
+        return f"已整理原讲述{payload['unit']}"
+    replace=Path.replace
+    def fail(path,dest):
+        if dest==target:raise OSError('disk full after fallback')
+        return replace(path,dest)
+    monkeypatch.setattr(Path,'replace',fail)
+    with pytest.raises(OSError,match='disk full'):
+        notes.write_notes(original,target,config(),'课程',ask=ask,window_seconds=200,workers=1)
+    assert calls==[notes.PLAN_SYSTEM,notes.REPAIR_SYSTEM]+[notes.UNIT_SYSTEM]*5
+    paid={p:p.read_bytes() for p in tmp_path.rglob('*.json')}
+    monkeypatch.setattr(Path,'replace',replace)
+    notes.write_notes(original,target,config(),'课程',ask=lambda *a:pytest.fail('rebilled fallback'),window_seconds=480)
+    assert notes.record_issues(target,original)==[]
+    assert all(p.read_bytes()==content for p,content in paid.items())
+    report=json.loads(report_path(target).read_text('utf-8'))
+    assert report['plan_window_seconds']==200
+    cache=tmp_path/'.notes-parts'/notes.POLICY
+    assert json.loads((cache/(report['plan_request']+'.json')).read_text('utf-8'))['response']==raw
+    assert json.loads((cache/(report['plan_response']+'.json')).read_text('utf-8'))['response']==repair
+    damaged=cache/(report['plan_response']+'.json')
+    damaged.unlink()
+    assert notes.record_issues(target,original)
+
+
+@pytest.mark.parametrize('model',['qwen3.7-plus','qwen3.8-max','qwen3.8-max-0902'])
+def test_full_lecture_plus_and_max_plan_and_merge_accept_more_than_30000_characters(tmp_path,model):
+    original={'segments':[{'start':0,'end':1200,'text':'原讲述'*12000}]}
+    cfg=config();cfg.notes_model=model
+    calls=[]
+    def ask(system,prompt):
+        calls.append(system)
+        assert len(prompt)>30000
+        if system==notes.PLAN_SYSTEM:return plan(total=1)
+        if system==notes.MERGE_SYSTEM:return merge(total=1)
+        return '完整正文。'
+    target=tmp_path/'notes.md'
+    notes.write_notes(original,target,cfg,'课程',ask=ask,merge_ask=ask,assembly='model-merge')
+    assert calls==[notes.PLAN_SYSTEM,notes.UNIT_SYSTEM,notes.MERGE_SYSTEM]
+    assert notes.record_issues(target,original)==[]
 
 
 def test_paid_plan_with_more_original_lookups_resumes_without_rebilling_or_dropping_sources(tmp_path):

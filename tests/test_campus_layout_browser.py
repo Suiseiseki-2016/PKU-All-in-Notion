@@ -110,6 +110,9 @@ def test_portal_first_layout_and_account_settings():
                 'label':'教学网显示提交历史，请核对具体尝试与成绩','checked_at':'2026-10-04T08:00:00Z'}),
                 content_type='application/json')
             return
+        if route.request.url.endswith('/recordings/sep29/note-preview'):
+            route.fulfill(json={'markdown': '## 第五讲总结\n课堂重点', 'visuals': []})
+            return
         if route.request.url.endswith('/quizzes/quiz-page/grade'):
             graded.append(json.loads(route.request.post_data))
             route.fulfill(body=json.dumps({'status': 'completed', 'score': 70, 'points_charged': 2}), content_type='application/json')
@@ -195,9 +198,8 @@ def test_portal_first_layout_and_account_settings():
                 s.view = 'campus-course'; s.campus.courseId = 'official-course';
                 s.campus.course = {id:'official-course', title:'发展心理学', code:'PSY',
                     lessons:[{id:'sep29',title:'第五讲',date:'2026-09-29',materials:[{index:0,title:'第五讲课件',files:['第五讲.pdf'],category:'material'}],
-                        notes_available:true,
                         notion_note_url:'https://www.notion.so/accepted-note',
-                        notion_lecture_url:'https://www.notion.so/lecture',video_available:true}],
+                        notion_lecture_url:'https://www.notion.so/lecture',video_available:true,notes_available:true}],
                     unassigned_materials:[],all_materials:[],assignments:[{source:'calendar',
                         source_id:'calendar:one',title:'待核对日历事项',due_at_label:'2026-10-05 20:00 北京时间'}],
                     announcements:[],announcement_tasks:[],summary:{}};
@@ -208,7 +210,8 @@ def test_portal_first_layout_and_account_settings():
             assert page.locator(".campus-centers").evaluate(
                 "el => !!(el.compareDocumentPosition(document.querySelector('#course-lessons')) & Node.DOCUMENT_POSITION_FOLLOWING)")
             page.locator('[data-action="campus-open-lesson"][data-recording="sep29"]').click()
-            assert page.get_by_role("button", name="阅读本讲总结").is_visible()
+            playwright.expect(page.get_by_role("button", name="收起本讲总结")).to_be_visible()
+            playwright.expect(page.locator('.study-markdown')).to_contain_text('第五讲总结')
             assert page.get_by_role("link", name="下载原始录像").get_attribute("href") == "/api/recordings/sep29/video"
             assert page.locator('.recording-row .course-meta').first.inner_text() == '第 1 节课'
             page.locator('[data-action="campus-course-home"]').click()
@@ -274,7 +277,8 @@ UI_GUIDANCE_CASES = [
     ('saved-transcript', {'transcript_available': True}, False, False),
     ('regenerate', {'transcript_available': True, 'notes_available': True,
         'notion_lecture_url': 'https://www.notion.so/local-fixture'}, True, False),
-    ('publish', {'transcript_available': True, 'notes_available': False,
+    # Publishing saved notes is the fallback when no reusable transcript remains.
+    ('publish', {'transcript_available': False, 'notes_available': True,
         'publish_ready': True, 'video_available': False}, False, False),
     ('regenerate-no-video', {'transcript_available': True, 'notes_available': True,
         'publish_ready': True, 'video_available': False,

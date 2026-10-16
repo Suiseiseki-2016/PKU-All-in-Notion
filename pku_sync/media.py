@@ -813,7 +813,7 @@ def write_notes(
         if selected_policy(target) == LEGACY_POLICY:
             requested_models.append(merged_settings.notes_model)
         if getattr(settings, "platform_token", "") and any(model not in (
-                None, "", "qwen/qwen3.5-397b-a17b", "qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902")
+                None, "", "qwen/qwen3.5-397b-a17b", "qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-max")
                 for model in requested_models):
             raise ValueError("当前云端尚未支持选择的笔记模型，任务未提交，原稿保留。")
 

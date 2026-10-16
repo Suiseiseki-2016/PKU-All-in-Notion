@@ -128,6 +128,13 @@ def test_student_ui_never_carries_content_paths_or_tokens():
                 # directory: assert that is the only occurrence instead
                 assert text.count("keyframes") == text.count("@keyframes")
                 continue
+            if name == "js" and needle == "keyframes":
+                # Public availability and matching controls contain this word;
+                # neither exposes a recording directory or an artifact path.
+                public_names_removed = text.replace('keyframes_available', '').replace(
+                    'campus-match-slides-keyframes', '')
+                assert needle not in public_names_removed
+                continue
             assert needle not in text, (name, needle)
         assert "NOTION_TOKEN" not in text
         assert "PLATFORM_TOKEN" not in text

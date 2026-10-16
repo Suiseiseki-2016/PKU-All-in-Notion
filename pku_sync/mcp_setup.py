@@ -27,7 +27,8 @@ def host_integration_catalog(python: str | None = None, data_dir: Path | None = 
     """Portable stdio setup snippets; no host installation or config mutation."""
     py = _posix_path(python or sys.executable)
     launcher = LAUNCHER.as_posix()
-    root = (data_dir or Path('data')).expanduser().resolve().as_posix()
+    target = (data_dir or Path('data')).expanduser()
+    root = (target if target.is_absolute() else target.resolve()).as_posix()
     env = {'DATA_DIR': root}
     server = {'command': py, 'args': [launcher], 'env': env}
     standard = json.dumps({'mcpServers': {LOCAL_SERVER_NAME: server}}, ensure_ascii=False, indent=2)

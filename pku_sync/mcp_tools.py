@@ -2,13 +2,14 @@
 
 The server deliberately does not expose arbitrary filesystem access or invoke
 the expensive sync/transcription pipeline. The system scheduler runs those
-deterministic stages first; an MCP-capable agent then reads the resulting
-course tree here and writes Notion through Notion's official MCP server.
+deterministic stages first; MCP-capable agents then read the resulting local
+course tree here.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -157,8 +158,17 @@ class LocalCourseTools:
                                  'title': title, 'date': day, 'notes_markdown': markdown})
         return rows
 
+    def get_course_assignments(self, course_folder: str) -> list[dict]:
+        """Read the selected course's local assignment index."""
+        folder = self._course_dir(course_folder)
+        path = self._resolve((folder / 'assignments/index.json').relative_to(self.data_dir).as_posix())
+        assignments = json.loads(path.read_text('utf-8'))
+        if not isinstance(assignments, list):
+            raise ValueError('assignment index must be a list')
+        return [item for item in assignments if isinstance(item, dict)]
+
     def get_course_summary(self, course: str = "") -> dict:
-        """Read course digests with lecture coverage, without generating AI work."""
+        """Read course digests, lecture coverage and local assignment deadlines."""
         from .panel.course_summary import summary_markdown
         rows = []
         for item in self._matching_courses(course):
@@ -172,20 +182,35 @@ class LocalCourseTools:
             if not markdown:
                 markdown = '# ' + item['name'] + '\n\n' + '\n\n'.join(
                     '## ' + row['title'] + '\n' + row['notes_markdown'] for row in notes)
+            try:
+                assignments = self.get_course_assignments(item['folder'])
+            except (OSError, ValueError):
+                assignments = []
             rows.append({**item, 'markdown': markdown, 'total_lessons': max(len(jobs), len(notes)),
-                         'summarized_lessons': len(notes)})
+                         'summarized_lessons': len(notes), 'assignments_count': len(assignments),
+                         'assignments': [{'title': a.get('title', ''),
+                                          'due_at': a.get('due_at') or a.get('due_at_label') or ''}
+                                         for a in assignments if isinstance(a, dict)]})
         return rows[0] if course and len(rows) == 1 else {'courses': rows}
 
     def search_course_knowledge(self, query: str, course: str = "") -> list[dict]:
-        """Rank local note, assignment, announcement and transcript excerpts."""
-        tokens = query.casefold().split()
+        """Rank local summary, note, assignment, announcement, material and transcript excerpts."""
+        tokens = [token for token in re.split(r"[\s,，、。；;：:！!？?/|]+", query.casefold()) if token]
         if not tokens:
             return []
         hits = []
-        patterns = [('notes', 'recordings/*/notes.md'), ('assignments', 'assignments/index.json'),
-                    ('announcements', 'announcements/index.json'), ('transcript', 'recordings/*/transcript.json')]
+        patterns = [
+            ('summary', 'course-summary.md'),
+            ('notes', 'recordings/*/notes.md'),
+            ('assignments', 'assignments/index.json'),
+            ('announcements', 'announcements/index.json'),
+            ('materials', 'materials/index.json'),
+            ('transcript', 'recordings/*/transcript.json'),
+        ]
         for item in self._matching_courses(course):
             folder = self._course_dir(item['folder'])
+            jobs = {job.directory.resolve(): job for job in collect_jobs(self.data_dir, item['course_id'])
+                    if job.course_dir.resolve() == folder}
             for kind, pattern in patterns:
                 for path in sorted(folder.glob(pattern)):
                     try:
@@ -198,7 +223,7 @@ class LocalCourseTools:
                                     return '\n'.join(prose(v) for v in value)
                                 if isinstance(value, dict):
                                     return '\n'.join(prose(v) for k, v in value.items() if k in
-                                        {'title', 'text', 'body', 'body_text', 'instructions', 'content', 'segments', 'due_at'})
+                                        {'title', 'text', 'body', 'body_text', 'instructions', 'content', 'segments', 'due_at', 'files', 'category'})
                                 return str(value or '')
                             content = prose(value)
                     except (OSError, ValueError):
@@ -208,10 +233,29 @@ class LocalCourseTools:
                     if not score:
                         continue
                     offset = min(lowered.find(token) for token in tokens if token in lowered)
-                    hits.append({'course': item['name'], 'source_type': kind,
-                                 'title': path.parent.name if kind in {'notes', 'transcript'} else item['name'],
-                                 'snippet': content[max(0, offset - 100):offset + 400], '_score': score})
-        hits.sort(key=lambda row: -row['_score'])
+                    title, day = item['name'], ''
+                    if kind == 'summary':
+                        title = f"{item['name']} 课程总结"
+                    if kind in {'notes', 'transcript'}:
+                        title = path.parent.name
+                        job = jobs.get(path.parent.resolve())
+                        if job:
+                            title, day = job.recording.title, job.recording.date
+                        else:
+                            try:
+                                meta = json.loads((path.parent / 'recording.json').read_text('utf-8'))
+                                if isinstance(meta, dict):
+                                    title = str(meta.get('title') or title)
+                                    day = str(meta.get('recorded_at') or '')[:10]
+                            except (OSError, ValueError):
+                                pass
+                    hit = {'course': item['name'], 'source_type': kind, 'title': title,
+                           'snippet': content[max(0, offset - 100):offset + 400], '_score': score}
+                    if day:
+                        hit['date'] = day
+                    hits.append(hit)
+        priority = {'summary': 0, 'notes': 0, 'assignments': 1, 'announcements': 1, 'materials': 1, 'transcript': 2}
+        hits.sort(key=lambda row: (-row['_score'], priority[row['source_type']]))
         return [{k: v for k, v in row.items() if k != '_score'} for row in hits[:20]]
 
     def _course_dir(self, course_folder: str) -> Path:

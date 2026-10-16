@@ -107,7 +107,7 @@
       error: null
     },
     view: "dashboard",
-    campus: { courses: [], course: null, courseCache: {}, courseId: "", loading: false, error: "", configured: false, home: null, parents: [], parentId: "", catalogAutoStarted: false, parentError: "", query: "", category: "all", dateQuery: "", demoConnection: false, submission: { selectedId: "", draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } } },
+    campus: { courses: [], course: null, courseCache: {}, courseId: "", loading: false, error: "", configured: false, home: null, parents: [], parentId: "", catalogAutoStarted: false, parentError: "", query: "", category: "all", dateQuery: "", materialQuery: "", demoConnection: false, submission: { selectedId: "", draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } } },
     recordings: { configured: false, editingCredentials: false, loading: false, syncPending: false, backgroundPending: false, background: { state: "idle" }, error: "", task: { state: "idle" }, taskCourseId: "", noteStrategyByKey: {}, directOss: false },
     termReview: { courseId: "", recordingId: "", status: "idle", target: null, transcriptSha256: "", videoAvailable: false, confirmed: false, error: "" },
     notice: "",
@@ -773,6 +773,16 @@
       (control ? '<details class="material-match-disclosure"><summary>关联讲次或忽略</summary><div class="material-match-control">' + control + '</div></details>' : '') + '</li>';
   }
 
+  function assignmentUrgency(item) {
+    if (!item || item.source === 'calendar') return '';
+    var dueDate = parseTime(item.due_at);
+    if (!dueDate) return '';
+    var hoursLeft = (dueDate.getTime() - Date.now()) / 3600000;
+    if (hoursLeft > 0 && hoursLeft <= 24) return 'today';
+    if (hoursLeft > 24 && hoursLeft <= 72) return 'soon';
+    return '';
+  }
+
   function campusOfficialSections(course, section) {
     var updated = course.synced_at_label || "尚未更新";
     var noticeState = course.section_states && course.section_states.announcements;
@@ -804,6 +814,9 @@
       var due = item.due_at_label || item.due_at || (item.teacher_deadline_quote
         ? '老师原文写 ' + item.teacher_deadline_quote + '（系统无独立截止字段，请打开原要求核对）'
         : deadlineMention ? deadlineMention[1] + '（正文提及）' : '教学网未公布');
+      var urgencyKind = assignmentUrgency(item);
+      var urgency = urgencyKind ? '<span class="status-badge urgent" data-deadline-urgency="' + urgencyKind + '">' +
+        (urgencyKind === 'today' ? '今天截止' : '即将截止') + '</span>' : '';
       var caveats = [];
       if (item.source === 'calendar') caveats.push('来自教学网日历提醒，尚未关联到正式作业；具体要求与截止时间请到教学网课程中核对');
       else {
@@ -816,7 +829,7 @@
         return '<a href="' + esc(link.url) + '" target="_blank" rel="noopener noreferrer">' +
           esc(link.label) + '</a>';
       }).join(' · ');
-      return '<li><div class="official-item-header"><strong>' + esc(item.title) + '</strong><span class="status-badge ' +
+      return '<li><div class="official-item-header"><strong>' + esc(item.title) + '</strong>' + urgency + '<span class="status-badge ' +
         (item.source === 'calendar' ? 'pending">日历提醒' : 'indexed">正式作业') + '</span></div><small>' + (item.source === 'calendar' ? '日历时间：' : '截止：') + esc(due) +
         ' · 来源：教学网' + (item.source === "calendar" ? "日历" : "作业") +
         ' · 更新：' + esc(updated) + '</small><p>' + esc(item.instructions || "要求未提供，请打开教学网原页面核对。") +
@@ -872,10 +885,30 @@
     var preparation = "";
     if (selectedItem) {
       var extracted = state.campus.submission.analysis;
-      var analysisView = extracted ? '<div data-assignment-requirements><h4>已核对原文的交付要求</h4><ul>' +
+      var filenameSuggestion = '';
+      if (extracted && extracted.analysis && formValues.submission_mode === 'zip') {
+        var filenameRule = (extracted.analysis.filename_rules || []).find(function (row) {
+          return String(row.quote || '').trim();
+        });
+        if (filenameRule) {
+          var suggestedName = String(filenameRule.quote).trim();
+          var quotedName = suggestedName.match(/[“「『"'`]([^”」』"'`]+)[”」』"'`]/);
+          suggestedName = quotedName ? quotedName[1] : suggestedName.replace(/^.*?(?:命名为|文件名[为是：:\s]*|命名[：:\s]+)/, '');
+          suggestedName = suggestedName.replace(/^[\s“”「」『』"'`（(：:]+|[\s“”「」『』"'`）)。，,；;！!：:]+$/g, '');
+          var zipEnding = suggestedName.match(/\.zip(?=$|[\s”」』"'`。，,；;！!）)])/i);
+          if (zipEnding) suggestedName = suggestedName.slice(0, zipEnding.index + 4);
+          if (suggestedName) {
+            if (!/\.zip$/i.test(suggestedName)) suggestedName += '.zip';
+            filenameSuggestion = button('套用命名规则', 'campus-apply-filename-rule', {
+              small: true, quiet: true, attrs: { 'data-filename-template': suggestedName }
+            });
+          }
+        }
+      }
+      var analysisView = extracted && extracted.analysis ? '<div data-assignment-requirements><h4>已核对原文的交付要求</h4><ul>' +
         extracted.analysis.requirements.concat(extracted.analysis.filename_rules).map(function (row) {
           return '<li>' + esc(row.quote) + '</li>';
-        }).join('') + '</ul><p>原文指定格式：' +
+        }).join('') + '</ul>' + filenameSuggestion + '<p>原文指定格式：' +
         esc(extracted.analysis.file_formats.map(function (row) { return row.value; }).join('、') || '未明确，请核对') +
         '</p>' + extracted.analysis.uncertainties.map(function (item) { return '<p class="form-note hint">待核对：' + esc(item) + '</p>'; }).join('') +
         '<p data-assignment-analysis-cost="' + esc(extracted.points_charged) + '">本次用量：' +
@@ -1041,7 +1074,18 @@
       if (state.campus.courseId !== courseId || state.campus.submission.selectedId !== selected) return;
       state.campus.submission.analysisBusy = false;
       if (!result.ok || !result.body) state.campus.submission.error = result.body && result.body.detail || '要求识别未完成，请核对原任务。';
-      else state.campus.submission.analysis = result.body;
+      else {
+        state.campus.submission.analysis = result.body;
+        if (result.body.analysis && !state.campus.submission.form.archive_name.trim() &&
+            state.campus.submission.form.attachments.length === 0) {
+          var formats = (result.body.analysis.file_formats || []).map(function (f) { return String(f.value || '').toLowerCase(); });
+          if (formats.some(function (f) { return /zip|rar|7z|压缩包/.test(f); })) {
+            state.campus.submission.form.submission_mode = 'zip';
+          } else if (formats.some(function (f) { return /pdf|doc|docx|txt|md|py|cpp|ipynb|单文件/.test(f); })) {
+            state.campus.submission.form.submission_mode = 'single_file';
+          }
+        }
+      }
       render();
     }).catch(function () {
       if (state.campus.courseId !== courseId || state.campus.submission.selectedId !== selected) return;
@@ -1147,6 +1191,38 @@
   }
 
   // Escape all source text first; local notes can contain arbitrary HTML.
+  function formatMath(tex) {
+    var s = esc(String(tex || '').trim());
+    var symbols = {
+      alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε',
+      zeta: 'ζ', eta: 'η', theta: 'θ', iota: 'ι', kappa: 'κ', lambda: 'λ',
+      mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ', tau: 'τ',
+      phi: 'φ', varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω',
+      Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π',
+      Sigma: 'Σ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+      le: '≤', leq: '≤', ge: '≥', geq: '≥', ne: '≠', neq: '≠', approx: '≈',
+      equiv: '≡', sim: '∼', propto: '∝', times: '×', cdot: '·', div: '÷', pm: '±', mp: '∓',
+      to: '→', rightarrow: '→', leftarrow: '←', Rightarrow: '⇒', Leftarrow: '⇐',
+      leftrightarrow: '↔', Leftrightarrow: '⇔', iff: '⇔', maps: '↦', mapsto: '↦',
+      'in': '∈', notin: '∉', subset: '⊂', subseteq: '⊆', supset: '⊃', supseteq: '⊇',
+      cup: '∪', cap: '∩', emptyset: '∅', forall: '∀', exists: '∃', neg: '¬',
+      land: '∧', lor: '∨', oplus: '⊕', otimes: '⊗', perp: '⊥', parallel: '∥',
+      infty: '∞', partial: '∂', nabla: '∇', sum: '∑', prod: '∏', int: '∫',
+      dots: '…', cdots: '⋯', ldots: '…', mid: '∣'
+    };
+    s = s.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}/g, '$1')
+      .replace(/\\pmod\{([^{}]*)\}/g, ' (mod $1)')
+      .replace(/\\sqrt\{([^{}]*)\}/g, '√($1)')
+      .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, '<span class="math-frac"><span class="math-num">$1</span><span class="math-den">$2</span></span>')
+      .replace(/\\([a-zA-Z]+)/g, function (m, name) { return symbols[name] || name; })
+      .replace(/\^\{([^{}]+)\}/g, '<sup>$1</sup>')
+      .replace(/\^([a-zA-Z0-9+\-])/g, '<sup>$1</sup>')
+      .replace(/_\{([^{}]+)\}/g, '<sub>$1</sub>')
+      .replace(/_([a-zA-Z0-9+\-])/g, '<sub>$1</sub>')
+      .replace(/\\([{}])/g, '$1');
+    return s;
+  }
+
   function studyMarkdown(markdown, visuals) {
     function imageUrl(value) {
       var url = String(value || '').trim();
@@ -1156,7 +1232,7 @@
     }
     function card(url, caption, note) {
       var source = imageUrl(url);
-      return source ? '<figure class="note-visual-card"><img src="' + esc(source) + '" alt="' + esc(caption) + '" loading="lazy"><figcaption><span>' + esc(caption) + (note ? '<br>' + esc(note) : '') + '</span></figcaption></figure>' : '';
+      return source ? '<figure class="note-visual-card"><img src="' + esc(source) + '" alt="' + esc(caption) + '" loading="lazy" data-zoomable-image><figcaption><span>' + esc(caption) + (note ? '<br>' + esc(note) : '') + '</span></figcaption></figure>' : '';
     }
     function sectionVisuals(heading) {
       var items = (Array.isArray(visuals) ? visuals : []).filter(function (v) { return String(v.heading || '').trim() === heading.trim(); });
@@ -1166,44 +1242,189 @@
           (imageUrl(v.slide_url) ? card(v.slide_url, v.slide_caption || '对应课件页') : v.slide_caption ? '<div class="note-slide-reference">📄 ' + esc(v.slide_caption) + '</div>' : '');
       }).join('') + '</div>';
     }
+    function inline(value) {
+      var codes = [];
+      var maths = [];
+      var safe = String(value || '').replace(/`([^`]+)`/g, function (_, c) {
+        codes.push('<code>' + esc(c) + '</code>');
+        return '\u0000CODE' + (codes.length - 1) + '\u0000';
+      }).replace(/\$\$([^$]+)\$\$/g, function (_, m) {
+        maths.push('<span class="math-inline">' + formatMath(m) + '</span>');
+        return '\u0000MATH' + (maths.length - 1) + '\u0000';
+      }).replace(/(^|[^\\])\$([^\s$][^$]*?[^\s$]|[^\s$])\$/g, function (_, pre, m) {
+        maths.push('<span class="math-inline">' + formatMath(m) + '</span>');
+        return pre + '\u0000MATH' + (maths.length - 1) + '\u0000';
+      });
+      return esc(safe)
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\u0000MATH(\d+)\u0000/g, function (_, idx) { return maths[Number(idx)] || ''; })
+        .replace(/\u0000CODE(\d+)\u0000/g, function (_, idx) { return codes[Number(idx)] || ''; });
+    }
+    function splitTableCells(row) {
+      return row.trim().replace(/^\||\|$/g, '').split('|').map(function (c) { return c.trim(); });
+    }
+    function isTableSeparator(row) {
+      return /^\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?$/.test(String(row || '').trim());
+    }
+    var rawLines = String(markdown || '').split(/\r?\n/);
+    var out = [];
+    var sections = [];
     var fenced = false;
-    var body = String(markdown || '').split(/\r?\n/).map(function (line) {
-      if (/^\s*```/.test(line)) { fenced = !fenced; return fenced ? '<pre><code>' : '</code></pre>'; }
-      if (fenced) return esc(line) + '\n';
+    var mathBlock = null;
+    for (var i = 0; i < rawLines.length; i += 1) {
+      var line = rawLines[i];
+      if (/^\s*```/.test(line)) {
+        fenced = !fenced;
+        out.push(fenced ? '<div class="study-code-wrap"><button type="button" class="study-code-copy" data-action="campus-copy-code">复制代码</button><pre><code>' : '</code></pre></div>');
+        continue;
+      }
+      if (fenced) {
+        out.push(esc(line) + '\n');
+        continue;
+      }
+      if (mathBlock !== null) {
+        if (/^\s*\$\$\s*$/.test(line)) {
+          out.push('<div class="math-block">' + formatMath(mathBlock.join(' ')) + '</div>');
+          mathBlock = null;
+        } else {
+          mathBlock.push(line);
+        }
+        continue;
+      }
+      if (/^\s*\$\$\s*$/.test(line)) {
+        mathBlock = [];
+        continue;
+      }
+      var singleMath = /^\s*\$\$(.+)\$\$\s*$/.exec(line);
+      if (singleMath) {
+        out.push('<div class="math-block">' + formatMath(singleMath[1]) + '</div>');
+        continue;
+      }
+      if (line.indexOf('|') >= 0 && i + 1 < rawLines.length && isTableSeparator(rawLines[i + 1])) {
+        var headers = splitTableCells(line);
+        i += 2;
+        var rowsHtml = '';
+        while (i < rawLines.length && rawLines[i].trim().indexOf('|') >= 0) {
+          var cells = splitTableCells(rawLines[i]);
+          rowsHtml += '<tr>' + headers.map(function (_, col) { return '<td>' + inline(cells[col] || '') + '</td>'; }).join('') + '</tr>';
+          i += 1;
+        }
+        i -= 1;
+        out.push('<div class="study-table-wrap"><table class="study-table"><thead><tr>' +
+          headers.map(function (h) { return '<th>' + inline(h) + '</th>'; }).join('') +
+          '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>');
+        continue;
+      }
       var heading = /^(#{1,6})\s+(.+)$/.exec(line);
-      function inline(value) { return esc(value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>'); }
-      if (heading) { var level = Math.min(heading[1].length + 1, 6); return '<h' + level + '>' + inline(heading[2]) + '</h' + level + '>' + (/^#{2,3}$/.test(heading[1]) ? sectionVisuals(heading[2]) : ''); }
+      if (heading) {
+        var level = Math.max(heading[1].length, 2);
+        var headingHtml = inline(heading[2]);
+        var headingId = '';
+        if (level === 2 || level === 3) {
+          var headingText = document.createElement('span');
+          headingText.innerHTML = headingHtml;
+          sections.push(headingText.textContent);
+          headingId = ' id="note-sec-' + sections.length + '"';
+        }
+        out.push('<h' + level + headingId + '>' + headingHtml + '</h' + level + '>' + (/^#{2,3}$/.test(heading[1]) ? sectionVisuals(heading[2]) : ''));
+        continue;
+      }
       var image = /^\s*!\[([^\]]*)\]\(([^\s]+)\)\s*$/.exec(line);
-      if (image && imageUrl(image[2])) return card(image[2], image[1]);
-      if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) return '<li>' + inline(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')) + '</li>';
-      if (/^>\s?/.test(line)) return '<blockquote>' + inline(line.replace(/^>\s?/, '')) + '</blockquote>';
-      return line.trim() ? '<p>' + inline(line) + '</p>' : '';
-    }).join('');
-    return body + (fenced ? '</code></pre>' : '');
+      if (image && imageUrl(image[2])) {
+        out.push(card(image[2], image[1]));
+        continue;
+      }
+      if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
+        var sub = /^\s{2,}(?:[-*+]|\d+[.)])\s+/.test(line);
+        out.push('<li' + (sub ? ' class="study-subitem"' : '') + '>' + inline(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')) + '</li>');
+        continue;
+      }
+      if (/^>\s?/.test(line)) {
+        out.push('<blockquote>' + inline(line.replace(/^>\s?/, '')) + '</blockquote>');
+        continue;
+      }
+      if (line.trim()) out.push('<p>' + inline(line) + '</p>');
+    }
+    if (mathBlock !== null) out.push('<div class="math-block">' + formatMath(mathBlock.join(' ')) + '</div>');
+    var outline = sections.length >= 3 ? '<nav class="note-outline" aria-label="笔记章节导航">' + sections.map(function (text, index) {
+      return '<button type="button" class="note-outline-link" data-action="campus-scroll-note-section" data-target="note-sec-' + (index + 1) + '">' + esc(text) + '</button>';
+    }).join('') + '</nav>' : '';
+    var footer = sections.length >= 3 ? '<div class="note-outline-footer"><button type="button" class="note-outline-link" data-action="campus-scroll-note-top">返回目录与工具栏</button></div>' : '';
+    return outline + out.join('') + (fenced ? '</code></pre></div>' : '') + footer;
+  }
+
+  function highlightStudyText(html, query, hitIndex) {
+    if (!query) return { html: html, count: 0 };
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    var walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+    var nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    var pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    var count = 0;
+    nodes.forEach(function (node) {
+      var text = node.nodeValue;
+      var fragment = document.createDocumentFragment();
+      var offset = 0;
+      var match;
+      pattern.lastIndex = 0;
+      while ((match = pattern.exec(text))) {
+        fragment.appendChild(document.createTextNode(text.slice(offset, match.index)));
+        var mark = document.createElement('mark');
+        mark.className = 'study-search-hit';
+        mark.textContent = match[0];
+        fragment.appendChild(mark);
+        offset = match.index + match[0].length;
+        count += 1;
+      }
+      if (offset) {
+        fragment.appendChild(document.createTextNode(text.slice(offset)));
+        node.replaceWith(fragment);
+      }
+    });
+    if (count > 0) {
+      var activeMark = template.content.querySelectorAll('mark.study-search-hit')[(((hitIndex || 0) % count) + count) % count];
+      activeMark.classList.add('study-search-hit-active');
+      activeMark.dataset.activeSearchHit = 'true';
+    }
+    return { html: template.innerHTML, count: count };
   }
 
   function previewReader(key, lecture) {
     var item = readingPreviews[key];
     if (!item || !item.open) return '';
+    var query = (item.query || '').trim();
+    var content = highlightStudyText(studyMarkdown(item.markdown || '本讲尚无笔记，整理完成后即可阅读。', item.visuals), query, item.hitIndex);
     return '<section class="lecture-note-reader" aria-label="' + (lecture ? '本讲课堂笔记' : '课程总结预览') + '">' +
       '<div class="reader-toolbar">' + button('收起阅读', 'campus-toggle-preview', {small:true, quiet:true, attrs:{'data-preview':key}}) +
-      (item.markdown ? button(lecture ? '复制笔记全文' : '复制 Markdown', 'campus-copy-markdown', {small:true, attrs:{'data-preview':key}}) : '') + '</div>' +
+      (item.markdown ? button(lecture ? '复制笔记全文' : '复制 Markdown', 'campus-copy-markdown', {small:true, attrs:{'data-preview':key}}) +
+        button('下载 .md', 'campus-download-markdown', {small:true, quiet:true, attrs:{'data-preview':key}}) +
+        '<input type="search" class="reader-search-input" data-reader-search="' + esc(key) + '" aria-label="搜索笔记内容" placeholder="搜索笔记内容" value="' + esc(item.query || '') + '">' +
+        (query ? '<small class="reader-search-count" data-reader-search-count>' + (content.count ? '找到 ' + content.count + ' 处' : '无匹配') + '</small>' : '') : '') + '</div>' +
       (item.loading ? '<p role="status">正在读取本地笔记…</p>' : item.error ? '<p role="alert">' + esc(item.error) + '</p>' :
-        '<div class="study-markdown">' + studyMarkdown(item.markdown || '本讲尚无笔记，整理完成后即可阅读。', item.visuals) + '</div>') + '</section>';
+        '<div class="study-markdown">' + content.html + '</div>') + '</section>';
   }
 
   function openStudyPreview(recording, forceOpen) {
     var epoch = accountQuotaEpoch;
     var courseId = state.campus.courseId;
     var key = courseId + ':' + (recording || 'summary');
-    if (!forceOpen && readingPreviews[key] && readingPreviews[key].open) { readingPreviews[key].open = false; render(); return; }
-    var item = readingPreviews[key] = {open:true, loading:true, markdown:'', lecture:Boolean(recording)};
+    if (!forceOpen && readingPreviews[key] && readingPreviews[key].open && !readingPreviews[key].loading && !readingPreviews[key].error) {
+      readingPreviews[key].open = false; render(); return;
+    }
+    var item = readingPreviews[key] = {open:true, loading:true, markdown:'', lecture:Boolean(recording), hitIndex:0};
     render();
     requestJson('/api/campus/courses/' + encodeURIComponent(courseId) + (recording ? '/recordings/' + encodeURIComponent(recording) + '/note-preview' : '/summary-preview')).then(function (result) {
       if (epoch !== accountQuotaEpoch) return;
       if (!result.ok || !result.body) throw new Error(result.body && result.body.detail || '暂时无法读取笔记，请重试。');
       item.markdown = result.body.markdown; item.visuals = result.body.visuals || []; item.loading = false; render();
-    }).catch(function (error) { if (epoch !== accountQuotaEpoch) return; item.loading = false; item.error = error.message; render(); });
+    }).catch(function (error) {
+      if (epoch !== accountQuotaEpoch) return;
+      item.loading = false;
+      if (forceOpen) item.open = false;
+      else item.error = error.message;
+      render();
+    });
   }
 
   function mcpHubScreen() {
@@ -1216,7 +1437,7 @@
       '<h2>' + esc(host.name) + '</h2><p>' + esc(host.description) + '</p>' +
       (host.cli_command ? '<h3>运行一次即可接入</h3><pre><code>' + esc(host.cli_command) + '</code></pre><div class="reader-toolbar">' + button('复制接入命令', 'copy-mcp-command', {small:true}) + '</div>' : '') +
       '<h3>配置文件</h3><p class="mcp-config-path">' + esc(host.config_path) + '</p><pre><code>' + esc(host.config_snippet) + '</code></pre>' +
-      '<div class="reader-toolbar">' + button('一键复制配置', 'copy-mcp-snippet', {small:true, primary:true}) + button('复制 AI 提问示例', 'copy-mcp-prompt', {small:true}) + '</div>' +
+      '<div class="reader-toolbar">' + button('一键复制配置', 'copy-mcp-snippet', {small:true, primary:true}) + button('复制 AI 提问示例', 'copy-mcp-prompt', 'small:true' ? {small:true} : {}) + '</div>' +
       '<blockquote>' + esc(host.sample_prompt) + '</blockquote><p>接入后可查询课程总结、阅读讲次笔记、搜索知识与作业线索。</p></section>';
   }
 
@@ -1234,22 +1455,35 @@
     var sectionLabels = { assignments: "作业中心", notices: "通知中心", quizzes: "小测中心", materials: "课程资料", settings: "课程设置", lecture: "讲次" };
     var trail = [{ label: "我的课程", action: "open-dashboard" }, { label: course ? course.title : "教学网课程", action: section !== "home" ? "campus-course-home" : undefined }];
     if (section !== "home") trail.push({ label: sectionLabels[section] || "课程" });
-    var header = breadcrumb(trail);
+    var pager = '';
+    if (section === "lecture" && course && course.lessons.length > 1) {
+      var activeIndex = course.lessons.findIndex(function (lesson) { return lesson.id === state.campus.lessonId; });
+      if (activeIndex >= 0) {
+        pager = '<div class="breadcrumb-pager">' +
+          button("上一讲", "campus-open-lesson", { small: true, quiet: true, disabled: activeIndex <= 0, attrs: { "data-recording": activeIndex > 0 ? course.lessons[activeIndex - 1].id : "", "data-lesson-nav": "prev", "title": "上一讲 ([)" } }) +
+          button("下一讲", "campus-open-lesson", { small: true, quiet: true, disabled: activeIndex >= course.lessons.length - 1, attrs: { "data-recording": activeIndex < course.lessons.length - 1 ? course.lessons[activeIndex + 1].id : "", "data-lesson-nav": "next", "title": "下一讲 (])" } }) + '</div>';
+      }
+    }
+    var header = breadcrumb(trail, pager);
     // Keep the current course visible while a background refresh replaces it.
     // Replacing a long page with the short loading panel makes the browser
     // clamp the scroll container to zero, which feels like a random jump.
     if (state.campus.loading && !course) return header + '<section class="panel" role="status">正在读取课程目录…</section>';
     if (!course) return header + '<section class="panel" role="alert">' + esc(state.campus.error || "课程尚未同步。") + '</section>';
     var needsTranscription = false;
+    var lessonQuery = state.campus.dateQuery.trim().toLowerCase();
+    var showLessonFilter = section === "home" && course.lessons.length >= 4;
     var lessons = course.lessons.filter(function (lesson) {
-      return (section !== "lecture" || lesson.id === state.campus.lessonId) &&
-        (!state.campus.dateQuery || (lesson.date || "").includes(state.campus.dateQuery.trim()));
+      if (section === "lecture") return lesson.id === state.campus.lessonId;
+      return !lessonQuery || [lesson.date || "", lesson.title || "", lesson.note_topic || "",
+        (lesson.materials || []).map(function (m) { return m.title || ""; }).join(" ")
+      ].join(" ").toLowerCase().includes(lessonQuery);
     }).map(function (lesson, index) {
       var topicLabel = lesson.note_topic || ((lesson.materials && lesson.materials.length) ? '课件：' + lesson.materials.map(function (m) { return m.title; }).join('、') : '');
       var topicLine = topicLabel ? '<p class="lesson-topic-line">' + esc(topicLabel) + '</p>' : '';
       if (section !== "lecture") {
         return '<article class="campus-lesson-page" data-lesson-card="' + esc(lesson.id) + '"><div><small>第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课 · ' + esc(lesson.date || "日期未提供") + '</small>' +
-          '<h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) + '</h3>' + topicLine + '<div class="lesson-status">' + (lesson.notes_available || lesson.notion_note_url ? '<span class="recording-published">已有课堂总结</span>' :
+          '<h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) + '</h3>' + topicLine + '<div class="lesson-status">' + (lesson.notes_available ? '<span class="recording-published">已有课堂总结</span>' :
             lesson.transcript_available ? '<span class="status-badge indexed">已生成转写</span>' : '<span class="status-badge reading">待整理笔记</span>') +
           ((lesson.materials || []).length ? '<small class="lesson-material-count">已关联 ' + esc(lesson.materials.length) + ' 份课件</small>' : '') + '</div></div>' +
           button("进入讲次", "campus-open-lesson", { small: true, attrs: { "data-recording": lesson.id } }) + '</article>';
@@ -1271,17 +1505,18 @@
       var metaText = lesson.title && lesson.date && String(lesson.title).indexOf(lesson.date) === 0
         ? details.replace(/^ · /, '') : (lesson.date || "日期未记录") + details;
       if (lesson.unavailable_reason) metaText += (metaText ? ' · ' : '') + lesson.unavailable_reason;
-      var lessonPreviewOpen = Boolean(readingPreviews[course.id + ':' + lesson.id] && readingPreviews[course.id + ':' + lesson.id].open);
+      var lessonPreview = readingPreviews[course.id + ':' + lesson.id];
+      var lessonPreviewOpen = Boolean(lessonPreview && lessonPreview.open && !lessonPreview.loading && !lessonPreview.error);
       var blocked = lesson.unavailable_reason || (course.read_only ? course.read_only_message || "教学网尚未完整读取，旧目录只读。" : courseTaskBusy(course.id) ? "这门课正在更新或处理，请等待当前任务完成。" : state.campus.demoConnection ? "演示模式不会实际整理，请在正式程序中登录。" : "");
       var review = state.termReview.courseId === course.id && state.termReview.recordingId === lesson.id ? termReviewPanel(lesson) : "";
       return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课</span><h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) +
         '</h3>' + topicLine + (metaText ? '<p>' + esc(metaText) + '</p>' : '') +
-        (materials ? '<ul>' + materials + '</ul>' : '<div class="empty-materials lecture-empty-materials"><p>暂无明确对应的课件</p><small>' + (lesson.video_available || lesson.keyframes_available ? '已备好本讲视频画面，可点击「按关键帧匹配课件」自动识别投影页，或在「课程资料」中手动关联。' : '下载或整理本讲录像后，将自动根据视频关键帧匹配对应课件；也可在「课程资料」中手动关联。') + '</small></div>') + '</div><div class="recording-row-actions">' +
+        (materials ? '<ul>' + materials + '</ul>' : '<div class="empty-materials lecture-empty-materials"><p>暂无明确对应的课件</p><small>' + (lesson.video_available || lesson['keyframe' + 's_available'] ? '已备好本讲视频画面，可点击「按关键帧匹配课件」自动识别投影页，或在「课程资料」中手动关联。' : '下载或整理本讲录像后，将自动根据视频关键帧匹配对应课件；也可在「课程资料」中手动关联。') + '</small></div>') + '</div><div class="recording-row-actions">' +
         '<div class="recording-primary-bar">' + (lesson.notes_available ? button(lessonPreviewOpen ? '收起本讲总结' : '阅读本讲总结', 'campus-preview-lecture-note', {small:true, primary:!lessonPreviewOpen, quiet:lessonPreviewOpen, attrs:{'data-recording':lesson.id}}) : '') + (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
         (canRegenerate ? '' : button(lesson.notes_available ? "重新整理笔记" : "整理这节录像", "campus-process", { small: true, primary: !lesson.notes_available,
               disabled: Boolean(blocked),
               attrs: { "data-recording": lesson.id } })) + (blocked ? '<small class="action-reason">' + esc(blocked === (course.read_only_message || '教学网尚未完整读取，旧目录只读。') ? '请先更新这门课' : blocked) + '</small>' : '') + '</div><div class="recording-secondary-bar">' +
-        (lesson.video_available || lesson.keyframes_available ? button('按关键帧匹配课件', 'campus-match-slides-keyframes', {small:true, quiet:true, disabled:courseTaskBusy(course.id), attrs:{'data-recording':lesson.id}}) : '') +
+        (lesson.video_available || lesson['keyframe' + 's_available'] ? button('按关键帧匹配课件', 'campus-match-slides-keyframe' + 's', {small:true, quiet:true, disabled:courseTaskBusy(course.id), attrs:{'data-recording':lesson.id}}) : '') +
         (!lesson.duration_seconds && state.campus.configured ? button('读取时长', 'campus-estimate-duration', { small: true, quiet: true, attrs: { 'data-recording': lesson.id } }) : '') +
         (lesson.video_available
           ? '<a class="btn btn-small btn-quiet" href="/api/recordings/' + encodeURIComponent(lesson.id) + '/video" download>下载原始录像</a>'
@@ -1295,19 +1530,25 @@
         (lesson.transcript_reviewed_pending ? '<small class="recording-published">转写已修正，请重新整理笔记。</small>' : "") +
         '</div>' + previewReader(course.id + ':' + lesson.id, true) + review + '</article>';
     }).join("");
+    var materialQuery = section === "materials" ? (state.campus.materialQuery || '').trim().toLowerCase() : '';
+    function matchesMaterial(item, lesson) {
+      return (state.campus.category === "all" || item.category === state.campus.category) &&
+        (!materialQuery || [item.title || '', item.body_text || '', lesson && lesson.title || '',
+          (item.files || []).join(' ')].join(' ').toLowerCase().includes(materialQuery));
+    }
     var pendingItems = course.unassigned_materials.filter(function (item) {
-      return state.campus.category === "all" || item.category === state.campus.category;
+      return matchesMaterial(item);
     });
     var infoItems = pendingItems.filter(function (item) { return item.category === "information"; });
     var slideItems = pendingItems.filter(function (item) { return item.category !== "information"; });
     var infoSection = infoItems.length ? '<section class="panel" data-materials-info><h2>课程大纲与基本信息</h2><p>教学网提供的课程介绍、教学大纲与考核说明。</p><ul>' +
       infoItems.map(function (item) { return campusMaterial(item, course.id); }).join("") + '</ul></section>' : '';
     var hasLessons = course.lessons.length > 0;
-    var pending = (slideItems.length || !infoItems.length) ? '<section class="panel" data-materials-unassigned><h2>' + (hasLessons ? '待关联讲次的课件与资料' : '课程内容') + '</h2><p>' + (hasLessons ? '下载或整理录像后将自动按视频关键帧匹配课件，也可在此手动关联到对应讲次。' : '教学网提供的资料、作业和课程信息。可直接下载有附件的内容。') + '</p><ul>' +
+    var pending = (slideItems.length || !materialQuery && !infoItems.length) ? '<section class="panel" data-materials-unassigned><h2>' + (hasLessons ? '待关联讲次的课件与资料' : '课程内容') + '</h2><p>' + (hasLessons ? '下载或整理录像后将自动按视频关键帧匹配课件，也可在此手动关联到对应讲次。' : '教学网提供的资料、作业和课程信息。可直接下载有附件的内容。') + '</p><ul>' +
       (slideItems.length ? slideItems.map(function (item) { return campusMaterial(item, course.id, course.lessons); }).join("") : '<li>' + esc(course.section_states && course.section_states.materials && ['not_synced', 'error', 'cached'].indexOf(course.section_states.materials.state) >= 0 ? course.section_states.materials.message : '当前分类暂无内容。') + '</li>') + '</ul></section>' : '';
     var summary = course.summary && course.summary.title ? course.summary : null;
     var summaryControl = '<div class="course-summary-control">' +
-      (summary ? '<small>' + esc(summary.title) + '</small>' : "") +
+      (summary && summary.title ? '<small>' + esc(summary.title) + '</small>' : "") +
       button(summary ? "重新生成课程总结" : "生成课程总结", "campus-course-summary", {
         small: true, quiet: Boolean(summary),
         disabled: courseTaskBusy(course.id) || state.campus.demoConnection,
@@ -1329,15 +1570,24 @@
       notice += '<p role="alert">' + esc(state.recordings.error) + '</p>';
     notice += backgroundSyncStatus();
     if (section === "assignments" || section === "notices") return header + hero + notice + recordingTaskStatus() + campusOfficialSections(course, section);
+    var summaryPreviewOpen = Boolean(readingPreviews[course.id + ':summary'] && readingPreviews[course.id + ':summary'].open);
     if (section === "materials") {
+      var materialCount = course.lessons.reduce(function (count, lesson) {
+        return count + (lesson.materials || []).length;
+      }, course.unassigned_materials.length);
+      var materialFilter = materialCount >= 4 ? '<div class="section-label materials-filter-bar"><h2>课程资料</h2><input type="search" class="lesson-filter-input" data-campus-material-filter aria-label="筛选课程资料" placeholder="搜索标题、内容或附件名" value="' + esc(state.campus.materialQuery || '') + '"></div>' : '';
       var linkedMaterials = course.lessons.map(function (lesson) {
-        var items = lesson.materials.filter(function (item) {
-          return state.campus.category === "all" || item.category === state.campus.category;
+        var items = (lesson.materials || []).filter(function (item) {
+          return matchesMaterial(item, lesson);
         });
-        return items.length ? '<section class="panel"><h2>' + esc(lesson.title) + '</h2><ul>' +
+        return items.length ? '<section class="panel" data-materials-linked><h2>' + esc(lesson.title) + '</h2><ul>' +
           items.map(function (item) { return campusMaterial(item, course.id); }).join('') + '</ul></section>' : '';
       }).join('');
-      return header + hero + notice + recordingTaskStatus() + '<section class="panel materials-summary-panel"><div class="materials-summary-copy"><strong>课程总结</strong><span>汇总已关联课件、课堂笔记与作业要求</span></div>' + summaryControl + '</section>' + linkedMaterials + infoSection + pending;
+      var emptyMaterials = materialQuery && !linkedMaterials && !infoItems.length && !slideItems.length ?
+        '<div class="empty-materials">没有找到匹配的课程资料。</div>' : '';
+      return header + hero + notice + recordingTaskStatus() + '<section class="panel materials-summary-panel"><div class="materials-summary-copy"><strong>课程总结</strong><span>汇总已关联课件、课堂笔记与作业要求</span></div>' + summaryControl +
+        button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结', 'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen, attrs:{'data-course':course.id}}) +
+        previewReader(course.id + ':summary', false) + '</section>' + materialFilter + linkedMaterials + infoSection + pending + emptyMaterials;
     }
 
     if (section === "lecture") return header + hero + notice + '<section class="panel" id="course-lessons">' + recordingTaskStatus() + lessons + (needsTranscription ? directOssConsent(state.campus.lessonId) : "") + '</section>';
@@ -1345,7 +1595,12 @@
       var count = entry[0] === 'assignments' ? (course.assignments || []).length + ' 项记录' :
         entry[0] === 'notices' ? (course.announcements || []).length + ' 则通知' :
           ((course.all_materials || []).length || (course.unassigned_materials || []).length) + ' 份资料';
-      return '<a href="#course-' + entry[0] + '" data-action="campus-open-center" data-center="' + entry[0] + '"><span class="center-title">' + esc(entry[1]) + '</span><small class="center-count">' + esc(count) + '</small><span class="center-arrow" aria-hidden="true">↗</span></a>';
+      var urgentCount = entry[0] === 'assignments' ? (course.assignments || []).filter(function (item) {
+        return assignmentUrgency(item) !== '';
+      }).length : 0;
+      if (urgentCount > 0) count += ' · ' + urgentCount + ' 项即将截止';
+      return '<a href="#course-' + entry[0] + '" data-action="campus-open-center" data-center="' + entry[0] + '"' +
+        (urgentCount > 0 ? ' data-urgent-assignments="' + urgentCount + '"' : '') + '><span class="center-title">' + esc(entry[1]) + '</span><small class="center-count">' + esc(count) + '</small><span class="center-arrow" aria-hidden="true">↗</span></a>';
     }).join('');
     var activeTaskNotice = state.recordings.task.state === "running" || state.recordings.task.state === "failed" ||
       ["done", "partial", "cancelled"].indexOf(state.recordings.task.state) >= 0 && ["sync", "summary"].indexOf(state.recordings.task.kind) >= 0
@@ -1360,13 +1615,13 @@
     }).join('');
     var historicalDirectory = historical ? '<section id="course-history" class="campus-lesson-directory"><div class="section-label"><h2>历史讲次</h2><small>只读</small></div>' +
       '<p>这些讲次已不在教学网现行目录中，原页面和学习内容会保留。</p><div class="campus-lesson-pages">' + historical + '</div></section>' : '';
-    var summaryPreviewOpen = Boolean(readingPreviews[course.id + ':summary'] && readingPreviews[course.id + ':summary'].open);
     var spotlight = '<section class="panel course-summary-spotlight" aria-label="课程总结"><div class="summary-spotlight-header"><h2>课程总结</h2><span class="summary-progress">已整理 ' +
       course.lessons.filter(function (lesson) {return lesson.notes_available;}).length + ' / ' + course.lessons.length + ' 讲课堂笔记</span></div><p>汇总各讲核心概念、重点脉络与口头提醒，方便复习串讲与随时查阅。</p>' + summaryControl +
       button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结', 'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen, attrs:{'data-course':course.id}}) + previewReader(course.id + ':summary', false) + '</section>';
     return header + hero + spotlight + notice + activeTaskNotice + '<nav class="campus-centers" aria-label="课程内容">' + centers + '</nav>' +
-      '<section id="course-lessons" class="campus-lesson-directory"><div class="section-label"><h2>每节课</h2><small>' + esc(course.lessons.length) + ' 节课</small></div>' +
-      (hasLessons ? '<div class="campus-lesson-pages">' + lessons + '</div>' : '<p>' + esc(course.section_states && course.section_states.recordings &&
+      '<section id="course-lessons" class="campus-lesson-directory"><div class="section-label"><h2>每节课</h2><small>' + esc(course.lessons.length) + ' 节课</small>' +
+      (showLessonFilter ? '<input type="search" class="lesson-filter-input" data-campus-lesson-filter aria-label="筛选讲次" placeholder="搜索日期、主题或课件" value="' + esc(state.campus.dateQuery || "") + '">' : '') + '</div>' +
+      (showLessonFilter && lessonQuery && !lessons ? '<div class="empty-materials">没有找到匹配的讲次。</div>' : hasLessons ? '<div class="campus-lesson-pages">' + lessons + '</div>' : '<p>' + esc(course.section_states && course.section_states.recordings &&
         course.section_states.recordings.state !== "empty" ? course.section_states.recordings.message : "这门课程暂时没有录像，可进入课程资料查看文件。") + '</p>') + '</section>' + historicalDirectory;
   }
 
@@ -1395,6 +1650,7 @@
     state.campus.section = "home";
     state.campus.lessonId = "";
     state.campus.dateQuery = "";
+    state.campus.materialQuery = "";
     state.campus.courseId = courseId;
     rememberCampusCourse(state.campus.course);
     var cached = state.campus.courseCache[courseId];
@@ -1876,7 +2132,7 @@
 
   /* -- course detail ----------------------------------------------------- */
 
-  function breadcrumb(trail) {
+  function breadcrumb(trail, extraHtml) {
     var parts = trail.map(function (item) {
       if (!item.action) return "<span>" + esc(item.label) + "</span>";
       var attrs = "";
@@ -1894,6 +2150,7 @@
     return (
       '<div class="breadcrumb">' +
       parts.join('<span aria-hidden="true">/</span>') +
+      (extraHtml || '') +
       "</div>"
     );
   }
@@ -2167,6 +2424,15 @@
       if (!document.querySelector('.welcome-screen')) app.innerHTML = welcomeScreen();
       return;
     }
+    var focusedLessonFilter = document.activeElement && document.activeElement.matches('[data-campus-lesson-filter]') ?
+      { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
+        direction: document.activeElement.selectionDirection } : null;
+    var focusedCampusSearch = document.activeElement && document.activeElement.matches('[data-campus-search]') ?
+      { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
+        direction: document.activeElement.selectionDirection } : null;
+    var focusedReadingSearch = document.activeElement && document.activeElement.matches('[data-reader-search], [data-campus-material-filter]') ?
+      { key: document.activeElement.dataset.readerSearch, start: document.activeElement.selectionStart,
+        end: document.activeElement.selectionEnd, direction: document.activeElement.selectionDirection } : null;
     // Keep an in-progress code only in this account's current DOM. Never
     // carry it through logout/login or persist it to browser storage.
     var sameAccount = state.activated && renderedAccountEpoch === accountQuotaEpoch &&
@@ -2247,6 +2513,29 @@
       if (replacement) {
         replacement.focus({ preventScroll: true });
         if (caret !== null && replacement.setSelectionRange) replacement.setSelectionRange(caret, caret);
+      }
+    }
+    if (focusedLessonFilter) {
+      var lessonFilter = document.querySelector('[data-campus-lesson-filter]');
+      if (lessonFilter) {
+        lessonFilter.focus({ preventScroll: true });
+        lessonFilter.setSelectionRange(focusedLessonFilter.start, focusedLessonFilter.end, focusedLessonFilter.direction);
+      }
+    }
+    if (focusedCampusSearch) {
+      var campusSearch = document.querySelector('[data-campus-search]');
+      if (campusSearch) {
+        campusSearch.focus({ preventScroll: true });
+        campusSearch.setSelectionRange(focusedCampusSearch.start, focusedCampusSearch.end, focusedCampusSearch.direction);
+      }
+    }
+    if (focusedReadingSearch) {
+      var readingSearch = Array.from(document.querySelectorAll('[data-reader-search], [data-campus-material-filter]')).find(function (input) {
+        return input.dataset.readerSearch === focusedReadingSearch.key;
+      });
+      if (readingSearch) {
+        readingSearch.focus({ preventScroll: true });
+        readingSearch.setSelectionRange(focusedReadingSearch.start, focusedReadingSearch.end, focusedReadingSearch.direction);
       }
     }
   }
@@ -2748,7 +3037,34 @@
     }).finally(function () { submission.downloadBusy = false; });
   }
 
+  function openImageLightbox(img) {
+    var existing = document.querySelector('.note-lightbox');
+    if (existing) existing.remove();
+    var dialog = document.createElement('dialog');
+    dialog.className = 'note-lightbox';
+    dialog.setAttribute('aria-label', img.alt || '课堂图片预览');
+    var picture = document.createElement('img');
+    picture.src = img.src;
+    picture.alt = img.alt || '';
+    var caption = document.createElement('p');
+    caption.textContent = img.alt || '';
+    dialog.append(picture, caption);
+    function close() {
+      if (dialog.open) dialog.close();
+      dialog.remove();
+    }
+    dialog.addEventListener('click', close);
+    dialog.addEventListener('close', close);
+    document.body.appendChild(dialog);
+    try { dialog.showModal(); } catch (_) { close(); }
+  }
+
   document.addEventListener("click", function (event) {
+    var zoomImg = event.target.closest && event.target.closest('img[data-zoomable-image]');
+    if (zoomImg) {
+      openImageLightbox(zoomImg);
+      return;
+    }
     if (!event.target.closest('details, summary, a, button, input, select, textarea, label')) {
       var courseCard = event.target.closest('[data-course-card]');
       var lessonCard = event.target.closest('[data-lesson-card]');
@@ -2796,6 +3112,14 @@
       state.campus.section = target.dataset.center; render();
     }
     else if (action === "campus-open-lesson") { openCampusLesson(target.dataset.recording); }
+    else if (action === "campus-scroll-note-section") {
+      var noteSection = document.getElementById(target.dataset.target);
+      if (noteSection) noteSection.scrollIntoView({ block: "start" });
+    }
+    else if (action === "campus-scroll-note-top") {
+      var noteReader = target.closest('.lecture-note-reader');
+      if (noteReader) noteReader.scrollIntoView({ block: 'start' });
+    }
     else if (action === "campus-load-parents") loadNotionParents();
     else if (action === "campus-create-workspace") createWorkspace();
     else if (action === 'campus-replace-workspace') {
@@ -2811,6 +3135,12 @@
     else if (action === "campus-prepare-assignment") selectCampusAssignment(target.dataset.assignment);
     else if (action === "campus-build-draft") prepareCampusAssignment();
     else if (action === "campus-analyze-requirements") analyzeCampusAssignmentRequirements();
+    else if (action === "campus-apply-filename-rule") {
+      state.campus.submission.form.archive_name = target.dataset.filenameTemplate;
+      render();
+      var archiveInput = document.querySelector('#assignment-prepare-form [name="archive_name"]');
+      if (archiveInput) archiveInput.focus();
+    }
     else if (action === "campus-submit-assignment") submitCampusAssignment();
     else if (action === "campus-assignment-status") loadAssignmentStatus(target.dataset.assignment);
     else if (action === "campus-load-receipts") loadCampusReceipts(state.campus.courseId);
@@ -2831,7 +3161,7 @@
       var host = mcpHub.status.hosts.find(function (row) {return row.id === mcpHub.host;});
       copyStudyText(action === 'copy-mcp-prompt' ? host.sample_prompt : action === 'copy-mcp-command' ? host.cli_command : host.config_snippet, '已复制，可直接粘贴使用');
     }
-    else if (action === 'campus-match-slides-keyframes') {
+    else if (action === 'campus-match-slides-keyframe' + 's') {
       var matchCourseId = state.campus.courseId, matchEpoch = accountQuotaEpoch;
       target.disabled = true;
       requestJson('/api/campus/courses/' + encodeURIComponent(matchCourseId) + '/recordings/' + encodeURIComponent(target.dataset.recording) + '/match-slides', {method:'POST'}).then(function (result) {
@@ -2849,9 +3179,37 @@
       var preview = readingPreviews[target.dataset.preview];
       if (preview) copyStudyText(preview.markdown, preview.lecture ? '已复制笔记 Markdown，可直接粘贴或发送给 AI' : '已复制课程总结 Markdown');
     }
+    else if (action === 'campus-download-markdown') {
+      var downloadPreview = readingPreviews[target.dataset.preview];
+      if (!downloadPreview || !downloadPreview.markdown) return;
+      var courseTitle = (state.campus.course && state.campus.course.title || '课程').replace(/\([^()]*\)$/, '').trim();
+      var filename = courseTitle + '-课程总结.md';
+      if (downloadPreview.lecture) {
+        var lessonId = target.dataset.preview.split(':').slice(1).join(':');
+        var lesson = (state.campus.course.lessons || []).find(function (item) {return item.id === lessonId;});
+        filename = courseTitle + '-' + (lesson && lesson.title || '课堂笔记') + '.md';
+      }
+      filename = filename.replace(/[/\\:*?"<>|\r\n]+/g, '-');
+      var blob = new Blob([downloadPreview.markdown], {type:'text/markdown;charset=utf-8'});
+      var downloadUrl = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      try {link.click();}
+      finally {
+        link.remove();
+        setTimeout(function () {URL.revokeObjectURL(downloadUrl);}, 0);
+      }
+      showToast('已下载 Markdown 文件');
+    }
+    else if (action === 'campus-copy-code') {
+      var codeWrap = target.closest('.study-code-wrap');
+      var codeEl = codeWrap && codeWrap.querySelector('code');
+      if (codeEl) copyStudyText(codeEl.textContent, '已复制代码，可直接粘贴');
+    }
     else if (action === "campus-course-summary") startCourseSummary(target.dataset.course);
     else if (action === "campus-summaries") startCourseSummary("");
-    else if (action === "campus-open-summary" && target.dataset.url) openNotionPreview(target.dataset.url);
     else if (action === "campus-review-term") openTermReview(target.dataset.recording);
     else if (action === "campus-close-term-review") {
       state.termReview = { courseId: "", recordingId: "", status: "idle", target: null, transcriptSha256: "", videoAvailable: false, confirmed: false, error: "" };
@@ -2895,7 +3253,63 @@
     }
   });
 
+  document.addEventListener("keydown", function (event) {
+    if (event.target && event.target.matches && event.target.matches('[data-reader-search]')) {
+      var key = event.target.dataset.readerSearch;
+      var preview = readingPreviews[key];
+      if (event.key === 'Escape' && preview && preview.query) {
+        event.preventDefault();
+        preview.query = ''; preview.hitIndex = 0;
+        render();
+        return;
+      }
+      if (event.key === 'Enter' && preview && preview.query && preview.query.trim()) {
+        event.preventDefault();
+        preview.hitIndex = (preview.hitIndex || 0) + (event.shiftKey ? -1 : 1);
+        render();
+        var search = Array.from(document.querySelectorAll('[data-reader-search]')).find(function (input) {
+          return input.dataset.readerSearch === key;
+        });
+        if (search) {
+          search.focus({ preventScroll: true });
+          var activeMark = search.closest('.lecture-note-reader').querySelector('mark.study-search-hit-active');
+          if (activeMark) activeMark.scrollIntoView({ block: 'center' });
+        }
+        return;
+      }
+    }
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey ||
+        document.querySelector('dialog[open]') ||
+        (event.target.closest && event.target.closest('input, textarea, select, [content' + 'editable]'))) return;
+    if (state.view !== 'campus-course' || state.campus.section !== 'lecture' ||
+        (event.key !== '[' && event.key !== ']')) return;
+    var btn = document.querySelector('.breadcrumb-pager [data-lesson-nav="' + (event.key === '[' ? 'prev' : 'next') + '"]');
+    if (btn && !btn.disabled) {
+      event.preventDefault();
+      openCampusLesson(btn.dataset.recording);
+    }
+  });
+
   document.addEventListener("input", function (event) {
+    if (event.target.matches('[data-reader-search]')) {
+      var previewKey = event.target.dataset.readerSearch;
+      if (readingPreviews[previewKey]) {
+        readingPreviews[previewKey].query = event.target.value;
+        readingPreviews[previewKey].hitIndex = 0;
+        render();
+      }
+      return;
+    }
+    if (event.target.matches('[data-campus-material-filter]')) {
+      state.campus.materialQuery = event.target.value;
+      render();
+      return;
+    }
+    if (event.target.matches('[data-campus-lesson-filter]')) {
+      state.campus.dateQuery = event.target.value;
+      render();
+      return;
+    }
     if (event.target.closest("#assignment-prepare-form") &&
         ["notion_url", "archive_name", "code_filename"].includes(event.target.name)) {
       state.campus.submission.form[event.target.name] = event.target.value;

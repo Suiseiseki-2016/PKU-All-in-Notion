@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -86,8 +87,8 @@ def _courseware(sources):
 
 def _capacity(stage, payload, model, context, policy=POLICY):
     prompt = json.dumps(payload, ensure_ascii=False)
-    selected = model if model in SELECTABLE_NOTE_MODELS else None
-    limit = 30000 if model == "qwen3.7-plus" else 200000
+    selected = "qwen3.8-max-0902" if model == "qwen3.8-max" else (model if model in SELECTABLE_NOTE_MODELS else None)
+    limit = 200000
     systems = _systems(policy)
     if (len(systems[stage]) + len(prompt) > limit or llm_request_body_size(
             "notes", systems[stage], prompt, model=selected,
@@ -138,7 +139,7 @@ def _response(cache, stage, payload, model, identity, context, ask):
                "model": model, "identity": identity, "request_sha256": key,
                "response": raw, "response_sha256": fingerprint(raw)}
         write_json(cache / (key + ".json"), row)
-    if not row["response"].strip():
+    if not row["response"].strip() and not (policy == POLICY and stage in {"plan", "plan-repair"}):
         raise RuntimeError("模型返回空白，已有响应与原转写保留。")
     return row
 
@@ -171,7 +172,7 @@ def _partition(raw, field, first, last, total, *, body=False):
     return rows
 
 
-def _units(raw, total, pages, policy=POLICY):
+def _units(raw, total, pages, policy=POLICY, *, allow_leading_gap=False):
     if policy == LEGACY_POLICY:
         return _partition(raw, "units", "first_segment", "last_segment", total)
     obj = _decode(raw)
@@ -180,6 +181,8 @@ def _units(raw, total, pages, policy=POLICY):
         raise ValueError("missing knowledge point starts")
     starts = []
     for row in rows:
+        if allow_leading_gap and isinstance(row, dict) and isinstance(row.get("title"), str):
+            row["title"] = row["title"].replace("\r", " ").replace("\n", " ").strip()
         if (not isinstance(row, dict) or not isinstance(row.get("title"), str)
                 or not row["title"].strip() or "\n" in row["title"] or "\r" in row["title"]
                 or type(row.get("first_segment")) is not int
@@ -188,7 +191,9 @@ def _units(raw, total, pages, policy=POLICY):
             raise ValueError("invalid knowledge point start")
         starts.append(row["first_segment"])
     if starts[0] != 0:
-        raise ValueError("missing first source segment")
+        if not allow_leading_gap:
+            raise ValueError("missing first source segment")
+        starts[0] = 0
     units = []
     for i, row in enumerate(rows):
         last = starts[i + 1] - 1 if i + 1 < len(starts) else total - 1
@@ -196,13 +201,39 @@ def _units(raw, total, pages, policy=POLICY):
         # Validate real source identities here; request capacity is checked later.
         for field, limit in (("reference_segments", total), ("courseware_indices", pages)):
             values = row.get(field)
+            if allow_leading_gap:
+                if values is None:
+                    values = []
+                if isinstance(values, list):
+                    values = list(dict.fromkeys(v for v in values
+                        if type(v) is int and 0 <= v < limit
+                        and not (field == "reference_segments" and starts[i] <= v <= last)))
+                row[field] = values
             if (not isinstance(values, list)
                     or any(type(v) is not int or not 0 <= v < limit for v in values)
                     or len(set(values)) != len(values)
                     or (field == "reference_segments" and any(starts[i] <= v <= last for v in values))):
                 raise ValueError("invalid lookup source indices")
-        units.append({**row, "last_segment": last})
+        units.append({**row, "first_segment": starts[i], "last_segment": last})
     return units
+
+
+def _fallback_units(original, window_seconds=480):
+    """Partition every original segment into deterministic elapsed-time windows."""
+    if (type(window_seconds) not in (int, float) or not math.isfinite(window_seconds)
+            or window_seconds <= 0):
+        raise ValueError("知识点时间窗口必须为正数。")
+    if not original:
+        return []
+    source_span(original)
+    starts = [0]
+    for i, segment in enumerate(original[1:], 1):
+        if segment["start"] - original[starts[-1]]["start"] >= window_seconds:
+            starts.append(i)
+    return [{"title": f"课堂讲述（第 {i + 1} 部分）", "first_segment": first,
+             "last_segment": starts[i + 1] - 1 if i + 1 < len(starts) else len(original) - 1,
+             "reference_segments": [], "courseware_indices": []}
+            for i, first in enumerate(starts)]
 
 
 def _repair_input(stage, payload, raw, policy, primary_key, *, layout=None):
@@ -243,7 +274,8 @@ def _repair_payload(cache, stage, original, model, context):
     return repair
 
 
-def _structured(cache, stage, payload, model, identity, context, ask, validate):
+def _structured(cache, stage, payload, model, identity, context, ask, validate, repair_validate=None,
+                *, fallback=None):
     original = _response(cache, stage, payload, model, identity, context, ask)
     try:
         return validate(original["response"]), original, original
@@ -251,8 +283,10 @@ def _structured(cache, stage, payload, model, identity, context, ask, validate):
         repair = _response(cache, stage + "-repair",
             _repair_payload(cache, stage, original, model, context), model, identity, context, ask)
         try:
-            return validate(repair["response"]), original, repair
+            return (repair_validate or validate)(repair["response"]), original, repair
         except (ValueError, TypeError) as exc:
+            if fallback is not None:
+                return fallback(), original, repair
             raise RuntimeError("知识点笔记编号或格式未能恢复，已完成响应与原转写保留。") from exc
 
 
@@ -334,7 +368,7 @@ def _render(title, original, units, sections):
     return f"# {title}\n\n" + "\n".join(s["markdown"] for s in rendered), rendered
 
 
-def _resolved(cache, primary_key, resolved_key, stage, validate):
+def _resolved(cache, primary_key, resolved_key, stage, validate, repair_validate=None, *, fallback=None):
     primary = _read(cache, primary_key)
     if primary is None or primary["stage"] != stage:
         raise ValueError("missing primary response")
@@ -346,7 +380,18 @@ def _resolved(cache, primary_key, resolved_key, stage, validate):
                 cache.name, primary["request_sha256"], layout=resolved["input"].get("repair_layout"))
             or resolved["model"] != primary["model"] or resolved["identity"] != primary["identity"]):
         raise ValueError("repair provenance changed")
-    return primary, validate(resolved["response"])
+    validator = (repair_validate or validate) if resolved is not primary else validate
+    try:
+        return primary, validator(resolved["response"])
+    except (ValueError, TypeError):
+        if fallback is None or resolved is primary:
+            raise
+        # Only two invalid, provenance-checked paid responses justify fallback.
+        try:
+            validate(primary["response"])
+        except (ValueError, TypeError):
+            return primary, fallback()
+        raise ValueError("valid primary plan cannot require fallback")
 
 
 def saved_sections(target: Path, transcript=None, sources=None):
@@ -369,7 +414,11 @@ def saved_sections(target: Path, transcript=None, sources=None):
         courseware = report["courseware_context"]
         identity, title = report["identity"], report["title"]
         plan_row, units = _resolved(cache, report["plan_request"], report["plan_response"], "plan",
-            lambda raw: _units(raw, len(original), len(courseware), policy))
+            lambda raw: _units(raw, len(original), len(courseware), policy, allow_leading_gap=True),
+            repair_validate=lambda raw: _units(raw, len(original), len(courseware), policy,
+                                               allow_leading_gap=True),
+            fallback=(lambda: _fallback_units(original, report.get("plan_window_seconds", 480)))
+                     if policy == POLICY else None)
         expected_plan = _plan_input(title, original, courseware, identity, policy)
         if (plan_row["input"] != expected_plan or plan_row["model"] != report["model"]
                 or plan_row["identity"] != identity or len(report["requests"]) != len(units)
@@ -447,6 +496,8 @@ def write_notes(transcript, target: Path, settings, title, *, ask, merge_ask=Non
     if not original:
         return None
     source_span(original)
+    # Validate before any paid work; persisted for exact fallback reconstruction.
+    _fallback_units(original, window_seconds)
     sources = source_context or []
     courseware = _courseware(sources)
     model, merge_model = settings.notes_model, merge_model or settings.notes_model
@@ -473,7 +524,10 @@ def write_notes(transcript, target: Path, settings, title, *, ask, merge_ask=Non
     if progress:
         progress(0, 1, "划分知识点", 0)
     units, plan, plan_response = _structured(cache, "plan", plan_input, model, identity, context, ask,
-        lambda raw: _units(raw, len(original), len(courseware), policy))
+        lambda raw: _units(raw, len(original), len(courseware), policy, allow_leading_gap=True),
+        repair_validate=lambda raw: _units(raw, len(original), len(courseware), policy,
+                                           allow_leading_gap=True),
+        fallback=(lambda: _fallback_units(original, window_seconds)) if policy == POLICY else None)
     payloads = [_unit_input(title, original, unit, i, courseware, identity, policy) for i, unit in enumerate(units)]
     for payload in payloads:
         _capacity("unit", payload, model, context, policy)
@@ -527,6 +581,7 @@ def write_notes(transcript, target: Path, settings, title, *, ask, merge_ask=Non
         "transcript_sha256": fingerprint(transcript), "sources_sha256": fingerprint(sources),
         "courseware_context": courseware, "plan_request": plan["request_sha256"],
         "plan_response": plan_response["request_sha256"],
+        "plan_window_seconds": window_seconds,
         "requests": [row["request_sha256"] for row in records],
         "merge_request": merged["request_sha256"] if merged else None,
         "merge_response": merge_response["request_sha256"] if merge_response else None,

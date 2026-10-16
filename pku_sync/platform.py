@@ -459,6 +459,7 @@ SELECTABLE_NOTE_MODELS = frozenset({"qwen3.5-flash", "qwen3.7-plus", "qwen3.8-ma
 
 
 def llm_request_body_size(operation, system, prompt, *, model=None, operation_context=None):
+    model = "qwen3.8-max-0902" if model == "qwen3.8-max" else model
     body = {"operation": operation, "system": system, "user": prompt,
             "idempotency_key": "0" * 32}
     if model is not None:
@@ -523,12 +524,17 @@ def _llm_durable_job(operation: str, prompt: str, settings, *, system: str, toke
     selected_model = None
     if operation == "notes":
         requested_model = getattr(settings, "notes_model", None)
+        if requested_model == "qwen3.8-max":
+            requested_model = "qwen3.8-max-0902"
         if requested_model in SELECTABLE_NOTE_MODELS:
             selected_model = requested_model
         elif requested_model not in (None, "", "qwen/qwen3.5-397b-a17b"):
             raise PlatformError("云端笔记模型无效；请明确选择服务支持的模型，原稿保留。")
-        if selected_model == "qwen3.7-plus" and len(system) + len(prompt) > 30000:
-            raise PlatformError("云端笔记模型完整输入超过 30000 字符；来源未裁剪，任务未提交。")
+    if len(system) + len(prompt) > 200000:
+        raise PlatformError("云端模型完整输入超过 200000 字符；来源未裁剪，任务未提交。")
+    if llm_request_body_size(operation, system, prompt, model=selected_model,
+                             operation_context=operation_context) > LLM_REQUEST_MAX_BYTES:
+        raise _llm_error(httpx.Response(413))
     endpoint = _endpoint(settings.cloud_transcribe_url, "/v1/llm/jobs")
     headers = {"Authorization": f"Bearer {token}"}
     state_path = _llm_job_state_path(settings, _llm_payload_hash(operation, system, prompt,
@@ -548,9 +554,6 @@ def _llm_durable_job(operation: str, prompt: str, settings, *, system: str, toke
         body["model"] = selected_model
     if operation_context:
         body['operation_context'] = operation_context
-    if llm_request_body_size(operation, system, prompt, model=selected_model,
-                             operation_context=operation_context) > LLM_REQUEST_MAX_BYTES:
-        raise _llm_error(httpx.Response(413))
     configured_timeout = float(getattr(settings, "llm_timeout", _LLM_JOB_DEADLINE_SECONDS))
     deadline = time.monotonic() + min(
         _LLM_JOB_DEADLINE_SECONDS, max(1.0, configured_timeout)
