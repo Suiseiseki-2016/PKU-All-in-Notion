@@ -1,4 +1,4 @@
-param([switch]$CheckOnly)
+param([switch]$CheckOnly, [switch]$BundleOnly)
 
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
@@ -96,8 +96,15 @@ try {
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
     Push-Location $desktopDir
     try {
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { throw "Windows release build failed (exit code $LASTEXITCODE)." }
+        if ($BundleOnly) {
+            & .\node_modules\.bin\tauri.cmd bundle --bundles nsis
+            if ($LASTEXITCODE -ne 0) { throw "Windows NSIS bundle failed (exit code $LASTEXITCODE)." }
+            & node scripts/stage-release-tree.js
+            if ($LASTEXITCODE -ne 0) { throw "Windows stage-release-tree failed (exit code $LASTEXITCODE)." }
+        } else {
+            & npm run build
+            if ($LASTEXITCODE -ne 0) { throw "Windows release build failed (exit code $LASTEXITCODE)." }
+        }
     } finally {
         Pop-Location
     }
