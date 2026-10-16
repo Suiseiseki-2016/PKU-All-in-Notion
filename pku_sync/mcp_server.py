@@ -53,6 +53,24 @@ def list_recording_status(course_id: str = "") -> list[dict]:
     return _tools().recording_status(course_id)
 
 
+@mcp.tool()
+def get_course_summary(course: str = "") -> dict:
+    """Read course summary markdown and lecture coverage by course ID or name."""
+    return _tools().get_course_summary(course)
+
+
+@mcp.tool()
+def get_lecture_notes(course: str, lecture: str = "") -> list[dict]:
+    """Read generated lecture notes, filtering by lecture title or date."""
+    return _tools().get_lecture_notes(course, lecture)
+
+
+@mcp.tool()
+def search_course_knowledge(query: str, course: str = "") -> list[dict]:
+    """Find ranked snippets in notes, transcripts, assignments and notices."""
+    return _tools().search_course_knowledge(query, course)
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

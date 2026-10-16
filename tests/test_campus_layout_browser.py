@@ -195,6 +195,7 @@ def test_portal_first_layout_and_account_settings():
                 s.view = 'campus-course'; s.campus.courseId = 'official-course';
                 s.campus.course = {id:'official-course', title:'发展心理学', code:'PSY',
                     lessons:[{id:'sep29',title:'第五讲',date:'2026-09-29',materials:[{index:0,title:'第五讲课件',files:['第五讲.pdf'],category:'material'}],
+                        notes_available:true,
                         notion_note_url:'https://www.notion.so/accepted-note',
                         notion_lecture_url:'https://www.notion.so/lecture',video_available:true}],
                     unassigned_materials:[],all_materials:[],assignments:[{source:'calendar',
@@ -207,7 +208,7 @@ def test_portal_first_layout_and_account_settings():
             assert page.locator(".campus-centers").evaluate(
                 "el => !!(el.compareDocumentPosition(document.querySelector('#course-lessons')) & Node.DOCUMENT_POSITION_FOLLOWING)")
             page.locator('[data-action="campus-open-lesson"][data-recording="sep29"]').click()
-            assert page.get_by_role("button", name="查看总结").is_visible()
+            assert page.get_by_role("button", name="阅读本讲总结").is_visible()
             assert page.get_by_role("link", name="下载原始录像").get_attribute("href") == "/api/recordings/sep29/video"
             assert page.locator('.recording-row .course-meta').first.inner_text() == '第 1 节课'
             page.locator('[data-action="campus-course-home"]').click()
@@ -273,7 +274,7 @@ UI_GUIDANCE_CASES = [
     ('saved-transcript', {'transcript_available': True}, False, False),
     ('regenerate', {'transcript_available': True, 'notes_available': True,
         'notion_lecture_url': 'https://www.notion.so/local-fixture'}, True, False),
-    ('publish', {'transcript_available': True, 'notes_available': True,
+    ('publish', {'transcript_available': True, 'notes_available': False,
         'publish_ready': True, 'video_available': False}, False, False),
     ('regenerate-no-video', {'transcript_available': True, 'notes_available': True,
         'publish_ready': True, 'video_available': False,
@@ -328,22 +329,18 @@ def test_lecture_usage_guidance_and_cancel_match_actual_reuse(usage_guidance_ren
     page,posts=usage_guidance_renderer
     setup_usage_guidance(page,extra,False)
     text=page.locator('.recording-row').inner_text()
-    assert ('预计转写用量约 120 分钟' in text) is new_audio
-    assert page.locator('[data-recording-direct-oss]').count()==int(new_audio)
+    assert '约 120 分钟' in text
+    assert '预计转写用量' not in text
+    assert '短时授权直传阿里云 OSS' not in text
     if kind=='publish':
-        assert '不重复消耗转写或 AI 额度' in text
-    elif not new_audio:
-        assert '复用已有转写' in text and 'AI' in text
+        assert '本机已有笔记与课堂画面' in text
+    elif kind=='saved-transcript':
+        assert '已生成转写' in text
     action='campus-regenerate' if regenerate else 'campus-process'
     page.locator('[data-action="'+action+'"]').click()
-    page.wait_for_function('window.__guideConfirm.length===1')
-    confirmation=page.evaluate('window.__guideConfirm[0]')
-    assert ('转写与 AI 笔记会消耗额度' in confirmation) is new_audio
-    assert ('短时授权直传阿里云 OSS' in confirmation) is new_audio
-    if kind=='saved-transcript' or kind.startswith('regenerate'):
-        assert '已有转写' in confirmation and 'AI' in confirmation
-    if kind=='publish':assert '不重复消耗转写或 AI 笔记额度' in confirmation
-    assert posts==[]
+    page.wait_for_function("window.__usageGuidance.state.recordings.task.id==='local-task'")
+    assert page.evaluate('window.__guideConfirm.length') == 0
+    assert len(posts)==1
 
 
 @pytest.mark.parametrize('kind,extra,regenerate,new_audio',UI_GUIDANCE_CASES,ids=[c[0] for c in UI_GUIDANCE_CASES])

@@ -146,6 +146,7 @@ class Work:
     current_item: str = ""
     bytes_done: int = 0
     speed_bps: int = 0
+    local_mode: bool = False
     notion_synced: bool = False
     catalog_updated: int = 0
     catalog_incomplete: int = 0
@@ -1381,7 +1382,7 @@ class RecordingWorkManager:
             elif self._work and self._work.kind == "catalog":
                 message = "Notion 课程目录暂时无法更新；已建立的页面会保留，请稍后重试。"
             elif self._work and self._work.kind == "summary":
-                message = ("课程总结没有生成；讲次页不受影响，请检查 Notion 连接后重试。")
+                message = ("课程总结没有生成；本机笔记已保留，请稍后重试。")
             else:
                 message = _unexpected_process_failure(failed_stage)
             with self._lock:
@@ -1408,9 +1409,9 @@ class RecordingWorkManager:
                 elif self._work.kind == "download":
                     self._work.stage = "录像已保存到本机，可下载到电脑"
                 elif self._work.kind == "summary":
-                    self._work.stage = self._summary_done_text()
+                    self._work.stage = ("课程总结已生成并保存在本机" if self._work.local_mode else self._summary_done_text())
                 else:
-                    self._work.stage = "已发布到 Notion"
+                    self._work.stage = ("课堂笔记已生成并保存在本机" if self._work.local_mode else "已发布到 Notion")
                 self._work.result_url = result_url
                 if not self._work.result_url and self._work.result_urls:
                     self._work.result_url = self._work.result_urls[0]
@@ -1439,7 +1440,7 @@ class RecordingWorkManager:
 
     def _summarize_courses(self, course_ids: list[str], *, required: bool,
                            plan: bool = True) -> dict:
-        from .course_summary import publish_course_summaries
+        from .course_summary import publish_course_summaries, save_local_course_summaries
         if not course_ids:
             if required:
                 raise ValueError("还没有同步任何课程；请先在「我的课程」更新课程目录。")
@@ -1449,8 +1450,14 @@ class RecordingWorkManager:
         else:
             self._advance("生成课程总结")
         self._progress(0, len(course_ids), "courses", 0)
-        result = publish_course_summaries(
-            Path(self.settings.data_dir), self.settings.notion_token, course_ids,
+        local_mode = not self._notion_enabled()
+        with self._lock:
+            if self._work:
+                self._work.local_mode = local_mode
+        summarize = save_local_course_summaries if local_mode else publish_course_summaries
+        args = (Path(self.settings.data_dir), course_ids) if local_mode else (Path(self.settings.data_dir), self.settings.notion_token, course_ids)
+        result = summarize(
+            *args,
             on_course=(lambda title: self._advance(f"生成课程总结：{title}")) if plan else None,
             on_progress=lambda done, total, title: self._progress(done, total, "courses", 0,
                                                                   label=title),
@@ -1492,14 +1499,14 @@ class RecordingWorkManager:
             if self._work:
                 self._work.notion_synced = True
 
+    def _notion_enabled(self) -> bool:
+        from .notion_home import saved_home
+        return bool(getattr(self.settings, "notion_token", "")
+                    and saved_home(Path(self.settings.data_dir)))
+
     def start_course_summaries(self, course_id: str = "") -> dict:
         from .campus_catalog import campus_course
-        from .notion_home import saved_home
-        if not getattr(self.settings, "notion_token", ""):
-            raise ValueError("请先连接 Notion。")
         root = Path(self.settings.data_dir)
-        if not saved_home(root):
-            raise ValueError("请先选择 Notion 父页面并创建学习主页。")
         if course_id:
             campus_course(root, course_id)
             targets = [course_id]
@@ -1618,6 +1625,13 @@ class RecordingWorkManager:
                 client.close()
             if result.path is None:
                 raise ValueError("录像下载没有完成，请检查教学网连接后重试。")
+        if job.video.is_file():
+            try:
+                from ..lecture_source_download import match_materials_by_keyframes
+                if match_materials_by_keyframes(job, key, self.settings, stage=self._stage):
+                    self._stage("录像已保存到本机，并已根据视频关键帧匹配课件")
+            except Exception:
+                pass  # The downloaded recording remains usable if matching fails.
         marker = job.directory / ".keep-video"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
@@ -1666,12 +1680,9 @@ class RecordingWorkManager:
             raise ValueError("这条录像不属于当前教学网课程。")
         if not getattr(self.settings, "platform_token", ""):
             raise ValueError("请先登录并完成邮箱验证。")
-        if not getattr(self.settings, "notion_token", ""):
-            raise ValueError("请先连接 Notion。")
-        from .notion_home import saved_home, ensure_recording_target
+        from .notion_home import ensure_recording_target
         root = Path(self.settings.data_dir)
-        if not saved_home(root):
-            raise ValueError("请先选择 Notion 父页面并创建学习主页。")
+        local_mode = not self._notion_enabled()
         if reuse_existing:
             required = (
                 job.directory / "transcript.json",
@@ -1691,11 +1702,15 @@ class RecordingWorkManager:
                 raise ValueError("；".join(issues)
                                  + " 请先在「我的课程」保存教学网账号，应用会自动重新读取目录。")
         def run() -> str:
-            if not reuse_existing:
+            if not reuse_existing or local_mode:
                 self._refresh_stale_catalog(job)
-            self._stage("准备 Notion 课程与讲次页")
-            with self._projection_stage():
-                lecture_id = ensure_recording_target(root, self.settings.notion_token, job, settings=self.settings)
+            lecture_id = ""
+            with self._lock:
+                self._work.local_mode = local_mode
+            if not local_mode:
+                self._stage("准备 Notion 课程与讲次页")
+                with self._projection_stage():
+                    lecture_id = ensure_recording_target(root, self.settings.notion_token, job, settings=self.settings)
             return self._process(
                 job,
                 lecture_id,
@@ -1871,25 +1886,27 @@ class RecordingWorkManager:
                     client.close()
                 if downloaded.path is None:
                     logger.warning("video clip source download failed: %s", downloaded.error)
-        self._stage("将课堂画面和笔记发布到 Notion")
-        try:
-            if staged_note is not None:
-                note_url = publish_notes(job, lecture_id, self.settings.notion_token,
-                                         note_path=staged_note, revision=True)
-            else:
-                note_url = publish_notes(job, lecture_id, self.settings.notion_token)
-        except Exception as exc:
-            logger.exception("Notion note publication failed")
-            quality_message = (str(exc) if isinstance(exc, ValueError)
-                               and str(exc).startswith("笔记暂不能作为完整课程笔记发布") else "")
-            if staged_note is not None:
-                staged_note.unlink(missing_ok=True)
+        local_mode = not lecture_id
+        if not local_mode:
+            self._stage("将课堂画面和笔记发布到 Notion")
+            try:
+                if staged_note is not None:
+                    note_url = publish_notes(job, lecture_id, self.settings.notion_token,
+                                             note_path=staged_note, revision=True)
+                else:
+                    note_url = publish_notes(job, lecture_id, self.settings.notion_token)
+            except Exception as exc:
+                logger.exception("Notion note publication failed")
+                quality_message = (str(exc) if isinstance(exc, ValueError)
+                                   and str(exc).startswith("笔记暂不能作为完整课程笔记发布") else "")
+                if staged_note is not None:
+                    staged_note.unlink(missing_ok=True)
+                    if quality_message:
+                        raise ValueError(f"{quality_message}；原笔记及旧页面均已保留。") from exc
+                    raise ValueError("新版笔记未能写入 Notion；原笔记及旧页面均已保留，可稍后重试。") from exc
                 if quality_message:
-                    raise ValueError(f"{quality_message}；原笔记及旧页面均已保留。") from exc
-                raise ValueError("新版笔记未能写入 Notion；原笔记及旧页面均已保留，可稍后重试。") from exc
-            if quality_message:
-                raise ValueError(f"{quality_message}；本机笔记已保留。") from exc
-            raise ValueError("笔记已保存在本机，但写入 Notion 失败。请检查连接后重试。") from exc
+                    raise ValueError(f"{quality_message}；本机笔记已保留。") from exc
+                raise ValueError("笔记已保存在本机，但写入 Notion 失败。请检查连接后重试。") from exc
         if staged_note is not None:
             from ..note_editor import report_path
             backup = job.directory / f"notes.previous-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}.md"
@@ -1912,6 +1929,10 @@ class RecordingWorkManager:
                 if backup.exists():
                     backup.replace(notes_path)
                 raise
+        if local_mode:
+            if regenerate:
+                clear_regeneration_pending(job)
+            return f"/api/campus/courses/{job.recording.course_id}/recordings/{recording_id(job)}/note-preview"
         from .notion_home import saved_home
         from ..catalog_snapshots import recording_source_id
         publication = {
@@ -1974,6 +1995,123 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             return campus_course(Path(manager.settings.data_dir), course_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/campus/courses/{course_id}/recordings/{key}/match-slides")
+    def campus_match_slides(course_id: str, key: str) -> dict:
+        from ..lecture_source_download import match_materials_by_keyframes
+        from .campus_catalog import campus_course
+        root = Path(manager.settings.data_dir)
+        job = find_job(root, key)
+        if job is None or job.recording.course_id != course_id:
+            raise HTTPException(status_code=404, detail="未找到本讲录像。")
+        if not job.video.is_file() and not (job.directory / "keyframes" / "index.json").is_file():
+            raise HTTPException(status_code=409, detail="请先下载本讲录像，再根据视频关键帧匹配课件。")
+        matched = match_materials_by_keyframes(job, key, manager.settings)
+        return {**campus_course(root, course_id), "keyframe_matched_count": len(matched), "keyframe_matches": matched}
+
+    @app.get("/api/mcp/status")
+    def mcp_status_endpoint() -> dict:
+        from ..mcp_setup import host_integration_catalog
+        from ..mcp_tools import LocalCourseTools
+        root = Path(manager.settings.data_dir)
+        tools = LocalCourseTools(root)
+        return {"ok": True, "courses_count": len(tools.list_courses()),
+                "notes_count": len(tools.get_lecture_notes("")),
+                **host_integration_catalog(data_dir=root)}
+
+    @app.get("/api/campus/courses/{course_id}/summary-preview")
+    def course_summary_preview(course_id: str) -> dict:
+        from .course_summary import summary_markdown, _lecture_rows
+        root = Path(manager.settings.data_dir)
+        course = campus_course_endpoint(course_id)
+        lessons = _lecture_rows(root, course)
+        return {"course_id": course_id, "title": course["title"],
+                "total_lessons": len(lessons),
+                "summarized_lessons": sum(bool(row["has_note"]) for row in lessons),
+                "summary": course.get("summary") or {},
+                "markdown": summary_markdown(root, course_id)}
+
+    def visual_job(course_id, key):
+        job = find_job(Path(manager.settings.data_dir), key)
+        if job is None or job.recording.course_id != course_id:
+            raise HTTPException(status_code=404, detail="这节录像不属于该课程。")
+        return job
+
+    @app.get("/api/campus/courses/{course_id}/recordings/{key}/frames/{filename}")
+    def lecture_frame(course_id: str, key: str, filename: str):
+        from .note_images import _IMAGE_SUFFIXES
+        job = visual_job(course_id, key)
+        if (Path(filename).name != filename or "\\" in filename
+                or Path(filename).suffix.lower() not in _IMAGE_SUFFIXES):
+            raise HTTPException(status_code=400, detail="无效的课堂图片名称。")
+        for folder in (job.directory / "keyframes", job.directory / "note-frames"):
+            path = folder / filename
+            if path.is_file() and path.resolve().is_relative_to(folder.resolve()):
+                return FileResponse(path)
+        raise HTTPException(status_code=404, detail="课堂图片尚未保存。")
+
+    @app.get("/api/campus/courses/{course_id}/recordings/{key}/slide-page")
+    def lecture_slide_page(course_id: str, key: str, file: str, page: int = 1):
+        from .note_images import _local_material, _slide_cache
+        job = visual_job(course_id, key)
+        if page < 1:
+            raise HTTPException(status_code=400, detail="课件页码必须从 1 开始。")
+        cache = _slide_cache(job, file, page)
+        for extension in (".jpg", ".png"):
+            image = Path(str(cache) + extension)
+            if image.is_file() and image.resolve().is_relative_to(cache.parent.resolve()):
+                return FileResponse(image)
+        pdf = _local_material(job, file)
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="课件 PDF 尚未保存。")
+        import pypdfium2 as pdfium
+        import cv2
+        import uuid
+        try:
+            with pdfium.PdfDocument(str(pdf)) as document:
+                if page > len(document):
+                    raise HTTPException(status_code=404, detail="课件没有这一页。")
+                pdf_page = document[page - 1]
+                bitmap = None
+                try:
+                    bitmap = pdf_page.render(scale=min(2, 1600 / max(pdf_page.get_size())))
+                    pixels = bitmap.to_numpy()
+                    # PDFium's native buffer is BGR/BGRA, matching OpenCV.
+                    ok, encoded = cv2.imencode(".jpg", pixels)
+                    if not ok:
+                        raise ValueError("image encoding failed")
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                    image = Path(str(cache) + ".jpg")
+                    staged = image.with_name(image.name + f".{uuid.uuid4().hex}.tmp")
+                    try:
+                        staged.write_bytes(encoded.tobytes())
+                        staged.replace(image)
+                    finally:
+                        staged.unlink(missing_ok=True)
+                finally:
+                    if bitmap is not None:
+                        bitmap.close()
+                    pdf_page.close()
+        except (OSError, ValueError, pdfium.PdfiumError) as exc:
+            raise HTTPException(status_code=422, detail="课件页面暂时无法读取。") from exc
+        return FileResponse(image)
+
+    @app.get("/api/campus/courses/{course_id}/recordings/{key}/note-preview")
+    def lecture_note_preview(course_id: str, key: str) -> dict:
+        from .course_summary import note_outline
+        job = find_job(Path(manager.settings.data_dir), key)
+        if job is None or job.recording.course_id != course_id:
+            raise HTTPException(status_code=404, detail="这节录像不属于该课程。")
+        path = job.directory / "notes.md"
+        markdown = path.read_text("utf-8", errors="replace") if path.is_file() else ""
+        outline = note_outline(markdown)
+        from .note_images import build_note_visual_sections
+        visuals = build_note_visual_sections(job, course_id, key, markdown)
+        return {"recording_id": key, "course_id": course_id,
+                "title": job.recording.title, "date": job.recording.date,
+                "available": bool(markdown.strip()), "markdown": markdown, "visuals": visuals,
+                "topics": [name for name, _ in outline["topics"][:8]],
+                "clues": outline["clues"][:5]}
 
     @app.get("/api/campus/courses/{course_id}/recordings/{key}/term-review")
     def recording_term_review(course_id: str, key: str) -> dict:
@@ -2172,7 +2310,7 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                         'home': saved_home(root), 'workspace': workspace,
                         'home_sync': home_sync}
             if workspace.get("active"):
-                read_projection(manager.settings)
+                read_projection(manager.settings, tolerate_partial=True)
             home = saved_home(Path(manager.settings.data_dir))
             from .notion_workspace import saved_workspace
             return {"pages": available_parents(token), "home": home,

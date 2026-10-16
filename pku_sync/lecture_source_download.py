@@ -10,20 +10,23 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import unicodedata
 import zipfile
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree
 
 from .pipeline import RecordingJob
 from .store import safe_name
+from .media import extract_keyframes
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED = frozenset({".pdf", ".pptx", ".docx"})
 MAX_FILES = 6
+KEYFRAME_MATCHES_FILENAME = "keyframe-matches.json"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_BYTES = 40 * 1024 * 1024
 _ASSIGNMENT_WORDS = ("作业", "考试", "测试", "测验", "提交")
@@ -267,15 +270,224 @@ def _save_inferred_receipt(base: Path, typed: Path, binding: str):
     temporary.replace(target)
 
 
+def _keyframe_candidate_attachments(job: RecordingJob, recording_key: str) -> list[tuple[dict, dict]]:
+    material_dir = job.course_dir / "materials"
+    rows = _read_json(material_dir / "index.json", [])
+    overrides = _read_json(material_dir / "matches.json", {})
+    overrides = overrides if isinstance(overrides, dict) else {}
+    recordings = _read_json(job.course_dir / "recordings" / "index.json", [])
+    ordered = sorted((row for row in recordings if isinstance(row, dict)),
+                     key=lambda row: (str(row.get("recorded_at", "")), str(row.get("title", "")))) if isinstance(recordings, list) else []
+    lesson_order = next((i for i, row in enumerate(ordered, 1)
+                         if row.get("recorded_at") == job.recording.recorded_at
+                         and row.get("title") == job.recording.title), 1)
+    try:
+        day = date.fromisoformat(job.recording.date)
+    except ValueError:
+        day = None
+    ranked = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        title, path = str(row.get("title") or ""), str(row.get("path") or "")
+        override = overrides.get(path)
+        if (not path or row.get("kind") in {"作业", "考试", "测试"}
+                or any(word in title for word in _ASSIGNMENT_WORDS)
+                or override not in (None, "", recording_key)):
+            continue
+        for asset in row.get("attachments") or []:
+            if not isinstance(asset, dict):
+                continue
+            filename = str(asset.get("filename") or "")
+            if not filename or Path(filename).suffix.lower() not in {".pdf", ""}:
+                continue
+            value = unicodedata.normalize("NFKC", path + " " + title + " " + filename)
+            number = re.search(r"第\s*(\d+)\s*讲|(?:ch(?:apter)?|week|l|ppt)\s*0*(\d+)", value, re.I)
+            if override == recording_key:
+                rank = (0, 0)
+            elif day and _explicit_date(value, day):
+                rank = (1, 0)
+            elif number:
+                rank = (2, abs(int(number.group(1) or number.group(2)) - lesson_order))
+            else:
+                rank = (3, 0)
+            ranked.append((rank, row, asset))
+    ranked.sort(key=lambda entry: entry[0])
+    return [(row, asset) for _, row, asset in ranked[:MAX_FILES]]
+
+
+def _atomic_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), "utf-8")
+    temporary.replace(path)
+
+
+def keyframe_source_paths(job: RecordingJob, recording_key: str) -> list[Path]:
+    """Only reuse visual evidence still confirmed for this lecture."""
+    receipt = _read_json(job.directory / "keyframes" / KEYFRAME_MATCHES_FILENAME, {})
+    overrides = _read_json(job.course_dir / "materials" / "matches.json", {})
+    if not isinstance(receipt, dict) or not isinstance(overrides, dict):
+        return []
+    paths = []
+    for row in receipt.get("matches", []):
+        if not isinstance(row, dict) or overrides.get(row.get("material_path")) != recording_key:
+            continue
+        path = (job.course_dir / str(row.get("local_path") or "")).resolve()
+        if (path.is_relative_to(job.course_dir.resolve()) and path.is_file()
+                and path.suffix.lower() == ".pdf" and _looks_like_document(path, ".pdf")
+                and path not in paths):
+            paths.append(path)
+    return paths
+
+
+def match_materials_by_keyframes(job: RecordingJob, recording_key: str, settings=None, *, stage=None) -> list[dict]:
+    """Confirm courseware by comparing its pages with saved projector frames."""
+    material_dir = job.course_dir / "materials"
+    rows = _read_json(material_dir / "index.json", [])
+    if not isinstance(rows, list) or not rows:
+        return []
+    candidates = _keyframe_candidate_attachments(job, recording_key)
+    frames_dir = job.directory / "keyframes"
+    keyframes = _read_json(frames_dir / "index.json", [])
+    if (not isinstance(keyframes, list) or not keyframes) and job.video.is_file():
+        if stage:
+            stage("提取视频关键帧以匹配课件")
+        try:
+            keyframes = extract_keyframes(job.video, frames_dir)
+        except Exception:
+            return []
+    if not isinstance(keyframes, list) or not keyframes:
+        return []
+    import numpy as np
+    from .slide_alignment import _read_gray, _signature, render_deck, align_signatures
+
+    frame_sigs = []
+    for row in keyframes:
+        if not isinstance(row, dict) or not row.get("file"):
+            continue
+        path = (frames_dir / str(row["file"])).resolve()
+        if not path.is_relative_to(frames_dir.resolve()):
+            continue
+        gray = _read_gray(path)
+        if gray is not None:
+            frame_sigs.append(_signature(gray))
+    if not frame_sigs:
+        return []
+    resolved, deck_arrays, deck_ids, page_labels = [], [], [], []
+    client, live = None, []
+    remaining = MAX_TOTAL_BYTES
+    try:
+        for row, asset in candidates:
+            filename = str(asset["filename"])
+            identity = str(asset.get("path") or "")
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+            base = material_dir / ".lecture-sources" / "_keyframe_pool" / f"{digest}-{safe_name(filename)}"
+            binding = _source_binding(job, row, asset)
+            inferred = not Path(filename).suffix
+            cached = _cached_inferred(base, binding, remaining) if inferred else base
+            locations = [material_dir / safe_name(str(row.get("path") or "")) / filename,
+                         material_dir / str(row.get("path") or "") / filename,
+                         material_dir / filename]
+            locations.extend(path for path in material_dir.rglob("*")
+                             if ((path.name == filename and ".lecture-sources" not in path.parts)
+                                 or (".lecture-sources" in path.parts and digest in path.name
+                                     and path.name.endswith(safe_name(filename) + (".pdf" if inferred else "")))))
+            if cached:
+                locations.insert(0, cached)
+            pdf = None
+            for location in locations:
+                location = location.resolve()
+                if (location.is_relative_to(material_dir.resolve()) and location.is_file()
+                        and location.suffix.lower() == ".pdf"
+                        and location.stat().st_size <= min(MAX_FILE_BYTES, remaining)
+                        and _looks_like_document(location, ".pdf")):
+                    pdf = location
+                    break
+            if pdf is None and _safe_webdav_url(identity) and getattr(settings, "pku_username", "") and getattr(settings, "pku_password", ""):
+                try:
+                    if client is None:
+                        from .auth import get_session
+                        from .materials import walk_materials
+                        client = get_session(username=settings.pku_username, password=settings.pku_password)
+                        live, _ = walk_materials(client, job.recording.course_id)
+                    matching = next((item for item in live if item.path == row.get("path")
+                                     and item.title == row.get("title") and item.content_id == row.get("content_id")), None)
+                    fresh = next((item for item in matching.attachments if item.filename == filename), None) if matching else None
+                    url = _safe_webdav_url(fresh.url) if fresh else ""
+                    if url and unquote(urlsplit(url).path) == unquote(urlsplit(_safe_webdav_url(identity)).path):
+                        pdf = _fetch_document(client, url, base, remaining)
+                        if pdf and inferred:
+                            _save_inferred_receipt(base, pdf, binding)
+                except Exception as exc:
+                    logger.warning("keyframe material lookup failed: %s", type(exc).__name__)
+            if pdf is None:
+                continue
+            remaining -= pdf.stat().st_size
+            if pdf.suffix.lower() != ".pdf" or not _looks_like_document(pdf, ".pdf"):
+                continue
+            try:
+                sigs = render_deck(pdf)
+            except Exception as exc:
+                logger.warning("keyframe deck render failed: %s", type(exc).__name__)
+                continue
+            if sigs.size:
+                deck_index = len(resolved)
+                resolved.append((row, asset, pdf, digest))
+                deck_arrays.append(sigs)
+                deck_ids.extend([deck_index] * len(sigs))
+                page_labels.extend((deck_index, page + 1) for page in range(len(sigs)))
+    finally:
+        if client is not None:
+            client.close()
+    assigned, _ = align_signatures(np.stack(frame_sigs), np.vstack(deck_arrays), deck_ids) if deck_arrays else ([], None)
+    pages_by_deck = {}
+    for index in assigned:
+        if index is not None:
+            deck, page = page_labels[index]
+            pages_by_deck.setdefault(deck, []).append(page)
+    overrides = _read_json(material_dir / "matches.json", {})
+    overrides = overrides if isinstance(overrides, dict) else {}
+    matches = []
+    cache_key = hashlib.sha256(recording_key.encode("utf-8")).hexdigest()[:24]
+    for deck, pages in pages_by_deck.items():
+        row, asset, pdf, digest = resolved[deck]
+        if overrides.get(row["path"]) not in (None, "", recording_key):
+            continue
+        target = material_dir / ".lecture-sources" / cache_key / f"{digest}-{safe_name(pdf.name)}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if pdf.resolve() != target.resolve():
+            shutil.copy2(pdf, target)
+        overrides[row["path"]] = recording_key
+        matches.append({"material_path": row["path"], "title": row.get("title", ""),
+                        "filename": asset["filename"], "local_path": str(target.relative_to(job.course_dir)),
+                        "matched_frames": len(pages), "pages": sorted(set(pages))})
+    _atomic_json(material_dir / "matches.json", overrides)
+    _atomic_json(frames_dir / KEYFRAME_MATCHES_FILENAME,
+                 {"recording_id": recording_key, "matched_at": datetime.now(timezone.utc).isoformat(), "matches": matches})
+    return matches
+
+
 def prepare_lesson_sources(job: RecordingJob, recording_key: str, settings, stage=None) -> tuple[list[Path] | None, list[dict]]:
     """Return verified local files plus unavailable source rows for this lecture."""
-    candidates = _candidate_attachments(job, recording_key)
+    frames_dir = job.directory / "keyframes"
+    if (frames_dir / "index.json").is_file() and not (frames_dir / KEYFRAME_MATCHES_FILENAME).is_file():
+        try:
+            match_materials_by_keyframes(job, recording_key, settings, stage=stage)
+        except Exception as exc:
+            logger.warning("keyframe matching failed: %s", type(exc).__name__)
+    paths = keyframe_source_paths(job, recording_key)
+    receipt = _read_json(frames_dir / KEYFRAME_MATCHES_FILENAME, {})
+    matched_assets = {(row.get("material_path"), row.get("filename"))
+                      for row in receipt.get("matches", []) if isinstance(row, dict)
+                      and (job.course_dir / str(row.get("local_path") or "")).resolve() in paths} if isinstance(receipt, dict) else set()
+    candidates = [(row, asset) for row, asset in _candidate_attachments(job, recording_key)
+                  if (row.get("path"), asset.get("filename")) not in matched_assets]
     if not candidates:
         # Older full-sync directories may already hold dated files.  The
         # source parser's strict date scan is safe only with one lecture that
         # day; an empty list disables fallback for ambiguous same-day pairs.
-        return (None if _single_lecture_that_day(job) else []), []
-    paths: list[Path] = []
+        return (paths or (None if _single_lecture_that_day(job) else [])), []
     failures: list[dict] = []
     selected = candidates[:MAX_FILES]
     # The panel passes a 24-character hash, but this helper also has tests and

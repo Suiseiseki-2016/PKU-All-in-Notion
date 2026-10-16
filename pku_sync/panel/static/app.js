@@ -42,7 +42,6 @@
     if (start && state.activated) {
       var settings = document.querySelector('.campus-settings');
       if (settings) settings.open = true;
-      loadNotionParents();
     }
   }
 
@@ -286,6 +285,8 @@
 
   function loadQuota() {
     var epoch = ++accountQuotaEpoch;
+    readingPreviews = {};
+    mcpHub = {status:null, host:'codex', error:''};
     state.campus.courseCache = {};
     state.campus.course = null;
     return requestJson("/api/platform/quota").then(function (result) {
@@ -478,10 +479,12 @@
   function campusReadError(message) {
     var value = String(message || "");
     if (/课程准备读取已过期|课程快照或准备顺序已变化|课序不一致/.test(value))
-      return "课程信息需要重新核对，Notion 同步暂未完成。登录状态不受影响，可返回「我的课程」更新目录后重试。";
+      return "课程信息需要重新核对，同步暂未完成。登录状态不受影响，可返回「我的课程」更新目录后重试。";
     if (/account_unconfirmed|revision|快照.*未确认|快照.*已更新/i.test(value))
       return "账号目录版本核对未完成或已变化；已有内容保留，请更新这门课后重试。";
-    return value || "教学网连接中断；保留已有内容，请检查网络后重试。";
+    // Legacy publishing tasks can still finish in the backend. Keep their
+    // diagnostics readable without restoring service branding to the UI.
+    return value.replace(/Notion/gi, '笔记同步服务') || "教学网连接中断；保留已有内容，请检查网络后重试。";
   }
 
   function rememberCampusCourse(course) {
@@ -567,20 +570,31 @@
     var syncBusy = state.recordings.syncPending || state.recordings.backgroundPending ||
       state.recordings.task.state === "running" || state.recordings.background.state === "running";
     var steps = [
-      ["产品账号", state.activated && accountVerified()],
+      ["我的账号", state.activated && accountVerified()],
       ["教学网账号", state.campus.configured],
-      ["课程目录", catalogReady],
-      ["Notion 学习主页", Boolean(state.campus.home)]
+      ["课程目录", catalogReady]
     ];
     var next = steps.find(function (step) { return !step[1]; });
     var nextAction = state.campus.demoConnection ? '' : !accountVerified() ? button("我已验证邮箱，刷新状态", "refresh-verification", { small: true }) :
       !state.campus.configured ? button("设置教学网账号", "campus-account-settings", { small: true, primary: true }) :
       !catalogReady ? (includeSyncAction === false ? '' : button(syncBusy ? "正在更新课程目录…" : "更新课程目录", "recording-sync", { small: true, primary: true, disabled: syncBusy })) :
-      !state.campus.home ? button("设置 Notion 学习主页", "campus-account-settings", { small: true, primary: true }) : '';
+      '';
     return '<section class="panel campus-setup"><h2>开始使用</h2><ul class="setup-steps">' +
       steps.map(function (step) { return '<li><span class="setup-mark" aria-hidden="true">' + (step[1] ? '✓' : '○') + '</span><span>' + esc(step[0]) + '</span></li>'; }).join("") +
       '</ul><p>' + (state.campus.demoConnection ? '演示模式：此处不会创建真实页面。' :
         next ? '下一步：' + esc(next[0]) : '已就绪，可以从课程中选择录像按需整理。') + '</p>' + nextAction + '</section>';
+  }
+
+  function formatCourseTitleMarkup(title) {
+    var match = String(title || '').match(/^(.*?)(\((?:\d{2}-\d{2}学年.*|.*学期.*)\))$/);
+    return match ? esc(match[1]) + '<span class="course-title-term">' + esc(match[2]) + '</span>' : esc(title);
+  }
+
+  function formatLessonTitleMarkup(title, date) {
+    title = String(title || '');
+    return date && title.startsWith(date) && title.slice(date.length).trim()
+      ? '<span class="lesson-title-date">' + esc(date) + '</span><span>' + esc(title.slice(date.length)) + '</span>'
+      : esc(title);
   }
 
   function campusDashboardScreen() {
@@ -589,32 +603,33 @@
     var titleCounts = {};
     state.campus.courses.forEach(function (course) { titleCounts[course.title] = (titleCounts[course.title] || 0) + 1; });
     var items = visible.map(function (course) {
+      var titleTerm = String(course.title || '').match(/\(([^()]*学期[^()]*)\)$/);
       var classLabel = titleCounts[course.title] > 1 && course.id
         ? ' · 教学班 ' + esc(course.id.replace(/^_/, '').replace(/_\d+$/, '')) : '';
-      return '<article class="course-card"><span class="course-icon" aria-hidden="true">' + esc(GLYPH.book) +
-        '</span><div class="course-content"><span class="course-meta">' + esc(course.term || '本学期') + classLabel + '</span><h3>' + esc(course.title) +
+      return '<article class="course-card" data-course-card="' + esc(course.id) + '"><span class="course-icon" aria-hidden="true">' + esc(GLYPH.book) +
+        '</span><div class="course-content"><span class="course-meta">' + esc(titleTerm ? titleTerm[1] : course.term || '本学期') + classLabel + '</span><h3>' + formatCourseTitleMarkup(course.title) +
         '</h3><p>' + esc(course.recordings) + ' 节课 · ' + esc(course.assignments || 0) + ' 项正式作业 · ' + esc(course.announcements || 0) + ' 则通知' +
-        (course.calendar_items ? ' · ' + esc(course.calendar_items) + ' 项日历事项' : '') + '</p><details class="course-meta-details" data-persistent-disclosure="course-meta-' + esc(course.id) + '"><summary>课程信息</summary><p>' +
+        (course.calendar_items ? ' · ' + esc(course.calendar_items) + ' 项日历事项' : '') + '</p>' +
+        (course.read_only ? '<p class="course-readonly-note" role="status">' + esc(course.read_only_message || "教学网读取尚未完成；已有内容保留为只读，请更新这门课。") + '</p>' : '') + '</div><div class="course-card-footer"><details class="course-meta-details" data-persistent-disclosure="course-meta-' + esc(course.id) + '"><summary>课程信息</summary><p>' +
         esc(course.code ? '课程号 ' + (course.code.length > 14 ? course.code.slice(0, 8) + '…' + course.code.slice(-4) : course.code) : '课程号未提供') + (course.term ? ' · ' + esc(course.term) : '') +
         (course.id ? ' · 教学班 …' + esc(course.id.slice(-6)) : '') + '</p><p>目录更新：' +
         esc(course.synced_at ? course.synced_at.slice(0, 10) : "尚未更新") + '</p></details>' +
-        (course.read_only ? '<p role="status">' + esc(course.read_only_message || "教学网读取尚未完成；已有内容保留为只读，请更新这门课。") + '</p>' : '') + '</div>' +
-        button("查看课程", "open-campus-course", { small: true, attrs: { "data-course": course.id } }) + '</article>';
+        button("查看课程", "open-campus-course", { small: true, quiet: true, attrs: { "data-course": course.id } }) + '</div></article>';
     }).join("");
     var credentials = state.campus.configured && !state.recordings.editingCredentials
       ? '<p>教学网账号已保存。' + button("更换账号", "recording-edit-credentials", { small: true, quiet: true }) + '</p>'
       : recordingCredentialsForm();
     if (state.view === "campus-account") {
       return breadcrumb([{label:"我的课程", action:"open-dashboard"}, {label:"连接设置"}]) +
-        '<div class="topline"><div><h1 class="page-title">连接设置</h1><p class="page-desc">连接教学网获取课程，连接 Notion 保存笔记。</p></div></div>' +
+        '<div class="topline"><div><h1 class="page-title">连接设置</h1><p class="page-desc">连接教学网获取课程，资料与笔记保存在本机。</p></div></div>' +
         campusSetupGuide() + recordingTaskStatus() + backgroundSyncStatus() +
         (state.recordings.error ? '<p role="alert">' + esc(state.recordings.error) + '</p>' : '') +
-        '<section class="panel"><h2>教学网账号</h2>' + credentials + '</section>' + campusHomeControls();
+        '<section class="panel"><h2>教学网账号</h2>' + credentials + '</section>';
     }
     var empty = state.campus.courses.length ? (visible.length ? '<div class="course-grid">' + items + '</div>' : '<div class="empty-materials">没有找到匹配的课程。</div>') :
       '<div class="empty-materials">还没有课程。连接教学网账号后，点击「更新课程目录」。</div>';
     return '<div class="topline"><div><h1 class="page-title">我的课程</h1><p class="page-desc">查看作业与资料，按需整理课堂笔记。</p></div></div>' +
-      (state.view === "campus-account" || !state.campus.configured || !state.campus.home || !accountVerified() ? campusSetupGuide(false) : '') +
+      (!(state.campus.configured && state.campus.courses.length) ? campusSetupGuide(false) : '') +
       '<section class="panel" aria-label="课程列表"><div class="course-list-toolbar"><span class="course-count">' + (query ? '找到 ' + visible.length : state.campus.courses.length) + ' 门课程</span>' +
       button("更新课程目录", "recording-sync", { small: true, primary: true,
         disabled: !state.campus.configured,
@@ -629,8 +644,10 @@
   }
 
   function campusHomeControls() {
+    var syncBusy = state.recordings.syncPending || state.recordings.backgroundPending || state.recordings.task.state === "running";
     if (state.campus.demoConnection) return '';
     var busy = Boolean(state.campus.workspaceBusy);
+    var waitHint = busy ? '<p role="status" class="form-note">' + esc(COPY.notion.workspace_wait_hint) + '</p>' : '';
     var loading = Boolean(state.campus.parentsLoading);
     var homeSync = state.campus.homeSync;
     var blocked = homeSync && ['pulled', 'current', 'absent'].indexOf(homeSync.status) === -1;
@@ -692,16 +709,17 @@
       '</div><div class="home-preview"><small>主页结构预览</small><h3>我的学习空间</h3><ul><li>课程与课堂讲次</li><li>作业、通知与课程资料</li><li>课堂笔记与课程总结</li></ul></div></div>' +
       '<div class="home-setup-footer"><div><strong>2 · 创建学习主页</strong><p>' +
       (!campusCatalogReady() ? '先更新课程目录，至少一门课程读取成功后即可创建。Notion 保存位置会保留。' :
-        selected ? '保存到「' + esc(selected.title) + '」下面' : '选好保存位置后即可创建') + '</p></div>' +
+        selected ? '保存到「' + esc(selected.title) + '」下面' : '选好保存位置后即可创建') + '</p>' +
+      (!campusCatalogReady() ? button(syncBusy ? '正在更新课程目录…' : '先更新课程目录', 'recording-sync', {small:true, disabled:syncBusy || !state.campus.configured}) : '') + '</div>' +
       button(busy ? "正在创建并验证…" : "创建学习主页", "campus-create-workspace", {
         primary: true, disabled: busy || loading || !state.campus.parentId || !campusCatalogReady() || state.recordings.task.state === "running", attrs: { "aria-busy": String(busy) }
-      }) + '</div>' + error + '</section>';
+      }) + '</div>' + waitHint + error + '</section>';
   }
 
-  function directOssConsent() {
-    return '<label class="recording-oss-consent"><input type="checkbox" data-recording-direct-oss' +
+  function directOssConsent(lectureId) {
+    return '<label class="recording-oss-consent"><input type="checkbox" data-recording-direct-oss data-action="toggle-direct-oss-consent" data-testid="direct-oss-consent-' + esc(lectureId || '') + '"' +
       (state.recordings.directOss ? ' checked' : '') +
-      '> 本次整理将音频经 15 分钟短时授权直传阿里云 OSS，以加快云端转写；教学网账号留在本机，临时音频处理后删除。</label>';
+      '><span>同意上传本讲音频至云端进行 AI 转写与笔记整理（完成后自动清理云端临时音频）</span></label>';
   }
 
   function createWorkspace(replaceExisting) {
@@ -751,8 +769,8 @@
           button("忽略匹配", "campus-material-ignore", { small: true, quiet: true, attrs: { "data-material": item.index } });
     }
     return '<li><strong>' + esc(item.title) + '</strong> <span class="course-meta">' + category +
-      '</span>' + (links ? '<div>' + links + '</div>' : '<small>教学网未提供可下载附件；可在教学网查看。</small>') +
-      (control ? '<div class="material-match-control">' + control + '</div>' : '') + '</li>';
+      '</span>' + (item.match_source === 'keyframe' ? '<span class="status-badge indexed">关键帧匹配</span>' : '') + (links ? '<div>' + links + '</div>' : item.body_text ? '<p class="material-body-text">' + esc(item.body_text) + '</p>' : '<small>教学网未提供可下载附件；可在教学网查看。</small>') +
+      (control ? '<details class="material-match-disclosure"><summary>关联讲次或忽略</summary><div class="material-match-control">' + control + '</div></details>' : '') + '</li>';
   }
 
   function campusOfficialSections(course, section) {
@@ -782,30 +800,41 @@
         ? '/api/campus/courses/' + encodeURIComponent(course.id) +
           '/assignments/' + encodeURIComponent(item.content_id) + '/source'
         : '';
+      var deadlineMention = !item.due_at_label && !item.due_at && !item.teacher_deadline_quote && String(item.instructions || '').match(/((?:\d{1,2}\s*月\s*\d{1,2}\s*日|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})[^\n。；;]{0,18}(?:前|截止|提交))/);
       var due = item.due_at_label || item.due_at || (item.teacher_deadline_quote
         ? '老师原文写 ' + item.teacher_deadline_quote + '（系统无独立截止字段，请打开原要求核对）'
-        : '教学网未公布');
+        : deadlineMention ? deadlineMention[1] + '（正文提及）' : '教学网未公布');
+      var caveats = [];
+      if (item.source === 'calendar') caveats.push('来自教学网日历提醒，尚未关联到正式作业；具体要求与截止时间请到教学网课程中核对');
+      else {
+        if (!source) caveats.push('请到教学网课程中核对原要求');
+        if (!item.content_id) caveats.push('尚无可验证的提交目标');
+      }
       var sourceLinks = (item.source_links || []).filter(function (link) {
         return link && /^https:\/\/[^/]+/i.test(link.url || '') && link.label;
       }).map(function (link) {
         return '<a href="' + esc(link.url) + '" target="_blank" rel="noopener noreferrer">' +
           esc(link.label) + '</a>';
       }).join(' · ');
-      return '<li><strong>' + esc(item.title) + '</strong><small>' + (item.source === 'calendar' ? '日历时间：' : '截止：') + esc(due) +
+      return '<li><div class="official-item-header"><strong>' + esc(item.title) + '</strong><span class="status-badge ' +
+        (item.source === 'calendar' ? 'pending">日历提醒' : 'indexed">正式作业') + '</span></div><small>' + (item.source === 'calendar' ? '日历时间：' : '截止：') + esc(due) +
         ' · 来源：教学网' + (item.source === "calendar" ? "日历" : "作业") +
         ' · 更新：' + esc(updated) + '</small><p>' + esc(item.instructions || "要求未提供，请打开教学网原页面核对。") +
-        '</p>' + (item.source === 'calendar' ? '<p>尚未关联到正式作业；日历时间不能据此认定为作业截止时间。</p>' : '') +
+        '</p>' +
         ((item.files || []).length ? '<p>附件：' + esc(item.files.join("、")) + '</p>' : '') +
         (sourceLinks ? '<p>老师原页面链接：' + sourceLinks + '</p>' : '') +
-        (source ? '<a href="' + esc(source) + '" target="_blank" rel="noopener noreferrer">查看教学网原要求</a>' :
-          '<small>请到教学网课程中核对原要求</small>') +
+        '<div class="official-item-actions">' + (source ? '<a href="' + esc(source) + '" target="_blank" rel="noopener noreferrer">查看教学网原要求</a>' :
+          '') +
         (source ? button(status && status.loading ? '正在读取提交状态…' : '读取教学网提交状态', 'campus-assignment-status', {
           small: true, disabled: Boolean(status && status.loading), attrs: { 'data-assignment': item.content_id } }) : '') +
+        (item.content_id && item.source !== "calendar" ? button("准备作业文件", "campus-prepare-assignment", { small: true,
+          attrs: { "data-assignment": item.content_id } }) : '') + '</div>' +
         (status ? '<p role="status">' + esc(status.label || '教学网当前提交状态未确认') +
           (status.checked_at ? ' · 核对时间：' + esc(status.checked_at) : '') + '</p>' +
           (status.error ? '<p role="alert">' + esc(status.error) + '</p>' : '') : '') +
-        (item.content_id && item.source !== "calendar" ? button("准备作业文件", "campus-prepare-assignment", { small: true,
-          attrs: { "data-assignment": item.content_id } }) : '<small>尚无可验证的提交目标</small>') + '</li>';
+        (caveats.length ? '<div class="official-item-footer">' + caveats.map(function (text) {
+          return '<span class="official-caveat">' + esc(text) + '</span>';
+        }).join('') + '</div>' : '') + '</li>';
     }).join("");
     var announcementTaskItems = (course.announcement_tasks || []).map(function (item) {
       return '<li><strong>' + esc(item.notice_title) + '</strong><small>公告待办 · 截止：' +
@@ -855,7 +884,7 @@
       var rarHint = /\.rar\b/i.test(selectedItem.instructions || "") ?
         '<p class="form-note hint">老师要求中出现 .rar；这里生成的是 ZIP。请核对老师是否接受 ZIP，需要 RAR 时在本机按原要求制作。</p>' : '';
       preparation = '<div class="assignment-preparation"><h3>准备作业文件 · ' + esc(selectedItem.title) +
-        '</h3><p>按老师要求选择文件形式。ZIP 模式会把 Notion 正文保存为 Markdown 文本“答案.md”，不会自动生成 PDF 或 Word。若老师要求文档，请先从 Notion 导出后用单文件模式上传。在线作答或随堂考勤请使用教学网原入口。草稿只保存在本机，准备阶段不会提交。</p>' + rarHint +
+        '</h3><p>按老师要求选择本地答案文件。ZIP 模式会将所选文件打包；单文件模式保留原文件格式。在线作答或随堂考勤请使用教学网原入口。草稿只保存在本机，准备阶段不会提交。</p>' + rarHint +
         button(state.campus.submission.analysisBusy ? '正在识别要求…' : 'AI 识别作业要求', 'campus-analyze-requirements',
           { small: true, disabled: !!state.campus.submission.analysisBusy }) + analysisView +
         (draft ? '<div role="status"><p>正式提交目标：' + esc(course.title) + ' · ' + esc(draft.assignment_title) +
@@ -872,14 +901,12 @@
           '</div>' :
           '<form id="assignment-prepare-form"><label>提交文件形式<select name="submission_mode"><option value="zip"' + (formValues.submission_mode === "zip" ? ' selected' : '') + '>ZIP 压缩包</option><option value="single_file"' + (formValues.submission_mode === "single_file" ? ' selected' : '') + '>单个原文件（PDF、Word 等）</option></select></label>' +
           (formValues.submission_mode === "zip" ?
-            '<label>Notion 答案页链接<input name="notion_url" type="url" placeholder="粘贴 Notion 页面链接" value="' + esc(formValues.notion_url) + '"></label>' +
             '<label>压缩包文件名（按老师要求）<input name="archive_name" required placeholder="学号姓名第1次作业.zip" value="' + esc(formValues.archive_name) + '"></label>' +
-            '<label>单独导出页面中的 Python 代码块为（可选）<input name="code_filename" placeholder="hill_cipher.py" value="' + esc(formValues.code_filename) + '"></label>' +
             '<label>补充文件（如代码、图片、已导出的 PDF）<input name="attachments" type="file" multiple></label>' :
             '<label>已导出的答案文件<input name="attachments" type="file"></label>') +
           '<p data-assignment-attachments>' + (formValues.attachments.length ? '已选择：' + esc(formValues.attachments.map(function (file) { return file.name; }).join('、')) : '尚未选择文件') + '</p>' +
-          (formValues.submission_mode === "zip" ? '<p class="form-note">Notion 嵌入文件不会自动加入压缩包；请在这里补充。另一套 Notion 页面需要另行授权给本应用；也可先导出答案文件并上传。</p>' :
-            '<p class="form-note">请先将 Notion 作业导出为老师要求的格式，再选择导出的文件；此处不会转换页面格式或改变原文件名。</p>') +
+          (formValues.submission_mode === "zip" ? '<p class="form-note">请加入老师要求的全部答案文件，再生成压缩包检查。</p>' :
+            '<p class="form-note">请选择老师要求格式的答案文件；此处不会转换格式或改变原文件名。</p>') +
           button("生成本地草稿并预检", "campus-build-draft", { primary: true, small: true }) + '</form>') +
         (state.campus.submission.error ? '<p role="alert">' + esc(state.campus.submission.error) + '</p>' : '') +
         '</div>';
@@ -1005,7 +1032,6 @@
     var selected = state.campus.submission.selectedId;
     var courseId = state.campus.courseId;
     if (!selected || state.campus.submission.analysisBusy) return;
-    if (!await confirmAction('确认识别这项教学网作业的要求？\n已有相同要求的结果会直接复用，不再扣费；需要新识别时预计 1–5 AI 点。\n请核对原文、截止时间和文件格式。')) return;
     state.campus.submission.analysisBusy = true;
     state.campus.submission.error = '';
     render();
@@ -1103,6 +1129,105 @@
     }).catch(function () { showToast("关联未保存。"); });
   }
 
+  var readingPreviews = {};
+  var mcpHub = { status: null, host: 'codex', error: '' };
+
+  function copyStudyText(text, message) {
+    function fallback() {
+      var field = document.createElement('textarea');
+      field.value = text; field.style.position = 'fixed'; field.style.opacity = '0';
+      document.body.appendChild(field); field.select();
+      var copied = document.execCommand('copy'); field.remove();
+      showToast(copied ? message : '复制失败，请选择文本后手动复制。');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { showToast(message); }).catch(fallback);
+    }
+    fallback();
+  }
+
+  // Escape all source text first; local notes can contain arbitrary HTML.
+  function studyMarkdown(markdown, visuals) {
+    function imageUrl(value) {
+      var url = String(value || '').trim();
+      if (!url || /[\s\\]/.test(url) || /^\/\//.test(url)) return '';
+      try { return /^https?:$/.test(new URL(url, window.location.href).protocol) ? url : ''; }
+      catch (_) { return ''; }
+    }
+    function card(url, caption, note) {
+      var source = imageUrl(url);
+      return source ? '<figure class="note-visual-card"><img src="' + esc(source) + '" alt="' + esc(caption) + '" loading="lazy"><figcaption><span>' + esc(caption) + (note ? '<br>' + esc(note) : '') + '</span></figcaption></figure>' : '';
+    }
+    function sectionVisuals(heading) {
+      var items = (Array.isArray(visuals) ? visuals : []).filter(function (v) { return String(v.heading || '').trim() === heading.trim(); });
+      if (!items.length) return '';
+      return '<div class="note-visual-grid">' + items.map(function (v) {
+        return card(v.frame_url, v.frame_caption || '课堂板书/投影 · ' + (v.time || ''), v.board_note) +
+          (imageUrl(v.slide_url) ? card(v.slide_url, v.slide_caption || '对应课件页') : v.slide_caption ? '<div class="note-slide-reference">📄 ' + esc(v.slide_caption) + '</div>' : '');
+      }).join('') + '</div>';
+    }
+    var fenced = false;
+    var body = String(markdown || '').split(/\r?\n/).map(function (line) {
+      if (/^\s*```/.test(line)) { fenced = !fenced; return fenced ? '<pre><code>' : '</code></pre>'; }
+      if (fenced) return esc(line) + '\n';
+      var heading = /^(#{1,6})\s+(.+)$/.exec(line);
+      function inline(value) { return esc(value).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>'); }
+      if (heading) { var level = Math.min(heading[1].length + 1, 6); return '<h' + level + '>' + inline(heading[2]) + '</h' + level + '>' + (/^#{2,3}$/.test(heading[1]) ? sectionVisuals(heading[2]) : ''); }
+      var image = /^\s*!\[([^\]]*)\]\(([^\s]+)\)\s*$/.exec(line);
+      if (image && imageUrl(image[2])) return card(image[2], image[1]);
+      if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) return '<li>' + inline(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')) + '</li>';
+      if (/^>\s?/.test(line)) return '<blockquote>' + inline(line.replace(/^>\s?/, '')) + '</blockquote>';
+      return line.trim() ? '<p>' + inline(line) + '</p>' : '';
+    }).join('');
+    return body + (fenced ? '</code></pre>' : '');
+  }
+
+  function previewReader(key, lecture) {
+    var item = readingPreviews[key];
+    if (!item || !item.open) return '';
+    return '<section class="lecture-note-reader" aria-label="' + (lecture ? '本讲课堂笔记' : '课程总结预览') + '">' +
+      '<div class="reader-toolbar">' + button('收起阅读', 'campus-toggle-preview', {small:true, quiet:true, attrs:{'data-preview':key}}) +
+      (item.markdown ? button(lecture ? '复制笔记全文' : '复制 Markdown', 'campus-copy-markdown', {small:true, attrs:{'data-preview':key}}) : '') + '</div>' +
+      (item.loading ? '<p role="status">正在读取本地笔记…</p>' : item.error ? '<p role="alert">' + esc(item.error) + '</p>' :
+        '<div class="study-markdown">' + studyMarkdown(item.markdown || '本讲尚无笔记，整理完成后即可阅读。', item.visuals) + '</div>') + '</section>';
+  }
+
+  function openStudyPreview(recording, forceOpen) {
+    var epoch = accountQuotaEpoch;
+    var courseId = state.campus.courseId;
+    var key = courseId + ':' + (recording || 'summary');
+    if (!forceOpen && readingPreviews[key] && readingPreviews[key].open) { readingPreviews[key].open = false; render(); return; }
+    var item = readingPreviews[key] = {open:true, loading:true, markdown:'', lecture:Boolean(recording)};
+    render();
+    requestJson('/api/campus/courses/' + encodeURIComponent(courseId) + (recording ? '/recordings/' + encodeURIComponent(recording) + '/note-preview' : '/summary-preview')).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) throw new Error(result.body && result.body.detail || '暂时无法读取笔记，请重试。');
+      item.markdown = result.body.markdown; item.visuals = result.body.visuals || []; item.loading = false; render();
+    }).catch(function (error) { if (epoch !== accountQuotaEpoch) return; item.loading = false; item.error = error.message; render(); });
+  }
+
+  function mcpHubScreen() {
+    var data = mcpHub.status;
+    if (!data) return '<section class="panel"><h1>MCP AI 学习工作台</h1><p role="status">' + esc(mcpHub.error || '正在读取本地知识库…') + '</p>' +
+      (mcpHub.error ? button('重试', 'open-mcp-hub', {small:true}) : '') + '</section>';
+    var host = data.hosts.find(function (row) { return row.id === mcpHub.host; }) || data.hosts[0];
+    return '<section class="panel mcp-hub"><p class="eyebrow">MCP 接入</p><h1>AI 工具连接</h1><p>已就绪课程 ' + esc(data.courses_count) + ' 门 · 可供 AI 调阅的课堂总结/笔记 ' + esc(data.notes_count) + ' 篇</p>' +
+      '<div class="mcp-hosts" aria-label="选择 AI 工具">' + data.hosts.map(function (row) {return button(row.name, 'select-mcp-host', {small:true, primary:row.id === host.id, attrs:{'data-host':row.id, 'aria-pressed':String(row.id === host.id)}});}).join('') + '</div>' +
+      '<h2>' + esc(host.name) + '</h2><p>' + esc(host.description) + '</p>' +
+      (host.cli_command ? '<h3>运行一次即可接入</h3><pre><code>' + esc(host.cli_command) + '</code></pre><div class="reader-toolbar">' + button('复制接入命令', 'copy-mcp-command', {small:true}) + '</div>' : '') +
+      '<h3>配置文件</h3><p class="mcp-config-path">' + esc(host.config_path) + '</p><pre><code>' + esc(host.config_snippet) + '</code></pre>' +
+      '<div class="reader-toolbar">' + button('一键复制配置', 'copy-mcp-snippet', {small:true, primary:true}) + button('复制 AI 提问示例', 'copy-mcp-prompt', {small:true}) + '</div>' +
+      '<blockquote>' + esc(host.sample_prompt) + '</blockquote><p>接入后可查询课程总结、阅读讲次笔记、搜索知识与作业线索。</p></section>';
+  }
+
+  function openCampusLesson(recordingId) {
+    state.campus.section = 'lecture';
+    state.campus.lessonId = recordingId;
+    var lesson = state.campus.course && state.campus.course.lessons.find(function (item) { return item.id === recordingId; });
+    if (lesson && lesson.notes_available) openStudyPreview(recordingId, true);
+    else render();
+  }
+
   function campusCourseScreen() {
     var course = state.campus.course;
     var section = state.campus.section === "quizzes" ? "home" : state.campus.section || "home";
@@ -1120,9 +1245,13 @@
       return (section !== "lecture" || lesson.id === state.campus.lessonId) &&
         (!state.campus.dateQuery || (lesson.date || "").includes(state.campus.dateQuery.trim()));
     }).map(function (lesson, index) {
+      var topicLabel = lesson.note_topic || ((lesson.materials && lesson.materials.length) ? '课件：' + lesson.materials.map(function (m) { return m.title; }).join('、') : '');
+      var topicLine = topicLabel ? '<p class="lesson-topic-line">' + esc(topicLabel) + '</p>' : '';
       if (section !== "lecture") {
-        return '<article class="campus-lesson-page"><div><small>第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课 · ' + esc(lesson.date || "日期未提供") + '</small>' +
-          '<h3>' + esc(lesson.title) + '</h3>' + (lesson.notion_note_url ? '<span class="recording-published">已有课堂总结</span>' : '') + '</div>' +
+        return '<article class="campus-lesson-page" data-lesson-card="' + esc(lesson.id) + '"><div><small>第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课 · ' + esc(lesson.date || "日期未提供") + '</small>' +
+          '<h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) + '</h3>' + topicLine + '<div class="lesson-status">' + (lesson.notes_available || lesson.notion_note_url ? '<span class="recording-published">已有课堂总结</span>' :
+            lesson.transcript_available ? '<span class="status-badge indexed">已生成转写</span>' : '<span class="status-badge reading">待整理笔记</span>') +
+          ((lesson.materials || []).length ? '<small class="lesson-material-count">已关联 ' + esc(lesson.materials.length) + ' 份课件</small>' : '') + '</div></div>' +
           button("进入讲次", "campus-open-lesson", { small: true, attrs: { "data-recording": lesson.id } }) + '</article>';
       }
       var materials = lesson.materials.filter(function (item) {
@@ -1131,34 +1260,29 @@
         return campusMaterial(item, course.id);
       }).join("");
       var publishExisting = Boolean(lesson.publish_ready && !lesson.video_available);
-      var canRegenerate = Boolean(lesson.notion_lecture_url && lesson.transcript_available && lesson.notes_available);
+      var canRegenerate = Boolean(lesson.transcript_available && lesson.notes_available);
       var publishSaved = publishExisting && !canRegenerate;
       needsTranscription = needsTranscription || (!lesson.transcript_available && !publishSaved);
       var details = lesson.duration_seconds ? ' · 约 ' + Math.ceil(lesson.duration_seconds / 60) +
-        ' 分钟' : ' · 时长未提供，可先读取时长';
-      if (publishSaved) details += ' · 发布已有笔记，不重复消耗转写或 AI 额度';
-      else if (lesson.transcript_available) details += ' · 复用已有转写，笔记生成可能消耗 AI 点';
-      else if (lesson.duration_seconds) details += ' · 预计转写用量约 ' + Math.ceil(lesson.duration_seconds / 60) + ' 分钟';
-      if (lesson.video_size) details += ' · 本地文件 ' + formatTransfer(lesson.video_size);
-      var blocked = lesson.unavailable_reason || (course.read_only ? course.read_only_message || "教学网尚未完整读取，旧目录只读。" : courseTaskBusy(course.id) ? "这门课正在更新或处理，请等待当前任务完成。" : state.campus.demoConnection ? "演示模式不会实际整理，请在正式程序中连接 Notion。" : !state.connection.connected ? "请先连接 Notion。" : !state.campus.home ? "请先创建 Notion 学习主页。" : "");
+        ' 分钟' : '';
+      if (publishSaved) details += ' · 本机已有笔记与课堂画面';
+      else if (lesson.transcript_available && !lesson.notes_available) details += ' · 已生成转写';
+      if (lesson.video_size) details += ' · 本地视频 ' + formatTransfer(lesson.video_size);
+      var metaText = lesson.title && lesson.date && String(lesson.title).indexOf(lesson.date) === 0
+        ? details.replace(/^ · /, '') : (lesson.date || "日期未记录") + details;
+      if (lesson.unavailable_reason) metaText += (metaText ? ' · ' : '') + lesson.unavailable_reason;
+      var lessonPreviewOpen = Boolean(readingPreviews[course.id + ':' + lesson.id] && readingPreviews[course.id + ':' + lesson.id].open);
+      var blocked = lesson.unavailable_reason || (course.read_only ? course.read_only_message || "教学网尚未完整读取，旧目录只读。" : courseTaskBusy(course.id) ? "这门课正在更新或处理，请等待当前任务完成。" : state.campus.demoConnection ? "演示模式不会实际整理，请在正式程序中登录。" : "");
       var review = state.termReview.courseId === course.id && state.termReview.recordingId === lesson.id ? termReviewPanel(lesson) : "";
-      return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课</span><h3>' + esc(lesson.title) +
-        '</h3><p>' + esc(lesson.date || "日期未记录") + esc(details) + (lesson.unavailable_reason ? ' · ' + esc(lesson.unavailable_reason) : '') +
-        '</p>' + (!lesson.duration_seconds && state.campus.configured ? button('读取时长', 'campus-estimate-duration', { small: true, quiet: true, attrs: { 'data-recording': lesson.id } }) : '') +
-        (materials ? '<ul>' + materials + '</ul>' : '<p>暂无明确对应的课件</p>') + '</div><div class="recording-row-actions">' +
-        (lesson.notion_lecture_url
-          ? '<span class="recording-published">已写入 Notion</span>' + button(lesson.notion_note_url ? "查看总结" : "查看讲次", "campus-open-lecture", {
-              small: true, primary: true, attrs: { "data-url": lesson.notion_note_url || lesson.notion_lecture_url }
-            }) : '') +
-        (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
-        (canRegenerate
-          ? button("重新整理笔记", "campus-regenerate", {
-              small: true, quiet: true, disabled: Boolean(blocked),
-              attrs: { "data-recording": lesson.id }
-            }) + (blocked ? '<small class="action-reason">' + esc(blocked) + '</small>' : '')
-          : button(publishExisting ? "发布已有笔记" : "整理这节录像", "campus-process", { small: true, primary: true,
+      return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课</span><h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) +
+        '</h3>' + topicLine + (metaText ? '<p>' + esc(metaText) + '</p>' : '') +
+        (materials ? '<ul>' + materials + '</ul>' : '<div class="empty-materials lecture-empty-materials"><p>暂无明确对应的课件</p><small>' + (lesson.video_available || lesson.keyframes_available ? '已备好本讲视频画面，可点击「按关键帧匹配课件」自动识别投影页，或在「课程资料」中手动关联。' : '下载或整理本讲录像后，将自动根据视频关键帧匹配对应课件；也可在「课程资料」中手动关联。') + '</small></div>') + '</div><div class="recording-row-actions">' +
+        '<div class="recording-primary-bar">' + (lesson.notes_available ? button(lessonPreviewOpen ? '收起本讲总结' : '阅读本讲总结', 'campus-preview-lecture-note', {small:true, primary:!lessonPreviewOpen, quiet:lessonPreviewOpen, attrs:{'data-recording':lesson.id}}) : '') + (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
+        (canRegenerate ? '' : button(lesson.notes_available ? "重新整理笔记" : "整理这节录像", "campus-process", { small: true, primary: !lesson.notes_available,
               disabled: Boolean(blocked),
-              attrs: { "data-recording": lesson.id } }) + (blocked ? '<small class="action-reason">' + esc(blocked) + '</small>' : '')) +
+              attrs: { "data-recording": lesson.id } })) + (blocked ? '<small class="action-reason">' + esc(blocked === (course.read_only_message || '教学网尚未完整读取，旧目录只读。') ? '请先更新这门课' : blocked) + '</small>' : '') + '</div><div class="recording-secondary-bar">' +
+        (lesson.video_available || lesson.keyframes_available ? button('按关键帧匹配课件', 'campus-match-slides-keyframes', {small:true, quiet:true, disabled:courseTaskBusy(course.id), attrs:{'data-recording':lesson.id}}) : '') +
+        (!lesson.duration_seconds && state.campus.configured ? button('读取时长', 'campus-estimate-duration', { small: true, quiet: true, attrs: { 'data-recording': lesson.id } }) : '') +
         (lesson.video_available
           ? '<a class="btn btn-small btn-quiet" href="/api/recordings/' + encodeURIComponent(lesson.id) + '/video" download>下载原始录像</a>'
           : button("下载原始录像", "recording-download", { small: true, quiet: true,
@@ -1167,26 +1291,29 @@
         (lesson.transcript_available || lesson.notes_ready ? button("核对术语", "campus-review-term", {
           small: true, quiet: true, attrs: { "data-recording": lesson.id, "aria-expanded": review ? "true" : "false" }
         }) : "") +
+        (canRegenerate ? button("重新整理笔记", "campus-regenerate", { small: true, quiet: true, disabled: Boolean(blocked), attrs: { "data-recording": lesson.id } }) : '') + '</div>' +
         (lesson.transcript_reviewed_pending ? '<small class="recording-published">转写已修正，请重新整理笔记。</small>' : "") +
-        '</div>' + review + '</article>';
+        '</div>' + previewReader(course.id + ':' + lesson.id, true) + review + '</article>';
     }).join("");
     var pendingItems = course.unassigned_materials.filter(function (item) {
       return state.campus.category === "all" || item.category === state.campus.category;
     });
+    var infoItems = pendingItems.filter(function (item) { return item.category === "information"; });
+    var slideItems = pendingItems.filter(function (item) { return item.category !== "information"; });
+    var infoSection = infoItems.length ? '<section class="panel" data-materials-info><h2>课程大纲与基本信息</h2><p>教学网提供的课程介绍、教学大纲与考核说明。</p><ul>' +
+      infoItems.map(function (item) { return campusMaterial(item, course.id); }).join("") + '</ul></section>' : '';
     var hasLessons = course.lessons.length > 0;
-    var pending = '<section class="panel"><h2>' + (hasLessons ? '尚未对应讲次的内容' : '课程内容') + '</h2><p>' + (hasLessons ? '这些内容暂时无法可靠对应到某节录像；你可以关联到讲次或忽略匹配。' : '教学网提供的资料、作业和课程信息。可直接下载有附件的内容。') + '</p><ul>' +
-      (pendingItems.length ? pendingItems.map(function (item) { return campusMaterial(item, course.id, course.lessons); }).join("") : '<li>' + esc(course.section_states && course.section_states.materials && ['not_synced', 'error', 'cached'].indexOf(course.section_states.materials.state) >= 0 ? course.section_states.materials.message : '当前分类暂无内容。') + '</li>') + '</ul></section>';
-    var summary = course.summary && course.summary.url ? course.summary : null;
+    var pending = (slideItems.length || !infoItems.length) ? '<section class="panel" data-materials-unassigned><h2>' + (hasLessons ? '待关联讲次的课件与资料' : '课程内容') + '</h2><p>' + (hasLessons ? '下载或整理录像后将自动按视频关键帧匹配课件，也可在此手动关联到对应讲次。' : '教学网提供的资料、作业和课程信息。可直接下载有附件的内容。') + '</p><ul>' +
+      (slideItems.length ? slideItems.map(function (item) { return campusMaterial(item, course.id, course.lessons); }).join("") : '<li>' + esc(course.section_states && course.section_states.materials && ['not_synced', 'error', 'cached'].indexOf(course.section_states.materials.state) >= 0 ? course.section_states.materials.message : '当前分类暂无内容。') + '</li>') + '</ul></section>' : '';
+    var summary = course.summary && course.summary.title ? course.summary : null;
     var summaryControl = '<div class="course-summary-control">' +
-      (summary ? button("打开课程总结", "campus-open-summary", {
-        small: true, attrs: { "data-url": summary.url }
-      }) + '<small>' + esc(summary.title || "课程总结快照") + '</small>' : "") +
+      (summary ? '<small>' + esc(summary.title) + '</small>' : "") +
       button(summary ? "重新生成课程总结" : "生成课程总结", "campus-course-summary", {
         small: true, quiet: Boolean(summary),
-        disabled: courseTaskBusy(course.id) || state.campus.demoConnection || !state.campus.home,
+        disabled: courseTaskBusy(course.id) || state.campus.demoConnection,
         attrs: { "data-course": course.id }
       }) + '</div>';
-    var hero = '<section class="course-hero' + (section !== 'home' ? ' course-hero-compact' : '') + '" data-course-id="' + esc(course.id) + '"><div><span class="course-kicker">教学网课程</span><h1>' + esc(course.title) +
+    var hero = '<section class="course-hero' + (section !== 'home' ? ' course-hero-compact' : '') + '" data-course-id="' + esc(course.id) + '"><div><span class="course-kicker">教学网课程</span><h1>' + formatCourseTitleMarkup(course.title) +
       '</h1><small>' + esc(course.term || '') + '</small></div><div class="hero-actions">' +
       button("更新这门课", "recording-sync-course", { small: true,
         // Preserve real double-click input; the task guard rejects repeats.
@@ -1194,7 +1321,7 @@
         attrs: { "data-course": course.id,
           "aria-disabled": courseTaskBusy(course.id),
           "style": courseTaskBusy(course.id) ? "opacity:.55;cursor:not-allowed;transform:none" : "" }
-      }) + button("课程设置", "campus-course-settings", { small: true, quiet: true }) + '</div></section>';
+      }) + '</div></section>';
     var notice = course.read_only ? '<section class="panel" role="status">' + esc(course.read_only_message || "教学网尚未完整读取；旧目录保留为只读，请更新这门课或打开教学网核对。") + '</section>' : '';
     if (state.campus.loading) notice += '<p role="status">正在读取本课最新缓存；已有内容可继续浏览。</p>';
     if (state.campus.error) notice += '<p role="alert">' + esc(state.campus.error) + '</p>';
@@ -1210,15 +1337,18 @@
         return items.length ? '<section class="panel"><h2>' + esc(lesson.title) + '</h2><ul>' +
           items.map(function (item) { return campusMaterial(item, course.id); }).join('') + '</ul></section>' : '';
       }).join('');
-      return header + hero + notice + recordingTaskStatus() + summaryControl + linkedMaterials + pending;
+      return header + hero + notice + recordingTaskStatus() + '<section class="panel materials-summary-panel"><div class="materials-summary-copy"><strong>课程总结</strong><span>汇总已关联课件、课堂笔记与作业要求</span></div>' + summaryControl + '</section>' + linkedMaterials + infoSection + pending;
     }
-    if (section === "settings") return header + hero + notice + recordingTaskStatus() + '<details class="panel campus-settings" open><summary>课程笔记与 Notion 主页设置</summary>' + campusHomeControls() + campusExistingNotionControl(course) + '</details>';
-    if (section === "lecture") return header + notice + '<section class="panel" id="course-lessons">' + (needsTranscription ? directOssConsent() : "") + recordingTaskStatus() + lessons + '</section>';
+
+    if (section === "lecture") return header + hero + notice + '<section class="panel" id="course-lessons">' + recordingTaskStatus() + lessons + (needsTranscription ? directOssConsent(state.campus.lessonId) : "") + '</section>';
     var centers = [['assignments', '作业中心'], ['notices', '通知中心'], ['materials', '课程资料']].map(function (entry) {
-      return '<a href="#course-' + entry[0] + '" data-action="campus-open-center" data-center="' + entry[0] + '">' + esc(entry[1]) + '<span aria-hidden="true">↗</span></a>';
+      var count = entry[0] === 'assignments' ? (course.assignments || []).length + ' 项记录' :
+        entry[0] === 'notices' ? (course.announcements || []).length + ' 则通知' :
+          ((course.all_materials || []).length || (course.unassigned_materials || []).length) + ' 份资料';
+      return '<a href="#course-' + entry[0] + '" data-action="campus-open-center" data-center="' + entry[0] + '"><span class="center-title">' + esc(entry[1]) + '</span><small class="center-count">' + esc(count) + '</small><span class="center-arrow" aria-hidden="true">↗</span></a>';
     }).join('');
     var activeTaskNotice = state.recordings.task.state === "running" || state.recordings.task.state === "failed" ||
-      ["done", "partial", "cancelled"].indexOf(state.recordings.task.state) >= 0 && state.recordings.task.kind === "sync"
+      ["done", "partial", "cancelled"].indexOf(state.recordings.task.state) >= 0 && ["sync", "summary"].indexOf(state.recordings.task.kind) >= 0
       ? recordingTaskStatus() : "";
     var historical = (course.historical_lessons || []).filter(function (lesson) {
       return lesson.historical === true && lesson.read_only === true && lesson.processing_allowed === false &&
@@ -1226,13 +1356,15 @@
     }).map(function (lesson) {
       return '<article class="campus-lesson-page" data-history-source="' + esc(lesson.source_id) + '"><div><small>历史讲次 · 只读</small>' +
         '<h3>' + esc(lesson.title) + '</h3><p>原记录时间：' + esc(lesson.recorded_at) + '</p></div>' +
-        (lesson.notion_lecture_url && !course.read_only ? button('查看保留讲次', 'campus-open-lecture', {
-          small: true, quiet: true, attrs: { 'data-url': lesson.notion_lecture_url }
-        }) : '<small>原讲次链接尚未核验；已有内容会保留。</small>') + '</article>';
+        '<small>历史学习内容保存在本机。</small>' + '</article>';
     }).join('');
     var historicalDirectory = historical ? '<section id="course-history" class="campus-lesson-directory"><div class="section-label"><h2>历史讲次</h2><small>只读</small></div>' +
       '<p>这些讲次已不在教学网现行目录中，原页面和学习内容会保留。</p><div class="campus-lesson-pages">' + historical + '</div></section>' : '';
-    return header + hero + notice + activeTaskNotice + '<nav class="campus-centers" aria-label="课程内容">' + centers + '</nav>' +
+    var summaryPreviewOpen = Boolean(readingPreviews[course.id + ':summary'] && readingPreviews[course.id + ':summary'].open);
+    var spotlight = '<section class="panel course-summary-spotlight" aria-label="课程总结"><div class="summary-spotlight-header"><h2>课程总结</h2><span class="summary-progress">已整理 ' +
+      course.lessons.filter(function (lesson) {return lesson.notes_available;}).length + ' / ' + course.lessons.length + ' 讲课堂笔记</span></div><p>汇总各讲核心概念、重点脉络与口头提醒，方便复习串讲与随时查阅。</p>' + summaryControl +
+      button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结', 'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen, attrs:{'data-course':course.id}}) + previewReader(course.id + ':summary', false) + '</section>';
+    return header + hero + spotlight + notice + activeTaskNotice + '<nav class="campus-centers" aria-label="课程内容">' + centers + '</nav>' +
       '<section id="course-lessons" class="campus-lesson-directory"><div class="section-label"><h2>每节课</h2><small>' + esc(course.lessons.length) + ' 节课</small></div>' +
       (hasLessons ? '<div class="campus-lesson-pages">' + lessons + '</div>' : '<p>' + esc(course.section_states && course.section_states.recordings &&
         course.section_states.recordings.state !== "empty" ? course.section_states.recordings.message : "这门课程暂时没有录像，可进入课程资料查看文件。") + '</p>') + '</section>' + historicalDirectory;
@@ -1282,6 +1414,9 @@
 
   function termReviewPanel(lesson) {
     var review = state.termReview;
+    var termTarget = (lesson && lesson.transcript_review && lesson.transcript_review.target) || review.target || {};
+    var candidateTerm = termTarget.candidate_term || lesson.candidate_term || "RSA";
+    var ambiguousTerm = termTarget.ambiguous_term || lesson.ambiguous_term || "RAC";
     var content = "";
     if (review.status === "loading") content = '<p role="status">正在查找需要核对的片段…</p>';
     else if (review.status === "none") content = lesson.transcript_reviewed_pending
@@ -1290,14 +1425,14 @@
     else if (review.status === "corrected") content = '<p role="status">已修正转写中的术语。请使用「重新整理笔记」生成新版笔记，并对照录像检查结果。</p>';
     else if (review.target) {
       var target = review.target;
-      content = '<p>自动转写对这一处术语不确定，可能把 RSA 识别成 RAC。请听原声并阅读上下文；只有确认老师说的是 RSA，才勾选并提交。</p>' +
+      content = '<p>自动转写对这一处术语不确定，可能把 ' + esc(candidateTerm) + ' 识别成 ' + esc(ambiguousTerm) + '。请听原声并阅读上下文；只有确认老师说的是 ' + esc(candidateTerm) + '，才勾选并提交。</p>' +
         '<blockquote class="term-review-excerpt">' + esc(target.excerpt) + '</blockquote>' +
         '<p class="term-review-time">建议核听 ' + esc(target.start_label || "") + '–' + esc(target.end_label || "") + '</p>' +
         (review.videoAvailable && target.video_url
           ? '<video controls preload="metadata" playsinline data-term-review-video data-seek="' + esc(Math.max(0, Number(target.start) - 8) || 0) + '" src="' + esc(target.video_url) + '">浏览器无法播放这节录像。</video>'
           : '<p>这节录像尚未保存在电脑上。请先使用上方的录像下载操作，再回来核听。</p>') +
-        (review.videoAvailable && target.video_url ? '<label class="term-review-confirm"><input type="checkbox" data-term-review-confirm' + (review.confirmed ? ' checked' : '') + (review.status === "submitting" ? ' disabled' : '') + '>我已听原声，确认老师说的是 RSA。</label>' +
-          button("确认修正为 RSA", "campus-submit-term-review", { small: true, primary: true, disabled: !review.confirmed || review.status === "submitting" }) : "");
+        (review.videoAvailable && target.video_url ? '<label class="term-review-confirm"><input type="checkbox" data-term-review-confirm' + (review.confirmed ? ' checked' : '') + (review.status === "submitting" ? ' disabled' : '') + '>我已听原声，确认老师说的是 ' + esc(candidateTerm) + '。</label>' +
+          button("确认修正为 " + candidateTerm, "campus-submit-term-review", { small: true, primary: true, disabled: !review.confirmed || review.status === "submitting" }) : "");
     }
     return '<section class="term-review-panel" aria-label="' + esc(lesson.title) + '术语核对"><div class="term-review-heading"><h4>核对术语</h4>' +
       button("收起", "campus-close-term-review", { small: true, quiet: true }) + '</div>' + content +
@@ -1353,7 +1488,6 @@
   }
 
   async function downloadRecording(recordingId) {
-    if (!await confirmAction("确认只下载这节录像到本机？不会转写，也不会消耗转写或 AI 额度。")) return;
     return requestJson("/api/recordings/" + encodeURIComponent(recordingId) + "/download", { method: "POST" }).then(function (result) {
       if (!result.ok || !result.body) return showToast((result.body && result.body.detail) || "录像下载没有开始。");
       state.recordings.task = result.body;
@@ -1383,12 +1517,6 @@
     if (courseTaskBusy(courseId)) {
       return showToast("请等待当前任务完成后再生成课程总结。");
     }
-    var course = state.campus.course;
-    var scope = courseId && course && course.id === courseId
-      ? "「" + course.title + "」" : "全部已同步课程";
-    if (!await confirmAction("生成" + scope + "的《课程总结》快照？" +
-        "应用会汇总本机讲次页、老师口头线索和教学网正式作业，只新建今天的快照页，" +
-        "不覆盖已有页面，也不新造知识点；此操作不消耗转写或 AI 笔记额度。")) return;
     var path = courseId
       ? "/api/campus/courses/" + encodeURIComponent(courseId) + "/summary"
       : "/api/campus/notion/summaries";
@@ -1405,34 +1533,16 @@
   async function processCampusRecording(recordingId, regenerate) {
     var course = state.campus.course;
     var lesson = course && course.lessons.find(function (item) { return item.id === recordingId; });
-    if (!lesson || !state.campus.home) return;
-    var directOss = state.recordings.directOss && !lesson.transcript_available && !regenerate;
-    var notesStrategy = state.recordings.noteStrategyByKey[recordingId] || "transcript";
-    var hasMatchedSlides = (lesson.materials || []).some(function (item) {
-      return item.category === "material" && (item.files || []).some(function (name) {
-        return /\.(pdf|pptx|docx)$/i.test(name);
-      });
-    });
-    var sourceWarning = hasMatchedSlides || notesStrategy !== "topics" ? "" :
-      "当前没有明确关联的课件，笔记可能主要依据自动转写；建议先在下方把对应课件关联到这节录像，再整理。";
-    var reuseExisting = Boolean(lesson.publish_ready && !lesson.video_available && !regenerate);
-    var confirmation = regenerate
-      ? "确认重新整理「" + lesson.title + "」？将使用本机已有转写，重新生成笔记并发布一个新版 Notion 页面。旧笔记和旧页面会保留；AI 笔记会再次消耗额度。"
-      : reuseExisting
-        ? "确认发布「" + lesson.title + "」的已有笔记？将复用本机转写、笔记和课堂画面，不重新下载录像，也不重复消耗转写或 AI 笔记额度。"
-        : lesson.transcript_available
-          ? "确认整理「" + lesson.title + "」？将复用本机已有转写，生成笔记并写入对应 Notion 讲次。不会重新转写，AI 笔记会消耗额度。"
-          : "确认整理「" + lesson.title + "」？将下载录像、转写并将笔记写入对应 Notion 讲次。转写与 AI 笔记会消耗额度。";
-    if (!reuseExisting) confirmation += notesStrategy === "topics"
-      ? "本次按知识点分段整理，再按课堂顺序合并，保留解释与例子；明确关联的课件文字会与原转写一同发送到笔记服务，辅助辨认术语。"
-      : "本次保留讲述顺序，依据原转写整理。";
-    if (!await confirmAction(sourceWarning + confirmation +
-        (directOss && !regenerate && !reuseExisting ? "本次音频会经短时授权直传阿里云 OSS。" : ""))) return;
+    if (!lesson) return;
+    var canRegenerate = Boolean(lesson.transcript_available && lesson.notes_available);
+    var reuseExisting = Boolean(lesson.publish_ready && !lesson.video_available && !canRegenerate && !regenerate);
+    var directOss = Boolean(state.recordings.directOss !== false && !lesson.transcript_available && !regenerate && !reuseExisting);
+    var notesStrategy = state.recordings.noteStrategyByKey[recordingId] || "topics";
     return requestJson("/api/campus/courses/" + encodeURIComponent(course.id) + "/recordings/" + encodeURIComponent(recordingId) + "/process",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ direct_oss: reuseExisting ? false : directOss, regenerate: Boolean(regenerate), reuse_existing: reuseExisting }, reuseExisting ? {} : { notes_strategy: notesStrategy })) }).then(function (result) {
         if (!result.ok || !result.body) return showToast((result.body && result.body.detail) || "整理没有开始。");
         state.recordings.task = result.body;
-        state.recordings.directOss = false;
+        state.recordings.directOss = true;
         state.recordings.taskCourseId = course.id;
         render();
       });
@@ -1732,9 +1842,10 @@
       esc(GLYPH.home) +
       "</span>" +
       esc(COPY.nav.dashboard) +
-      '</button>' + button('使用引导', 'open-welcome', { quiet: true }) + '</nav><div class="sidebar-spacer"></div>' +
+      '</button><button type="button" class="btn btn-quiet' + (state.view === "mcp-hub" ? " active" : "") + '" data-action="open-mcp-hub"' + (state.view === "mcp-hub" ? ' aria-current="page"' : "") + '><span class="nav-icon" aria-hidden="true">✦</span>AI 接入 (MCP)</button>' +
+      '<button type="button" class="btn btn-quiet" data-action="open-welcome"><span class="nav-icon" aria-hidden="true">◎</span>使用引导</button></nav><div class="sidebar-spacer"></div>' +
       '<div class="account-card campus-account"><div class="account-name">教学网账号</div><p>' + (state.campus.configured ? '已保存' : '尚未连接') + '</p>' + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + '</div>' +
-      connectionCard() +
+
       quotaCard() +
       updateCard() +
       '</aside><header class="mobile-topbar"><div class="mobile-topbar-left">' +
@@ -1749,8 +1860,8 @@
       '</span></button>' +
       brand(true) +
       '</div><div class="mobile-connection">' +
-      connectionControls(true) +
-      '</div><details class="mobile-account-menu" data-persistent-disclosure="mobile-account"><summary>账户与额度</summary><div class="mobile-account-content">' + button('使用引导', 'open-welcome', { small: true, quiet: true }) + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + connectionCard("mobile") + quotaCard("mobile") + updateCard() + '</div></details></header>' +
+
+      '</div><details class="mobile-account-menu" data-persistent-disclosure="mobile-account"><summary>账户与额度</summary><div class="mobile-account-content">' + button('使用引导', 'open-welcome', { small: true, quiet: true }) + button('AI 接入 (MCP)', 'open-mcp-hub', {small:true, quiet:true}) + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + quotaCard("mobile") + updateCard() + '</div></details></header>' +
       '<main class="main"><div class="main-inner">' +
       content +
       "</div></main></div>"
@@ -1832,13 +1943,17 @@
   function submitTermReview() {
     var review = state.termReview;
     if (review.status !== "needs_review" || !review.confirmed || !review.target || !review.transcriptSha256) return;
+    var lecture = (state.recordings.items || []).concat((state.campus.course && state.campus.course.lessons) || [])
+      .find(function (item) { return item.id === review.recordingId; }) || {};
+    var target = (lecture.transcript_review && lecture.transcript_review.target) || review.target || {};
+    var candidateTerm = target.candidate_term || lecture.candidate_term || "RSA";
     review.status = "submitting";
     review.error = "";
     render();
     return requestJson(termReviewUrl(review.courseId, review.recordingId), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ segment_index: review.target.segment_index,
-        transcript_sha256: review.transcriptSha256, confirmed_spoken_term: "RSA", confirmed: true })
+        transcript_sha256: review.transcriptSha256, confirmed_spoken_term: candidateTerm, confirmed: true })
     }).then(function (result) {
       if (state.termReview !== review || state.campus.courseId !== review.courseId) return;
       if (!result.ok || !result.body || result.body.status !== "corrected") {
@@ -1905,7 +2020,7 @@
       detail += " · " + formatTransfer(task.speed_bps) + "/秒";
     }
     if (task.current_item) detail += " · " + task.current_item;
-    return '<div class="recording-progress"><progress aria-label="' + esc(task.stage) + '进度" ' +
+    return '<div class="recording-progress"><progress aria-label="' + esc(campusReadError(task.stage)) + '进度" ' +
       (total ? 'value="' + esc(done) + '" max="' + esc(total) + '"' : '') + '></progress>' +
       '<span>' + esc(total ? percent + "% · " + detail : detail) + '</span></div>';
   }
@@ -1935,8 +2050,7 @@
       : "";
     return '<div class="recording-task" role="status" aria-live="polite"><div class="recording-task-text">' + esc(message) +
       (task.state === "running" && task.kind === "sync" ? button("取消目录更新", "recording-cancel-sync", { small: true, quiet: true }) : "") +
-      (task.state === "done" && task.lecture_url ? button("打开这节课", "recording-open-result", { small: true, attrs: { "data-url": task.lecture_url } }) : "") +
-      (task.state === "done" && task.result_url ? (task.kind === "download"
+      (task.state === "done" && /^\/api\//.test(task.result_url || '') ? (task.kind === "download"
         ? '<a class="btn btn-small btn-quiet" href="' + esc(task.result_url) + '" download>保存录像到电脑</a>'
         : button(task.kind === "summary" ? "打开课程总结" : task.kind === "sync" ? "查看更新结果" : "查看笔记", "recording-open-result", { small: true, quiet: true, attrs: { "data-url": task.result_url } })) : "") +
       warnings + failure +
@@ -1947,20 +2061,33 @@
     var task = state.recordings.background;
     if (!task || task.state === "idle") return "";
     var labels = { pending: "等待更新", running: "正在更新", done: "完成", confirmed: "已核对", not_read: "尚未读取", unconfirmed: "尚未核对", failed: "失败", partial: "部分完成", cancelled: "已取消", interrupted: "中断待恢复", unknown: "状态未确认" };
-    var rows = (task.course_results || []).map(function (row) {
+    var list = task.course_results || [];
+    var doneCount = list.filter(function (r) { return r.state === "done"; }).length;
+    var failedCount = list.filter(function (r) { return r.state && r.state !== "done" && r.state !== "pending" && r.state !== "running"; }).length;
+    var rows = list.slice().sort(function (a, b) {
+      return Number(a.state === "done") - Number(b.state === "done");
+    }).map(function (row) {
       var course = state.campus.courses.find(function (item) { return item.id === row.course_id; });
-      return '<li data-sync-course="' + esc(row.course_id) + '" data-sync-state="' + esc(row.state) + '"><strong>' + esc(row.title || course && course.title || row.course_id) + '</strong> · ' + esc(labels[row.state] || "状态未确认") +
-        '<small>教学网：' + esc(labels[row.metadata_state] || "状态未确认") + ' · Notion：' + esc(labels[row.projection_state] || "状态未确认") + '</small>' +
+      return '<li data-sync-course="' + esc(row.course_id) + '" data-sync-state="' + esc(row.state) + '"><strong>' + esc(row.title || course && course.title || row.course_id) + '</strong> · <span class="sync-state-tag">' + esc(labels[row.state] || "状态未确认") + '</span> ' +
+        '<small> · 教学网：' + esc(labels[row.metadata_state] || "状态未确认") + '</small>' +
         (row.summary_created ? '<small>本轮新建总结 ' + esc(row.summary_created) + ' 页</small>' : '') +
         (row.summary_existing ? '<small>复用已有总结 ' + esc(row.summary_existing) + ' 页</small>' : '') +
         (row.error ? '<p role="alert">' + esc(campusReadError(row.error)) + '</p>' : '') +
         (row.failure_id ? '<small>故障编号：' + esc(row.failure_id) + '</small>' : '') + '</li>';
     }).join('');
-    return '<section class="panel" data-background-sync data-background-state="' + esc(task.state) + '" role="status" aria-live="polite"><h2>后台课程更新</h2><p data-background-stage>' +
-      esc(campusReadError(task.stage || labels[task.state])) + '</p><p>已完成课程可继续使用；未完整课程保留已有内容。</p>' +
-      (task.state === "running" ? recordingTaskProgress(task) + button("取消后台更新", "recording-cancel-background", { small: true, quiet: true, disabled: state.recordings.backgroundPending }) : '') +
+    return '<section class="panel background-sync-banner" data-background-sync data-background-state="' + esc(task.state) + '" role="status" aria-live="polite">' +
+      '<div class="background-sync-bar"><div class="background-sync-main"><span class="background-sync-badge">' +
+      (task.state === "done" ? "✓ 已更新" : task.state === "running" ? "正在更新" : "后台更新") + '</span>' +
+      '<p class="background-sync-stage" data-background-stage>' + esc(campusReadError(task.stage || labels[task.state])) + '</p>' +
+      (list.length > 0 && task.state !== "running" ? '<span class="background-sync-counts">已完成 ' + doneCount + ' / ' + list.length + ' 门' + (failedCount ? ' · ' + failedCount + ' 门未完成' : '') + '</span>' : '') +
+      '</div><div class="background-sync-actions">' +
+      (task.state === "running" ? button("取消后台更新", "recording-cancel-background", { small: true, quiet: true, disabled: state.recordings.backgroundPending }) : '') +
       (['failed', 'partial', 'cancelled', 'interrupted'].indexOf(task.state) >= 0 ? button("恢复未完成课程", "recording-resume-background", { small: true, disabled: state.recordings.backgroundPending }) : '') +
-      (task.error ? '<p role="alert">' + esc(campusReadError(task.error)) + '</p>' : '') + '<ul>' + rows + '</ul></section>';
+      '</div></div>' + (task.state === "running" ? recordingTaskProgress(task) : '') +
+      (task.error ? '<p role="alert" class="background-sync-error">' + esc(campusReadError(task.error)) + '</p>' : '') +
+      (list.length ? '<details class="background-sync-details" data-sync-details data-persistent-disclosure="background-sync-details"><summary>' +
+        (failedCount ? '查看未完成与各课明细 (' + failedCount + ' 门待处理 / 共 ' + list.length + ' 门)' : '查看各课更新明细 (' + list.length + ' 门)') +
+        '</summary><ul class="background-sync-list">' + rows + '</ul></details>' : '') + '</section>';
   }
 
   function updateBackgroundSync(resume) {
@@ -2084,7 +2211,8 @@
       return;
     }
     var screen;
-    if (state.view === "campus-course") screen = campusCourseScreen();
+    if (state.view === "mcp-hub") screen = mcpHubScreen();
+    else if (state.view === "campus-course") screen = campusCourseScreen();
     else if (state.view === "campus-account") screen = campusDashboardScreen();
     else if (state.view === "dashboard") screen = dashboardScreen();
     else screen = dashboardScreen();
@@ -2234,7 +2362,6 @@
       return loadQuota()
         .then(loadCampusCourses)
         .then(function () { return pollRecordingTask(true); })
-        .then(loadConnection)
         .then(function () {
           render();
           showToast(toast);
@@ -2473,10 +2600,10 @@
   }
 
   function recordingNoteStyle(recordingId, disabled) {
-    var selected = state.recordings.noteStrategyByKey[recordingId] || "transcript";
-    return '<label>笔记方式<select data-recording-note-strategy="' + esc(recordingId) + '" aria-label="笔记方式"' + (disabled ? ' disabled' : '') + '>' +
-      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>保留讲述顺序</option>' +
-      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + '>知识点图文笔记（试用）</option></select></label>';
+    var selected = state.recordings.noteStrategyByKey[recordingId] || "topics";
+    return '<label class="recording-note-style">笔记方式<select data-recording-note-strategy="' + esc(recordingId) + '" aria-label="笔记方式"' + (disabled ? ' disabled' : '') + '>' +
+      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + '>按知识点图文整理</option>' +
+      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理</option></select></label>';
   }
 
   function openNotionPreview(url, onFailure) {
@@ -2487,7 +2614,6 @@
     }).then(function (result) {
       if (!result.ok || !result.body || !result.body.opened) throw new Error("browser open failed");
       if (["library", "course", "lecture"].indexOf(state.view) >= 0) openDashboard();
-      else openDashboard();
       showToast(COPY.launch.opened_external);
       return true;
     }).catch(function () {
@@ -2623,6 +2749,12 @@
   }
 
   document.addEventListener("click", function (event) {
+    if (!event.target.closest('details, summary, a, button, input, select, textarea, label')) {
+      var courseCard = event.target.closest('[data-course-card]');
+      var lessonCard = event.target.closest('[data-lesson-card]');
+      if (courseCard) { openCampusCourse(courseCard.dataset.courseCard); return; }
+      if (lessonCard) { openCampusLesson(lessonCard.dataset.lessonCard); return; }
+    }
     var target = event.target.closest("[data-action]");
     if (!target || target.disabled) return;
     var action = target.dataset.action;
@@ -2654,7 +2786,6 @@
       render();
       var settingsPanel = document.querySelector(state.campus.configured ? ".home-setup" : "#recording-credentials-form");
       if (settingsPanel) settingsPanel.scrollIntoView({ block: "start" });
-      loadNotionParents();
     }
     else if (action === "open-campus-course") openCampusCourse(target.dataset.course);
     else if (action === "campus-course-home") { state.campus.section = "home"; render(); }
@@ -2664,7 +2795,7 @@
       if (["assignments", "notices", "materials"].indexOf(target.dataset.center) < 0) return;
       state.campus.section = target.dataset.center; render();
     }
-    else if (action === "campus-open-lesson") { state.campus.section = "lecture"; state.campus.lessonId = target.dataset.recording; render(); }
+    else if (action === "campus-open-lesson") { openCampusLesson(target.dataset.recording); }
     else if (action === "campus-load-parents") loadNotionParents();
     else if (action === "campus-create-workspace") createWorkspace();
     else if (action === 'campus-replace-workspace') {
@@ -2686,6 +2817,38 @@
     else if (action === "campus-recover-submission") recoverCampusSubmission(target.dataset.draft);
     else if (action === "campus-process") processCampusRecording(target.dataset.recording);
     else if (action === "campus-regenerate") processCampusRecording(target.dataset.recording, true);
+    else if (action === 'open-mcp-hub') {
+      var mcpEpoch = accountQuotaEpoch;
+      state.view = 'mcp-hub'; mcpHub.error = ''; render();
+      requestJson('/api/mcp/status').then(function (result) {
+        if (mcpEpoch !== accountQuotaEpoch) return;
+        if (!result.ok || !result.body) throw new Error('本地知识库暂时无法读取，请重试。');
+        mcpHub.status = result.body; render();
+      }).catch(function (error) {if (mcpEpoch !== accountQuotaEpoch) return; mcpHub.error = error.message; render();});
+    }
+    else if (action === 'select-mcp-host') {mcpHub.host = target.dataset.host; render();}
+    else if (['copy-mcp-snippet', 'copy-mcp-prompt', 'copy-mcp-command'].indexOf(action) >= 0 && mcpHub.status) {
+      var host = mcpHub.status.hosts.find(function (row) {return row.id === mcpHub.host;});
+      copyStudyText(action === 'copy-mcp-prompt' ? host.sample_prompt : action === 'copy-mcp-command' ? host.cli_command : host.config_snippet, '已复制，可直接粘贴使用');
+    }
+    else if (action === 'campus-match-slides-keyframes') {
+      var matchCourseId = state.campus.courseId, matchEpoch = accountQuotaEpoch;
+      target.disabled = true;
+      requestJson('/api/campus/courses/' + encodeURIComponent(matchCourseId) + '/recordings/' + encodeURIComponent(target.dataset.recording) + '/match-slides', {method:'POST'}).then(function (result) {
+        if (matchEpoch !== accountQuotaEpoch || state.campus.courseId !== matchCourseId) return;
+        if (!result.ok || !result.body) throw new Error(result.body && result.body.detail || '课件匹配失败，请重试。');
+        state.campus.course = result.body;
+        render();
+        showToast(result.body.keyframe_matched_count ? '已根据视频关键帧匹配 ' + result.body.keyframe_matched_count + ' 份课件。' : '未在候选课件中找到与本讲画面吻合的投影页。');
+      }).catch(function (error) { if (matchEpoch === accountQuotaEpoch) showToast(error.message); }).finally(function () {target.disabled = false;});
+    }
+    else if (action === 'campus-preview-course-summary') openStudyPreview('');
+    else if (action === 'campus-preview-lecture-note') openStudyPreview(target.dataset.recording);
+    else if (action === 'campus-toggle-preview') {readingPreviews[target.dataset.preview].open = false; render();}
+    else if (action === 'campus-copy-markdown') {
+      var preview = readingPreviews[target.dataset.preview];
+      if (preview) copyStudyText(preview.markdown, preview.lecture ? '已复制笔记 Markdown，可直接粘贴或发送给 AI' : '已复制课程总结 Markdown');
+    }
     else if (action === "campus-course-summary") startCourseSummary(target.dataset.course);
     else if (action === "campus-summaries") startCourseSummary("");
     else if (action === "campus-open-summary" && target.dataset.url) openNotionPreview(target.dataset.url);
@@ -2712,7 +2875,24 @@
     else if (action === "recording-cancel-background") updateBackgroundSync(false);
     else if (action === "recording-resume-background") updateBackgroundSync(true);
     else if (action === "recording-download") downloadRecording(target.dataset.recording);
-    else if (action === "recording-open-result" && target.dataset.url) openNotionPreview(target.dataset.url);
+    else if (action === "recording-open-result" && target.dataset.url) {
+      var localResult = target.dataset.url.match(/^\/api\/campus\/courses\/([^/]+)\/(?:recordings\/([^/]+)\/note-preview|summary-preview)$/);
+      if (localResult) {
+        var resultCourse = decodeURIComponent(localResult[1]);
+        var resultRecording = localResult[2] ? decodeURIComponent(localResult[2]) : '';
+        var resultEpoch = accountQuotaEpoch;
+        state.view = 'campus-course';
+        state.campus.courseId = resultCourse;
+        state.campus.section = resultRecording ? 'lecture' : 'home';
+        state.campus.lessonId = resultRecording;
+        loadCampusCourse(resultCourse).then(function () {
+          if (resultEpoch !== accountQuotaEpoch || state.campus.courseId !== resultCourse) return;
+          var key = resultCourse + ':' + (resultRecording || 'summary');
+          if (readingPreviews[key]) readingPreviews[key].open = false;
+          openStudyPreview(resultRecording, true);
+        });
+      } else openNotionPreview(target.dataset.url);
+    }
   });
 
   document.addEventListener("input", function (event) {
@@ -2787,9 +2967,7 @@
   loadQuota()
     .then(loadCampusCourses)
     .then(function () { return pollRecordingTask(true); })
-    .then(loadConnection)
     .then(refreshAccount)
-    .then(function () { return loadNotionParents({ selectedOnly: true }); })
     .then(render)
     .catch(function () {
       // an unreachable loopback API must not leave a blank surface

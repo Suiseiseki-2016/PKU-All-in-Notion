@@ -130,7 +130,7 @@ def close_owned_windows(pid, *, browser_path=None):
             user32.GetWindowTextW(handle, caption, len(caption))
             window_class = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(handle, window_class, len(window_class))
-            if ((browser_path is None and caption.value == 'PKU All in Notion')
+            if ((browser_path is None and caption.value in {'PKU All in One', 'PKU All in Notion'})
                     or (browser_path is not None and window_class.value == 'Chrome_WidgetWin_1')):
                 handles.append(handle)
         return True

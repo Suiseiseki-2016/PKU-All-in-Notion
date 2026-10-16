@@ -111,8 +111,7 @@ def _verified_centers(client, parent: str, *, observed_children=None, extra_page
     # is accepted only after a second independent complete graph verifies it.
     observed = ([{'id': block['id'], 'title': block['child_page'].get('title', '')}
                  for block in observed_children if block.get('type') == 'child_page']
-                if observed_children is not None and any(
-                    block.get('type') == 'child_page' for block in observed_children)
+                if observed_children is not None
                 else client.list_child_pages(parent))
     result = {}
     for title in CENTERS:
@@ -1132,7 +1131,7 @@ def move_workspace(settings, parent_id: str) -> dict:
         return moved
 
 @request_scope()
-def read_projection(settings, *, course_id: str | None = None) -> dict:
+def read_projection(settings, *, course_id: str | None = None, tolerate_partial: bool = False) -> dict:
     """Hydrate lesson note links on another device without writing to Notion."""
     from urllib.parse import quote
     from ..catalog_snapshots import activate_account
@@ -1158,69 +1157,76 @@ def read_projection(settings, *, course_id: str | None = None) -> dict:
         for row in campus_courses(root)["courses"]:
             if course_id is not None and row["id"] != course_id:
                 continue
-            from ..catalog_snapshots import cached
-            if cached(root, row["id"]) is None:
-                continue
-            detail, history = _bind_history(settings, row['id'], campus_course(root, row['id']),
-                                      workspace.get('courses', {}).get(row['id'], {}))
-            if history is not None:
-                histories[row['id']] = history
-            _verify_historical_course(client, workspace['id'], row, detail, observed)
-            course = _course_page(client, workspace["id"], row, create=False, observed=observed)
-            directory_pages = client.list_child_pages(course["id"])
-            centers, extra_pages = _classify_course_children(directory_pages, course['id'])
-            center = centers.get("每节课")
-            if not center:
-                raise ValueError("新版每节课目录尚未验证。")
-            children = client.list_child_pages(center["id"])
-            blocks = {page["id"]: client.list_children(page["id"]) for page in children}
-            lectures = {}
-            for lesson in detail["lessons"]:
-                marker = legacy._linked_paragraph("查看教学网讲次来源", "https://course.pku.edu.cn/" +
-                    "webapps/bb-streammedia-hqy-BBLEARN/videoList.action#" + quote(lesson["source_id"], safe=""))
-                signature = legacy._source_block_signature(marker)
-                matches = [page for page in children if any(legacy._source_block_signature(block) == signature
-                                                           for block in blocks[page["id"]])]
-                if len(matches) != 1:
-                    raise ValueError("新版讲次身份未唯一确认，保留原链接缓存。")
-                lecture = client.get_page(matches[0]["id"])
-                notes = [client.get_page(page["id"]) for page in client.list_child_pages(lecture["id"])
-                         if page.get("title", "").startswith(("转写笔记 ·", "更新笔记 ·"))]
-                notes = [page for page in notes if not page.get("archived")]
-                latest = max(notes, key=lambda page: (page.get("created_time", ""), page["id"]), default={})
-                if not latest:
-                    prior = [item for item in workspace.get("courses", {}).get(row["id"], {}).get("lectures", {}).values()
-                             if item.get("source_id") == lesson["source_id"]]
-                    links = {part["text"]["link"]["url"]
-                             for block in blocks[lecture["id"]] if block.get("type") == "paragraph"
-                             for part in block.get("paragraph", {}).get("rich_text", [])
-                             if part.get("text", {}).get("content") == SUMMARY_LINK
-                             and part.get("text", {}).get("link", {}).get("url")}
-                    if not links and len(prior) == 1 and prior[0].get("note_url"):
-                        links.add(prior[0]["note_url"])
-                    if len(links) > 1:
-                        raise ValueError("已有总结链接不唯一，请先核对。")
-                    if links:
-                        latest = _summary_page(client, next(iter(links)))
-                from .summary_acceptance import published_status
-                acceptance = (published_status(client, latest["id"], lesson["source_id"])
-                              if latest else {"accepted": False})
-                lectures[lesson["id"]] = {"id": lecture["id"], "source_id": lesson["source_id"],
-                                           "url": lecture.get("url", ""), "note_url": latest.get("url", ""),
-                                           "note_parent_id": (latest.get("parent") or {}).get("page_id", ""),
-                                           "summary_acceptance": acceptance}
-            historical = _historical_projection(client, course, center['id'], detail)
-            if historical:
-                final = _historical_projection(client, course, center['id'], {
-                    **detail, '_historical_targets': {key: {**detail['_historical_targets'][key], 'mapping': item}
-                                                   for key, item in historical.items()}})
-                if {item['id'] for item in final.values()} & {item['id'] for item in lectures.values()}:
-                    raise ValueError('当前讲次与历史讲次页面重叠；未确认投影。')
-                historical = final
-            courses[row["id"]] = {**course, "centers": centers, "extra_pages": extra_pages,
-                                  "lectures": lectures,
-                                  **({'historical_lectures': historical,
-                                      'history_binding': deepcopy(detail['_history_binding'])} if historical else {})}
+            try:
+                from ..catalog_snapshots import cached
+                if cached(root, row["id"]) is None:
+                    continue
+                detail, history = _bind_history(settings, row['id'], campus_course(root, row['id']),
+                                          workspace.get('courses', {}).get(row['id'], {}))
+                if history is not None:
+                    histories[row['id']] = history
+                _verify_historical_course(client, workspace['id'], row, detail, observed)
+                course = _course_page(client, workspace["id"], row, create=False, observed=observed)
+                directory_pages = client.list_child_pages(course["id"])
+                centers, extra_pages = _classify_course_children(directory_pages, course['id'])
+                center = centers.get("每节课")
+                if not center:
+                    raise ValueError("新版每节课目录尚未验证。")
+                children = client.list_child_pages(center["id"])
+                blocks = {page["id"]: client.list_children(page["id"]) for page in children}
+                lectures = {}
+                for lesson in detail["lessons"]:
+                    marker = legacy._linked_paragraph("查看教学网讲次来源", "https://course.pku.edu.cn/" +
+                        "webapps/bb-streammedia-hqy-BBLEARN/videoList.action#" + quote(lesson["source_id"], safe=""))
+                    signature = legacy._source_block_signature(marker)
+                    matches = [page for page in children if any(legacy._source_block_signature(block) == signature
+                                                               for block in blocks[page["id"]])]
+                    if len(matches) != 1:
+                        raise ValueError("新版讲次身份未唯一确认，保留原链接缓存。")
+                    lecture = client.get_page(matches[0]["id"])
+                    notes = [client.get_page(page["id"]) for page in client.list_child_pages(lecture["id"])
+                             if page.get("title", "").startswith(("转写笔记 ·", "更新笔记 ·"))]
+                    notes = [page for page in notes if not page.get("archived")]
+                    latest = max(notes, key=lambda page: (page.get("created_time", ""), page["id"]), default={})
+                    if not latest:
+                        prior = [item for item in workspace.get("courses", {}).get(row["id"], {}).get("lectures", {}).values()
+                                 if item.get("source_id") == lesson["source_id"]]
+                        links = {part["text"]["link"]["url"]
+                                 for block in blocks[lecture["id"]] if block.get("type") == "paragraph"
+                                 for part in block.get("paragraph", {}).get("rich_text", [])
+                                 if part.get("text", {}).get("content") == SUMMARY_LINK
+                                 and part.get("text", {}).get("link", {}).get("url")}
+                        if not links and len(prior) == 1 and prior[0].get("note_url"):
+                            links.add(prior[0]["note_url"])
+                        if len(links) > 1:
+                            raise ValueError("已有总结链接不唯一，请先核对。")
+                        if links:
+                            latest = _summary_page(client, next(iter(links)))
+                    from .summary_acceptance import published_status
+                    acceptance = (published_status(client, latest["id"], lesson["source_id"])
+                                  if latest else {"accepted": False})
+                    lectures[lesson["id"]] = {"id": lecture["id"], "source_id": lesson["source_id"],
+                                               "url": lecture.get("url", ""), "note_url": latest.get("url", ""),
+                                               "note_parent_id": (latest.get("parent") or {}).get("page_id", ""),
+                                               "summary_acceptance": acceptance}
+                historical = _historical_projection(client, course, center['id'], detail)
+                if historical:
+                    final = _historical_projection(client, course, center['id'], {
+                        **detail, '_historical_targets': {key: {**detail['_historical_targets'][key], 'mapping': item}
+                                                       for key, item in historical.items()}})
+                    if {item['id'] for item in final.values()} & {item['id'] for item in lectures.values()}:
+                        raise ValueError('当前讲次与历史讲次页面重叠；未确认投影。')
+                    historical = final
+                courses[row["id"]] = {**course, "centers": centers, "extra_pages": extra_pages,
+                                      "lectures": lectures,
+                                      **({'historical_lectures': historical,
+                                          'history_binding': deepcopy(detail['_history_binding'])} if historical else {})}
+            except ValueError:
+                if not tolerate_partial:
+                    raise
+                histories.pop(row['id'], None)
+                import logging
+                logging.getLogger(__name__).warning('Skipping unverified course projection: %s', row['id'], exc_info=True)
     result = {**workspace, "courses": courses}
     _assert_history_scope(settings, histories, notion_token)
     with _MANIFEST_COMMIT_LOCK:

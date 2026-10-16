@@ -693,7 +693,7 @@ fn check_for_updates(app: AppHandle) {
         };
         let accepted = app.dialog()
             .message(format!("发现新版本 {}。现在下载并安装吗？安装会中断正在进行的转写或同步，关闭窗口后自动重新打开；请先保存正在编辑的内容。已保存的用户数据会保留。", update.version))
-            .title("PKU All in Notion 更新")
+            .title("PKU All in One 更新")
             .buttons(MessageDialogButtons::YesNo)
             .blocking_show();
         if !accepted {
@@ -701,7 +701,7 @@ fn check_for_updates(app: AppHandle) {
         }
         let progress_window = app.get_webview_window("main");
         if let Some(window) = &progress_window {
-            let _ = window.set_title("PKU All in Notion · 正在下载更新…");
+            let _ = window.set_title("PKU All in One · 正在下载更新…");
         }
         let mut downloaded = 0_u64;
         let mut last_percent = None;
@@ -711,20 +711,20 @@ fn check_for_updates(app: AppHandle) {
                 if let (Some(total), Some(window)) = (total.filter(|n| *n > 0), &progress_window) {
                     let percent = (downloaded.saturating_mul(100) / total).min(100);
                     if last_percent != Some(percent) {
-                        let _ = window.set_title(&format!("PKU All in Notion · 下载更新 {percent}%"));
+                        let _ = window.set_title(&format!("PKU All in One · 下载更新 {percent}%"));
                         last_percent = Some(percent);
                     }
                 }
             },
             || {
                 if let Some(window) = &progress_window {
-                    let _ = window.set_title("PKU All in Notion · 正在验证并安装更新…");
+                    let _ = window.set_title("PKU All in One · 正在验证并安装更新…");
                 }
             },
         ));
         if let Err(err) = outcome {
             if let Some(window) = &progress_window {
-                let _ = window.set_title("PKU All in Notion");
+                let _ = window.set_title("PKU All in One");
             }
             // The before-exit hook has already stopped the local panel if
             // Windows failed to launch NSIS. Restore it so this still-running
@@ -741,7 +741,7 @@ fn check_for_updates(app: AppHandle) {
             }
             let _ = app.dialog()
                 .message("更新没有完成。请稍后重试，或从官网下载安装包。")
-                .title("PKU All in Notion 更新")
+                .title("PKU All in One 更新")
                 .kind(MessageDialogKind::Error)
                 .blocking_show();
             return;

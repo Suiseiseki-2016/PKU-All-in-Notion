@@ -189,8 +189,8 @@ def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) 
 
     entries: list[tuple[str, str | None]] = [
         (f"# {course['title']}｜{SUMMARY_SUFFIX}（截至 {stamp}）", None),
-        ("本页由 PKU All in Notion 根据本机讲次页与教学网目录快照自动汇总；不新造知识点，"
-         "完整内容以各讲次页和教学网原页面为准。", None),
+        ("本页根据本机讲次笔记与教学网目录快照自动汇总；不新造知识点，"
+         "完整内容以各讲次笔记和教学网原页面为准。", None),
         ("## 课程定位与覆盖", None),
         (f"- 课程：{course['title']}（课程号 {course['code'] or '未提供'}；"
          f"{course['term'] or '学期未记录'}）", None),
@@ -208,9 +208,9 @@ def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) 
         line = f"{_label(row)} · {status}"
         entries.append((line, link or None))
 
-    entries.append(("## 主题要点（逐节摘自已发布笔记）", None))
+    entries.append(("## 主题要点（逐节摘自本机笔记）", None))
     if not any(row["has_note"] for row in rows):
-        entries.append(("- 本课程还没有已发布笔记，无法汇总主题要点；请先在课程页整理讲次。", None))
+        entries.append(("- 本课程还没有本机笔记，无法汇总主题要点；请先在课程页整理讲次。", None))
     for row in rows:
         if not row["has_note"]:
             continue
@@ -242,7 +242,7 @@ def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) 
     entries.append(("## 待确认事项", None))
     open_items = [(row, item) for row in rows for item in row["outline"]["uncertain"]]
     if not open_items:
-        entries.append(("- 已发布笔记中没有登记待确认条目。", None))
+        entries.append(("- 本机笔记中没有登记待确认条目。", None))
     for row, item in open_items[:_MAX_UNCERTAIN]:
         entries.append((f"- {_label(row)} {item}", None))
     if noteless:
@@ -256,8 +256,6 @@ def summary_entries(data_dir: Path, course_id: str, *, day: date | None = None) 
     if lecture_links:
         for row in lecture_links:
             entries.append((f"打开讲次页：{_label(row)}", _lecture_link(row)))
-    else:
-        entries.append(("- 还没有写入 Notion 的讲次页；请先在课程页建立 Notion 讲次。", None))
     if noteless:
         entries.append(("- 缺口：以下讲次尚无笔记，本页未汇总其内容 —— "
                         + "、".join(_label(row) for row in noteless[:8])
@@ -470,3 +468,48 @@ def publish_course_summaries(data_dir: Path, token: str, course_ids: list[str], 
                     urls.append(result['url'])
     return {"requested": total, "created": created, "existing": existing,
             "urls": urls, "failures": failures}
+
+
+def save_local_course_summaries(data_dir: Path, course_ids: list[str], *,
+                                day: date | None = None, on_progress=None,
+                                on_course=None) -> dict:
+    """Save local snapshots, isolating failures while retaining confirmed-read guards."""
+    stamp = day or beijing_today()
+    total, created = len(course_ids), 0
+    urls, failures = [], []
+    for index, course_id in enumerate(course_ids, 1):
+        title = course_id
+        try:
+            authority = None
+            if (data_dir / 'portal-read-status.json').is_file():
+                course, authority = _confirmed_course(data_dir, course_id)
+            else:
+                course = campus_course(data_dir, course_id)
+            title = course['title']
+            if on_course:
+                on_course(title)
+            if on_progress:
+                on_progress(index - 1, total, title)
+            markdown = summary_markdown(data_dir, course_id, day=stamp)
+            folder = _course_folder(data_dir, course_id)
+            if folder is None:
+                raise ValueError('这门课的本机目录已变化，请重新更新课程目录。')
+            if authority is not None:
+                _assert_summary_authority(data_dir, course_id, authority)
+            temporary = folder / 'course-summary.md.tmp'
+            temporary.write_text(markdown, 'utf-8')
+            temporary.replace(folder / 'course-summary.md')
+            payload = {'title': summary_title(title, stamp), 'url': '', 'created': True,
+                       'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+            temporary = folder / 'summary.json.tmp'
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1), 'utf-8')
+            temporary.replace(folder / 'summary.json')
+            created += 1
+            from urllib.parse import quote
+            urls.append(f'/api/campus/courses/{quote(course_id, safe="")}/summary-preview')
+        except Exception as exc:
+            failures.append((title, str(exc)))
+        if on_progress:
+            on_progress(index, total, title)
+    return {'requested': total, 'created': created, 'existing': 0,
+            'urls': urls, 'failures': failures}

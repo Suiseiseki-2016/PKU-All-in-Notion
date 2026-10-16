@@ -46,9 +46,9 @@ AUTH_COPY = {
         "eyebrow": "PKU · 学习工作台",
         "title_lines": ["把每一堂课，", "变成可复习的知识。"],
         "lead": (
-            "连接教学网与 Notion，把课程资料和课堂笔记放在一起。"
+            "同步教学网课程、课件与课堂录像，生成板书与课件图文笔记，并一键接入 AI 工具。"
         ),
-        "note": "产品账号与校园网账号、Notion 身份相互独立。",
+        "note": "所有课程资料与课堂笔记均保存在本机，随时可通过 MCP 接入 AI 工具。",
     },
     "mini_status": "安全连接",
     "role": "学生端",
@@ -58,16 +58,16 @@ AUTH_COPY = {
         "forgot": "重置密码",
     },
     "login": {
-        "eyebrow": "产品账号",
+        "eyebrow": "我的账号",
         "title": "登录学习空间",
-        "subtitle": "使用产品账号的邮箱和密码。",
+        "subtitle": "使用你注册的邮箱和密码登录。",
         "submit": "登录",
         "submitting": "正在登录…",
         "switch_register": "没有账号？注册",
         "switch_forgot": "忘记密码",
     },
     "register": {
-        "eyebrow": "产品账号",
+        "eyebrow": "我的账号",
         "title": "注册学习空间",
         "subtitle": "注册后会收到验证邮件；验证完成前不能兑换额度或使用云端功能。",
         "submit": "注册",
@@ -75,7 +75,7 @@ AUTH_COPY = {
         "switch_login": "已有账号？登录",
     },
     "forgot": {
-        "eyebrow": "产品账号",
+        "eyebrow": "我的账号",
         "title": "重置密码",
         "subtitle": "我们会向邮箱发送一次性重置链接（在浏览器中打开完成重置）。",
         "submit": "发送重置邮件",
@@ -100,7 +100,7 @@ AUTH_COPY = {
 }
 
 ACCOUNT_COPY = {
-    "title": "产品账号",
+    "title": "我的账号",
     "signed_out": "未登录",
     "verified": "邮箱已验证",
     "unverified": "邮箱未验证",
@@ -122,6 +122,7 @@ ACCOUNT_COPY = {
 }
 
 CONNECTION_COPY = {
+    "workspace_wait_hint": "首次创建会按课程建立 Notion 页面结构；页面保持打开即可，完成后会自动刷新。",
     "connected": CONNECTED_COPY,
     "disconnected": DISCONNECTED_COPY,
     "connecting": CONNECTING_COPY,
@@ -170,21 +171,19 @@ PANEL_COPY = {
     "welcome": {
         "eyebrow": "开始你的学习空间",
         "title": "课程有条理，复习更轻松。",
-        "description": "在这里查看教学网课程、作业和资料，把课堂录像整理成 Notion 笔记。",
+        "description": "在这里查看教学网课程、作业和资料，把课堂录像整理成本地图文笔记并接入 AI 工具。",
         "steps": [
             {"title": "登录学习空间", "body": "用邮箱注册或登录，并完成邮件验证。"},
-            {"title": "读取课程目录", "body": "保存教学网账号，然后更新课程目录。"},
-            {"title": "连接 Notion", "body": "课程读取成功后，选择保存位置创建学习主页。"},
+            {"title": "同步教学网课程", "body": "保存教学网账号，然后更新课程目录。"},
+            {"title": "阅读笔记与接入 AI", "body": "整理课堂板书/课件图文笔记与课程总结，或通过 MCP 接入 AI 工具。"},
         ],
         "note": "整理录像会使用转写与 AI 额度。可随时从「使用引导」重看步骤。",
         "start": "开始设置",
         "skip": "我已了解，直接进入",
     },
     "brand": {
-        "mark": "PKU",
-        "name": "All in Notion",
-        "note": "学习工作台",
-        "title": "PKU All in Notion",
+        "mark": "PKU", "name": "All in One", "note": "学习工作台",
+        "title": "PKU All in One",
     },
     "nav": {"label": "主导航", "kicker": "学习空间", "dashboard": "我的课程"},
     "update": {
@@ -201,6 +200,7 @@ PANEL_COPY = {
     "auth": AUTH_COPY,
     "account": ACCOUNT_COPY,
     "connection": CONNECTION_COPY,
+    "notion": {"workspace_wait_hint": CONNECTION_COPY["workspace_wait_hint"]},
     "time": TIME_COPY,
 }
 

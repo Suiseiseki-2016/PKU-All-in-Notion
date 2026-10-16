@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,36 @@ HOSTS = ("factory", "claude", "codex")
 # iCloud's Desktop sync keeps re-applying that flag. The launcher script
 # puts the project root on sys.path itself, so registration is immune.
 LAUNCHER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_launcher.py"
+
+
+def host_integration_catalog(python: str | None = None, data_dir: Path | None = None) -> dict:
+    """Portable stdio setup snippets; no host installation or config mutation."""
+    py = _posix_path(python or sys.executable)
+    launcher = LAUNCHER.as_posix()
+    root = (data_dir or Path('data')).expanduser().resolve().as_posix()
+    env = {'DATA_DIR': root}
+    server = {'command': py, 'args': [launcher], 'env': env}
+    standard = json.dumps({'mcpServers': {LOCAL_SERVER_NAME: server}}, ensure_ascii=False, indent=2)
+    toml = ('[mcp_servers.pku-sync]\ncommand = ' + json.dumps(py) + '\nargs = [' +
+            json.dumps(launcher) + ']\n\n[mcp_servers.pku-sync.env]\nDATA_DIR = ' + json.dumps(root))
+    prompt = '请调用 pku-sync MCP 工具读取我本学期的课程总结与近期课堂笔记，帮我梳理核心考点与待办作业。'
+    hosts = []
+    for key, name, path, cli, snippet in [
+        ('codex', 'Codex', '~/.codex/config.toml',
+         f'codex mcp add pku-sync --env "DATA_DIR={root}" -- "{py}" "{launcher}"', toml),
+        ('claude', 'Claude', '~/.claude.json（Claude Code）；Claude Desktop：设置 → 开发者 → 编辑配置',
+         f'claude mcp add --scope user --env "DATA_DIR={root}" pku-sync -- "{py}" "{launcher}"', standard),
+        ('antigravity', 'Antigravity', '~/.gemini/antigravity/mcp_config.json', '', standard),
+        ('oh-my-pi', 'Oh My Pi', '~/.omp/agent/mcp.json', '', standard),
+        ('opencode', 'OpenCode', '~/.config/opencode/opencode.json', '',
+         json.dumps({'mcp': {LOCAL_SERVER_NAME: {'type': 'local', 'command': [py, launcher],
+                     'environment': env, 'enabled': True}}}, ensure_ascii=False, indent=2)),
+    ]:
+        hosts.append({'id': key, 'name': name, 'badge': '本地只读 · MCP',
+                      'description': '读取课程总结、课堂笔记与作业线索。将配置合并到现有文件，保存后重启 AI 工具。',
+                      'cli_command': cli, 'config_path': path, 'config_snippet': snippet,
+                      'sample_prompt': prompt})
+    return {'python_path': py, 'launcher_path': launcher, 'hosts': hosts}
 
 
 @dataclass(frozen=True)

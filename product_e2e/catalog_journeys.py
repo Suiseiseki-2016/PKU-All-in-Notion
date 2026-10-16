@@ -252,6 +252,8 @@ def _background_refresh(run, ui, course_id, expected_ids, *, accepted=None, resu
     valid = valid and _file_hashes(run, student_only=True) == before_files and _effects(run) == before_effects
     valid = valid and _background_network_valid(run.network[before_network:], len(expected_ids))
     # Actual DOM must expose each final outcome and its error, not just an API.
+    if ui.visible('[data-background-sync] [data-sync-details]:not([open]) > summary'):
+        ui.click('[data-background-sync] [data-sync-details] > summary')
     for row in final.get('course_results', []):
         selector = '[data-background-sync] [data-sync-course="' + row['course_id'] + '"][data-sync-state="' + row['state'] + '"]'
         ui.wait(lambda selector=selector: ui.visible(selector), timeout=10)

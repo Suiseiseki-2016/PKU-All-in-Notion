@@ -101,9 +101,11 @@ def collect_jobs(root: Path, course_filter: str = "") -> list[RecordingJob]:
         from .catalog_snapshots import cached
         try:
             metadata = json.loads((course_dir / "course.json").read_text("utf-8"))
-            canonical = cached(root, metadata.get("course_id", ""))
+            canonical = cached(root, metadata.get("course_id", "")) if isinstance(metadata, dict) else None
         except (OSError, ValueError):
             canonical = None
+        if not isinstance(entries, list):
+            continue
         if canonical:
             snapshot = canonical["snapshot"]
             course_name = snapshot["course"]["name"]
@@ -113,7 +115,10 @@ def collect_jobs(root: Path, course_filter: str = "") -> list[RecordingJob]:
                         **row, "course_id": snapshot["course_id"]}
                        for row in snapshot["sections"]["recordings"]["items"]]
         for entry in entries:
-            recording = Recording.model_validate(entry)
+            try:
+                recording = Recording.model_validate(entry)
+            except ValueError:
+                continue
             if course_filter and recording.course_id != course_filter:
                 continue
             jobs.append(RecordingJob(course_name, course_dir, recording))
@@ -124,7 +129,8 @@ def _course_name(course_dir: Path) -> str:
     meta = course_dir / "course.json"
     if meta.exists():
         try:
-            return json.loads(meta.read_text("utf-8")).get("name") or course_dir.name
+            item = json.loads(meta.read_text("utf-8"))
+            return (item.get("name") or course_dir.name) if isinstance(item, dict) else course_dir.name
         except (json.JSONDecodeError, OSError):
             pass
     return course_dir.name
@@ -219,6 +225,18 @@ def process_job(job: RecordingJob, settings, *, include_keyframes: bool = True, 
             result.keyframes = len(keyframes)
         except Exception as exc:
             result.errors.append(f"keyframes: {exc}")
+
+    if keyframes and (job.course_dir / "materials" / "index.json").is_file():
+        try:
+            from .lecture_source_download import match_materials_by_keyframes, keyframe_source_paths
+            from .panel.recordings_api import recording_id
+            key = recording_id(job)
+            match_materials_by_keyframes(job, key, settings)
+            matched_paths = keyframe_source_paths(job, key)
+            if matched_paths:
+                source_paths = list(dict.fromkeys([*(source_paths or []), *matched_paths]))
+        except Exception:
+            pass  # Optional visual matching must not interrupt note processing.
 
     if transcript:
         try:

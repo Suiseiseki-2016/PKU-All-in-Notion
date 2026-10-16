@@ -41,6 +41,8 @@ class LocalCourseTools:
                 item = json.loads(meta.read_text("utf-8"))
             except (OSError, json.JSONDecodeError):
                 item = {}
+            if not isinstance(item, dict):
+                item = {}
             courses.append(
                 {
                     "folder": meta.parent.name,
@@ -113,6 +115,104 @@ class LocalCourseTools:
                 }
             )
         return rows
+
+    def _matching_courses(self, course: str) -> list[dict]:
+        rows = self.list_courses()
+        if not course.strip():
+            return rows
+        query = course.strip().casefold()
+        exact = [row for row in rows if any(query == str(row[key]).casefold()
+                 for key in ('course_id', 'folder', 'code', 'name'))]
+        return exact or [row for row in rows if query in row['name'].casefold()]
+
+    def get_lecture_notes(self, course: str, lecture: str = "") -> list[dict]:
+        """Read generated lecture notes, optionally filtered by title or date."""
+        rows = []
+        for item in self._matching_courses(course):
+            folder = self._course_dir(item['folder'])
+            jobs = {job.directory.resolve(): job for job in collect_jobs(self.data_dir, item['course_id'])
+                    if job.course_dir.resolve() == folder}
+            for path in sorted(folder.glob('recordings/*/notes.md')):
+                path = self._resolve(path.relative_to(self.data_dir).as_posix())
+                job = jobs.get(path.parent)
+                title, day = path.parent.name, ''
+                if job:
+                    title, day = job.recording.title, job.recording.date
+                else:
+                    try:
+                        meta = json.loads((path.parent / 'recording.json').read_text('utf-8'))
+                        if isinstance(meta, dict):
+                            title = str(meta.get('title') or title)
+                            day = str(meta.get('recorded_at') or '')[:10]
+                    except (OSError, ValueError):
+                        pass
+                if lecture.casefold() not in (title + ' ' + day).casefold():
+                    continue
+                try:
+                    markdown = path.read_text('utf-8', errors='replace')
+                except OSError:
+                    continue
+                if markdown.strip():
+                    rows.append({'course': item['name'], 'course_id': item['course_id'],
+                                 'title': title, 'date': day, 'notes_markdown': markdown})
+        return rows
+
+    def get_course_summary(self, course: str = "") -> dict:
+        """Read course digests with lecture coverage, without generating AI work."""
+        from .panel.course_summary import summary_markdown
+        rows = []
+        for item in self._matching_courses(course):
+            notes = self.get_lecture_notes(item['folder'])
+            jobs = [job for job in collect_jobs(self.data_dir, item['course_id'])
+                    if job.course_dir.name == item['folder']]
+            try:
+                markdown = summary_markdown(self.data_dir, item['course_id']) if item['course_id'] else ''
+            except (ValueError, OSError):
+                markdown = ''
+            if not markdown:
+                markdown = '# ' + item['name'] + '\n\n' + '\n\n'.join(
+                    '## ' + row['title'] + '\n' + row['notes_markdown'] for row in notes)
+            rows.append({**item, 'markdown': markdown, 'total_lessons': max(len(jobs), len(notes)),
+                         'summarized_lessons': len(notes)})
+        return rows[0] if course and len(rows) == 1 else {'courses': rows}
+
+    def search_course_knowledge(self, query: str, course: str = "") -> list[dict]:
+        """Rank local note, assignment, announcement and transcript excerpts."""
+        tokens = query.casefold().split()
+        if not tokens:
+            return []
+        hits = []
+        patterns = [('notes', 'recordings/*/notes.md'), ('assignments', 'assignments/index.json'),
+                    ('announcements', 'announcements/index.json'), ('transcript', 'recordings/*/transcript.json')]
+        for item in self._matching_courses(course):
+            folder = self._course_dir(item['folder'])
+            for kind, pattern in patterns:
+                for path in sorted(folder.glob(pattern)):
+                    try:
+                        content = self.read_text(path.relative_to(self.data_dir).as_posix(), _MAX_READ_CHARS)['content']
+                        if path.suffix == '.json':
+                            value = json.loads(content)
+                            # Search student-facing text, never private media URLs or credentials.
+                            def prose(value):
+                                if isinstance(value, list):
+                                    return '\n'.join(prose(v) for v in value)
+                                if isinstance(value, dict):
+                                    return '\n'.join(prose(v) for k, v in value.items() if k in
+                                        {'title', 'text', 'body', 'body_text', 'instructions', 'content', 'segments', 'due_at'})
+                                return str(value or '')
+                            content = prose(value)
+                    except (OSError, ValueError):
+                        continue
+                    lowered = content.casefold()
+                    score = sum(lowered.count(token) for token in tokens)
+                    if not score:
+                        continue
+                    offset = min(lowered.find(token) for token in tokens if token in lowered)
+                    hits.append({'course': item['name'], 'source_type': kind,
+                                 'title': path.parent.name if kind in {'notes', 'transcript'} else item['name'],
+                                 'snippet': content[max(0, offset - 100):offset + 400], '_score': score})
+        hits.sort(key=lambda row: -row['_score'])
+        return [{k: v for k, v in row.items() if k != '_score'} for row in hits[:20]]
 
     def _course_dir(self, course_folder: str) -> Path:
         if not course_folder or "/" in course_folder or "\\" in course_folder:

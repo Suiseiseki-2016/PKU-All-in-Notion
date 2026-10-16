@@ -54,6 +54,7 @@ def review_status(job: RecordingJob, key: str) -> dict:
             return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
         result["status"] = "needs_review"
         result["target"] = {
+            "ambiguous_term": "RAC", "candidate_term": "RSA",
             "segment_index": index, "start": start, "end": end,
             "start_label": stamp(start), "end_label": stamp(end),
             "excerpt": spoken[:500], "video_url": f"/api/recordings/{key}/preview",

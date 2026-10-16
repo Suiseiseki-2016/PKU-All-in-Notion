@@ -19,6 +19,14 @@ from .handbook_requirements import handbook_review_cards
 
 _LECTURE_NUMBER = re.compile(r"第\s*([0-9０-９]+)\s*[讲次]", re.IGNORECASE)
 
+def _summary_marker(folder: Path) -> dict:
+    marker = _read_json(folder / "summary.json", {})
+    if not isinstance(marker, dict):
+        marker = {}
+    if (folder / "course-summary.md").is_file() and not marker.get("title"):
+        marker = {**marker, "title": "课程总结", "url": ""}
+    return marker
+
 def official_content_source_url(course_id, item):
     parent_id = str(item.get('parent_content_id') or '')
     if re.fullmatch(r'_\d+_\d+', parent_id):
@@ -151,7 +159,8 @@ def _official_index(root: Path, folder: Path, course_id: str, section: str, defa
     envelope = cached(root, course_id)
     if envelope:
         return envelope["snapshot"]["sections"][section]["items"]
-    return _read_json(folder / section / "index.json", default)
+    rows = _read_json(folder / section / "index.json", default)
+    return [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else default
 
 def _category(item: dict) -> str:
     kind = str(item.get("kind") or "")
@@ -245,6 +254,7 @@ def campus_course(root: Path, course_id: str) -> dict:
     jobs = sorted(collect_jobs(root, course_id),
                   key=lambda job: (job.recording.recorded_at, job.recording.title))
     lessons = []
+    keyframe_matches_by_path = {}
     from .notion_home import saved_home
     home = saved_home(root)
     home_id = home.get("id") if isinstance(home, dict) else None
@@ -277,6 +287,15 @@ def campus_course(root: Path, course_id: str) -> dict:
             "unavailable_reason": unavailable,
             "materials": [],
         }
+        note_topic = ""
+        if row["notes_available"]:
+            from .course_summary import note_outline
+            try:
+                outline = note_outline((job.directory / "notes.md").read_text("utf-8", errors="replace"))
+                note_topic = " · ".join(name for name, _ in outline.get("topics", [])[:2])
+            except OSError:
+                pass
+        row["note_topic"] = note_topic
         row["publish_ready"] = bool(
             row["transcript_available"]
             and row["notes_available"]
@@ -308,6 +327,11 @@ def campus_course(root: Path, course_id: str) -> dict:
                      or remote_acceptance.get("notes_sha256") == row["summary_acceptance"]["notes_sha256"])):
             row["summary_acceptance"] = remote_acceptance
         lessons.append(row)
+        receipt = _read_json(job.directory / "keyframes" / "keyframe-matches.json", {})
+        if isinstance(receipt, dict):
+            for entry in receipt.get("matches", []):
+                if isinstance(entry, dict) and entry.get("material_path"):
+                    keyframe_matches_by_path[(entry["material_path"], row["id"])] = entry
         if row["number"] is not None:
             by_number.setdefault(row["number"], []).append(row)
     raw_materials = _official_index(root, folder, course_id, "materials", [])
@@ -350,6 +374,10 @@ def campus_course(root: Path, course_id: str) -> dict:
                 match = next((lesson for lesson in lessons if lesson["id"] == override), None)
                 if match:
                     material["match_state"] = "confirmed"
+                    entry = keyframe_matches_by_path.get((material["path"], match["id"]))
+                    material["match_source"] = "keyframe" if entry else "manual"
+                    if entry:
+                        material["matched_frames"] = entry.get("matched_frames", 0)
                     match["materials"].append(material)
                     continue
             number = _number(material["path"] + " " + material["title"])
@@ -415,7 +443,7 @@ def campus_course(root: Path, course_id: str) -> dict:
         "section_states": _section_states(root, folder, course_id, metadata),
         "synced_at_label": display_campus_time(metadata.get("synced_at")),
         "existing_notion_url": str(metadata.get("existing_notion_url") or ""),
-        "summary": _read_json(folder / "summary.json", {}),
+        "summary": _summary_marker(folder),
         "source_priority": ["recordings", "materials"],
     }
     historical = _historical_lessons(root, course_id, metadata)

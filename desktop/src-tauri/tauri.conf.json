@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PKU All in Notion",
-  "version": "0.1.58",
+  "version": "0.1.59",
   "identifier": "info.aeoluswu.pku-all-in-notion",
   "build": {
     "frontendDist": "../src",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "PKU All in Notion",
+        "title": "PKU All in One",
         "width": 1100,
         "height": 760,
         "minWidth": 800,

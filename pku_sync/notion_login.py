@@ -284,17 +284,17 @@ class _CallbackHandler(BaseHTTPRequestHandler):
                         "access_denied", "user_cancelled", "user_canceled"
                     } else "provider_error"
                     self.server.result["error"] = error
-                    status, message = 400, "授权被拒绝。可关闭本页面，回到 PKU All in Notion 重试。"
+                    status, message = 400, "授权被拒绝。可关闭本页面，回到 PKU All in One 重试。"
             elif len(query.get("code") or []) != 1 or not query["code"][0]:
                 status, message = 400, "回调缺少有效的 code 参数。"
             else:
                 self.server.result["code"] = query["code"][0]
-                status, message = 200, "授权成功，可以关闭本页面，回到 PKU All in Notion 继续。"
+                status, message = 200, "授权成功，可以关闭本页面，回到 PKU All in One 继续。"
         self._respond(status, message)
 
     def _respond(self, status: int, message: str) -> None:
         body = (
-            "<html><head><meta charset='utf-8'><title>PKU All in Notion 授权</title></head>"
+            "<html><head><meta charset='utf-8'><title>PKU All in One 授权</title></head>"
             f"<body style='font-family:sans-serif;padding:2em;line-height:1.6'>"
             f"<h3>{html.escape(message)}</h3></body></html>"
         ).encode("utf-8")

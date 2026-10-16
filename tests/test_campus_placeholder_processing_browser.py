@@ -44,8 +44,7 @@ def test_projected_lecture_does_not_replace_first_processing_with_regeneration(t
             can_regenerate = transcript and notes
             assert page.locator('[data-action="campus-process"]').count() == int(not can_regenerate)
             assert page.locator('[data-action="campus-regenerate"]').count() == int(can_regenerate)
-            assert page.locator('[data-action="campus-open-lecture"]').is_visible()
-            assert page.locator('[data-action="campus-open-lecture"]').get_attribute('data-url') == (
-                'https://www.notion.so/notes' if remote_note else 'https://www.notion.so/lecture')
+            assert page.locator('[data-action="campus-preview-lecture-note"]').count() == int(notes)
+            assert page.locator('[data-action="campus-open-lecture"]').count() == 0
         finally:
             browser.close()

@@ -100,7 +100,7 @@ if [[ "$PLATFORM_LABEL" == "macOS" ]]; then
   # uv 0.6's relocatable venv still leaves an absolute `bin/python` symlink
   # and omits libpython/stdlib on macOS. Ship the complete managed interpreter
   # instead; its Mach-O loader path is already @executable_path/../lib.
-  PYTHON_BIN="$(uv python find 3.11 --managed-python)"
+  PYTHON_BIN="$(cd "$PYTHON_INSTALL" && uv python find --system 3.11 --managed-python)"
   PYTHON_HOME="$(cd "$(dirname "$PYTHON_BIN")/.." && pwd -P)"
   PYTHON_INSTALL="$(cd "$PYTHON_INSTALL" && pwd -P)"
   case "$PYTHON_HOME" in

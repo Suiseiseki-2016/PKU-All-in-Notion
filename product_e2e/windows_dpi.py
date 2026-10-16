@@ -33,7 +33,7 @@ def read_window_dpi(pid):
         if owner.value == pid and user32.IsWindowVisible(handle):
             title = ctypes.create_unicode_buffer(512)
             user32.GetWindowTextW(handle, title, len(title))
-            if title.value == 'PKU All in Notion':
+            if title.value in {'PKU All in One', 'PKU All in Notion'}:
                 handles.append(handle)
         return True
 
