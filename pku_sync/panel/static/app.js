@@ -96,6 +96,7 @@
   var state = {
     activated: false,
     quota: null,
+    batchOrganize: null,
     quotaStale: false,
     authMode: "login",
     authPending: false,
@@ -108,7 +109,7 @@
     },
     view: "dashboard",
     campus: { courses: [], course: null, courseCache: {}, courseId: "", loading: false, error: "", configured: false, home: null, parents: [], parentId: "", catalogAutoStarted: false, parentError: "", query: "", category: "all", dateQuery: "", materialQuery: "", demoConnection: false, submission: { selectedId: "", draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } } },
-    recordings: { configured: false, editingCredentials: false, loading: false, syncPending: false, backgroundPending: false, background: { state: "idle" }, error: "", task: { state: "idle" }, taskCourseId: "", noteStrategyByKey: {}, directOss: false },
+    recordings: { configured: false, editingCredentials: false, loading: false, syncPending: false, backgroundPending: false, background: { state: "idle" }, batch: { state: "idle" }, error: "", task: { state: "idle" }, taskCourseId: "", noteStrategyByKey: {}, directOss: false },
     termReview: { courseId: "", recordingId: "", status: "idle", target: null, transcriptSha256: "", videoAvailable: false, confirmed: false, error: "" },
     notice: "",
     noticeKind: "hint"
@@ -386,35 +387,41 @@
   var recordingTaskRead = null;
   function pollRecordingTask(force) {
     if (!state.activated || (!force && state.recordings.task.state !== "running" &&
-        state.recordings.background.state !== "running")) return;
+        state.recordings.background.state !== "running" && state.recordings.batch.state !== "running")) return;
     var epoch = accountQuotaEpoch;
     if (recordingTaskRead && recordingTaskRead.epoch === epoch) return recordingTaskRead.promise;
     var read = { epoch: epoch, promise: null,
-      foreground: state.recordings.task, background: state.recordings.background };
+      foreground: state.recordings.task, background: state.recordings.background, batch: state.recordings.batch };
     recordingTaskRead = read;
     read.promise = requestJson("/api/recordings/task").then(function (result) {
       if (epoch !== accountQuotaEpoch) return;
       // A start/cancel response owns newer state than this earlier observation.
       // Applying an old idle snapshot can otherwise hide a newly running task
       // and stop its scheduled polling altogether.
-      if (state.recordings.task !== read.foreground || state.recordings.background !== read.background) return;
+      if (state.recordings.task !== read.foreground || state.recordings.background !== read.background || state.recordings.batch !== read.batch) return;
       if (!result.ok || !result.body) return;
       var previous = state.recordings.task;
       var previousBackground = state.recordings.background;
+      var previousBatch = state.recordings.batch;
       var foreground = Object.assign({}, result.body);
       delete foreground.background_sync;
+      delete foreground.batch_organize;
       state.recordings.task = foreground;
       if (foreground.course_id) state.recordings.taskCourseId = foreground.course_id;
       state.recordings.background = result.body.background_sync || { state: "idle" };
+      state.recordings.batch = result.body.batch_organize || { state: "idle" };
+      var batchChanged = JSON.stringify(previousBatch) !== JSON.stringify(state.recordings.batch);
       var backgroundChanged = JSON.stringify(previousBackground) !== JSON.stringify(state.recordings.background);
       var completedCourse = backgroundChanged && (state.recordings.background.course_results || []).some(function (row) {
         var old = (previousBackground.course_results || []).find(function (entry) { return entry.course_id === row.course_id; });
         return row.state === "done" && (!old || old.state !== "done");
       });
       // Terminal feedback must be visible before ancillary cache/quota reads.
-      if (backgroundChanged || previous.state !== foreground.state) render();
+      if (batchChanged || backgroundChanged || previous.state !== foreground.state) render();
       if (previous.state === "running" && foreground.state !== "running" || completedCourse ||
-          previousBackground.state === "running" && state.recordings.background.state !== "running") {
+          previousBackground.state === "running" && state.recordings.background.state !== "running" ||
+          previousBatch.state === "running" && state.recordings.batch.state !== "running") {
+        if (previousBatch.state === "running" && state.recordings.batch.state !== "running") state.batchOrganize = null;
         return Promise.all([loadCampusCourses(), refreshSettledQuota()]).then(function () {
           if (epoch !== accountQuotaEpoch) return;
           if (state.view === "campus-course") return loadCampusCourse(state.campus.courseId);
@@ -472,7 +479,11 @@
 
   function courseTaskBusy(courseId) {
     var background = state.recordings.background || {};
+    var batch = state.recordings.batch || {};
     return state.recordings.syncPending || state.recordings.task.state === "running" ||
+      batch.state === "running" && (batch.items || []).some(function (item) {
+        return item.course_id === courseId && (item.state === "pending" || item.state === "running");
+      }) ||
       background.state === "running" && background.current_course_id === courseId;
   }
 
@@ -597,6 +608,170 @@
       : esc(title);
   }
 
+  function batchLessonKey(courseId, lessonId) { return JSON.stringify([courseId, lessonId]); }
+
+  function batchCourses() {
+    var panel = state.batchOrganize;
+    return panel && panel.preview ? panel.preview.courses.filter(function (course) {
+      return !panel.courseId || panel.courseId === course.course_id;
+    }) : [];
+  }
+
+  function selectBatchLessons(mode) {
+    var panel = state.batchOrganize;
+    panel.selected = {};
+    batchCourses().forEach(function (course) {
+      course.lessons.forEach(function (lesson) {
+        if (lesson.eligible && (mode === 'all' || mode === 'pending' && lesson.needs_organize))
+          panel.selected[batchLessonKey(course.course_id, lesson.id)] = true;
+      });
+    });
+  }
+
+  function openBatchOrganize(courseId) {
+    var epoch = accountQuotaEpoch;
+    var panel = { open: true, loading: true, courseId: courseId || '', selected: {}, notesStrategy: 'topics', error: '' };
+    state.batchOrganize = panel;
+    render();
+    refreshSettledQuota();
+    return requestJson('/api/campus/batch-organize/preview').then(function (result) {
+      if (epoch !== accountQuotaEpoch || state.batchOrganize !== panel) return;
+      if (!result.ok || !result.body) throw new Error(result.body && result.body.detail || '暂时无法读取录像，请重试。');
+      panel.preview = result.body;
+      selectBatchLessons('pending');
+    }).catch(function (error) {
+      if (epoch === accountQuotaEpoch && state.batchOrganize === panel) panel.error = error.message;
+    }).finally(function () {
+      if (epoch === accountQuotaEpoch && state.batchOrganize === panel) { panel.loading = false; render(); }
+    });
+  }
+
+  function selectedBatchItems() {
+    var selected = state.batchOrganize && state.batchOrganize.selected || {};
+    var items = [];
+    batchCourses().forEach(function (course) {
+      course.lessons.forEach(function (lesson) {
+        if (lesson.eligible && selected[batchLessonKey(course.course_id, lesson.id)])
+          items.push({ course: course, lesson: lesson });
+      });
+    });
+    return items;
+  }
+
+  function batchOrganizePanel() {
+    var panel = state.batchOrganize;
+    if (!panel || !panel.open) return '';
+    var header = '<section class="batch-organize-panel" aria-label="批量整理选择"><h2>一键并行整理课堂笔记</h2>' +
+      '<p class="form-note">支持多门课程同时并行处理；开始前自动预估转写时长与 AI 点数。</p>';
+    if (panel.loading) return header + '<p role="status">正在读取录像与成本预估…</p></section>';
+    if (!panel.preview) return header + '<p role="alert">' + esc(panel.error) + '</p>' +
+      button('重新读取', 'batch-preview-retry', {small:true}) + '</section>';
+    var items = selectedBatchItems();
+    var coursesCount = new Set(items.map(function (item) { return item.course.course_id; })).size;
+    var minutes = 0, minPoints = 0, maxPoints = 0, reuse = 0, estimated = false;
+    items.forEach(function (item) {
+      var lesson = item.lesson;
+      minutes += lesson.estimated_transcribe_minutes;
+      minPoints += lesson.estimated_points_min; maxPoints += lesson.estimated_points_max;
+      if (lesson.transcript_available) reuse += 1;
+      if (!lesson.transcript_available && lesson.duration_is_estimated) estimated = true;
+    });
+    var quota = state.quota || {};
+    var remainingMinutes = typeof quota.transcribe_seconds_remaining === 'number' ? Math.floor(quota.transcribe_seconds_remaining / 60) : null;
+    var remainingPoints = typeof quota.llm_points_remaining === 'number' ? quota.llm_points_remaining : null;
+    var warning = (remainingMinutes !== null && minutes > quota.transcribe_seconds_remaining / 60) ||
+      (remainingPoints !== null && minPoints > remainingPoints);
+    var summary = '<div class="batch-cost-summary" data-batch-cost-estimate aria-live="polite">' +
+      '<div><small>所选范围</small><strong>' + coursesCount + ' 门课程 · ' + items.length + ' 节录像</strong><span>' +
+      (coursesCount > 1 ? '最多 ' + Math.min(3, coursesCount) + ' 门课并行' : '单课顺序处理') + '</span></div>' +
+      '<div><small>预计转写时长</small><strong>约 ' + minutes + ' 分钟</strong><span>' +
+      (reuse ? '含 ' + reuse + ' 讲复用已有转写；' : '') + (estimated ? '未读时长讲次按标准课时估算' : '按录像实际时长计算') +
+      '</span><span>当前剩余 ' + (remainingMinutes === null ? '暂不可用' : remainingMinutes + ' 分钟') + '</span></div>' +
+      '<div><small>预计 AI 点数</small><strong>约 ' + minPoints + '–' + maxPoints + ' 点</strong><span>' + esc(panel.preview.notes_model) +
+      '</span><span>当前剩余 ' + (remainingPoints === null ? '暂不可用' : remainingPoints + ' 点') + '</span></div></div>' +
+      '<p class="form-note">以上为估算，实际消耗以处理结果为准。已有笔记会优先复用。</p>' +
+      (warning ? '<p class="form-note hint" role="status">提示：预估消耗高于当前剩余额度，整理会在额度用尽处安全停止，已完成的转写与笔记均会保留。</p>' : '') +
+      (state.quotaStale ? '<p class="form-note hint">剩余额度正在刷新，请以最新余额为准。</p>' : '');
+    var courses = batchCourses().map(function (course) {
+      var eligible = course.lessons.filter(function (lesson) { return lesson.eligible; });
+      var count = eligible.filter(function (lesson) { return panel.selected[batchLessonKey(course.course_id, lesson.id)]; }).length;
+      var attrs = ' data-course="' + esc(course.course_id) + '"';
+      return '<article class="batch-course"><label class="batch-course-heading"><input type="checkbox" data-action="batch-toggle-course"' + attrs +
+        (count && count < eligible.length ? ' data-batch-indeterminate' : '') +
+        (count && count === eligible.length ? ' checked' : '') + (!eligible.length ? ' disabled' : '') +
+        '><span><strong>' + esc(course.title) + '</strong><small>' + esc(course.term) + ' · 已选 ' + count + ' / ' + course.lessons.length +
+        ' 讲（待整理 ' + course.lessons.filter(function (lesson) { return lesson.needs_organize; }).length + ' 讲）</small></span></label>' +
+        (course.read_only ? '<p class="form-note">' + esc(course.read_only_message) + '</p>' : '') +
+        '<details class="batch-course-lessons" data-persistent-disclosure="batch-course-' + esc(course.course_id) + '"><summary>展开选择具体讲次</summary>' +
+        course.lessons.map(function (lesson) {
+          return '<label class="batch-lesson"><input type="checkbox" data-action="batch-toggle-lesson"' + attrs + ' data-recording="' + esc(lesson.id) + '"' +
+            (panel.selected[batchLessonKey(course.course_id, lesson.id)] ? ' checked' : '') + (!lesson.eligible ? ' disabled' : '') +
+            '><span><strong>' + esc(lesson.date) + ' ' + esc(lesson.title) + '</strong><small>' +
+            esc(lesson.unavailable_reason || (course.read_only ? '课程只读' : lesson.notes_available ? '已生成笔记' : lesson.transcript_available ? '已有转写' : '待整理')) +
+            ' · ' + (lesson.transcript_available ? '转写 0 分钟' : '约 ' + lesson.estimated_transcribe_minutes + ' 分钟') +
+            ' · AI 约 ' + lesson.estimated_points_min + '–' + lesson.estimated_points_max + ' 点</small></span></label>';
+        }).join('') + '</details></article>';
+    }).join('');
+    var running = state.recordings.batch.state === 'running' || panel.starting;
+    return header + '<div class="batch-selection-actions">' + button('全选待整理', 'batch-select-pending', {small:true, quiet:true}) +
+      button('全选全部讲次', 'batch-select-all', {small:true, quiet:true}) + button('清空选择', 'batch-select-none', {small:true, quiet:true}) +
+      '<label>笔记样式 <select data-batch-note-style><option value="topics"' + (panel.notesStrategy === 'topics' ? ' selected' : '') +
+      '>知识点图文笔记</option><option value="transcript"' + (panel.notesStrategy === 'transcript' ? ' selected' : '') + '>保留讲述顺序</option></select></label></div>' +
+      summary + '<div class="batch-course-list">' + (courses || '<p>当前没有可整理的录像。</p>') + '</div>' +
+      (panel.error ? '<p role="alert">' + esc(panel.error) + '</p>' : '') +
+      button(panel.starting ? '正在启动…' : '开始并行整理（' + items.length + ' 讲）', 'batch-organize-start', {primary:true,
+        disabled: !items.length || running || state.campus.demoConnection}) + '</section>';
+  }
+
+  function startBatchOrganize() {
+    var panel = state.batchOrganize;
+    if (!panel || panel.starting || state.recordings.batch.state === 'running') return;
+    var items = selectedBatchItems().map(function (item) { return {course_id:item.course.course_id, recording_id:item.lesson.id}; });
+    if (!items.length) return;
+    var epoch = accountQuotaEpoch;
+    panel.starting = true; panel.error = ''; render();
+    return requestJson('/api/campus/batch-organize', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({items:items, notes_strategy:panel.notesStrategy, direct_oss:true, max_parallel_courses:3})
+    }).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) throw new Error(result.body && result.body.detail || '批量整理未能开始，请重试。');
+      state.recordings.batch = result.body;
+      panel.open = false;
+    }).catch(function (error) {
+      if (epoch === accountQuotaEpoch) panel.error = error.message;
+    }).finally(function () {
+      if (epoch === accountQuotaEpoch) { panel.starting = false; render(); }
+    });
+  }
+
+  function cancelBatchOrganize() {
+    var epoch = accountQuotaEpoch;
+    return requestJson('/api/campus/batch-organize/cancel', {method:'POST'}).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) return showToast(result.body && result.body.detail || '取消请求未能送达，请重试。');
+      state.recordings.batch = result.body; render();
+    }).catch(function () { if (epoch === accountQuotaEpoch) showToast('取消请求未能送达，请重试。'); });
+  }
+
+  function batchOrganizeStatus() {
+    var batch = state.recordings.batch;
+    if (!batch || batch.state === 'idle') return '';
+    var done = (batch.items || []).filter(function (item) { return item.state === 'done'; }).length;
+    return '<section class="batch-organize-banner" data-batch-organize data-batch-state="' + esc(batch.state) + '" aria-label="批量整理进度">' +
+      '<div class="batch-status-heading"><strong>' + (batch.state === 'running' ? '正在并行整理' : batch.state === 'done' ? '✓ 批量整理完成' : '批量整理') +
+      '</strong>' + (batch.state === 'running' ? button('取消批量整理', 'batch-organize-cancel', {small:true, quiet:true}) : '') +
+      '</div><p role="status">' + esc(batch.stage) + ' · 已完成 ' + done + ' / ' + batch.progress_total + ' 讲 · ' + (batch.active_courses || 0) +
+      ' 门课正在处理</p><progress aria-label="批量整理进度" value="' + (batch.progress_done || 0) + '" max="' + (batch.progress_total || 1) + '"></progress>' +
+      '<details data-persistent-disclosure="batch-progress"><summary>查看各讲进度</summary><ul class="batch-progress-items">' +
+      (batch.items || []).map(function (item) {
+        return '<li><div><strong>' + esc(item.course_title) + ' · ' + esc(item.title) + '</strong><small>' +
+          esc(item.state === 'done' ? '✓ 已完成' : item.state === 'pending' ? '等待中' : item.stage) +
+          (item.state === 'running' ? ' · ' + Math.round(item.progress_percent || 0) + '%' : '') + '</small>' +
+          (item.error ? '<small class="batch-item-error">' + esc(item.error) + '</small>' : '') + '</div>' +
+          (item.state === 'done' ? button('查看笔记', 'batch-open-note', {small:true, quiet:true, attrs:{'data-course':item.course_id, 'data-recording':item.recording_id}}) : '') + '</li>';
+      }).join('') + '</ul></details></section>';
+  }
+
   function campusDashboardScreen() {
     var query = state.campus.query.trim().toLowerCase();
     var visible = state.campus.courses.filter(function (course) { return !query || (course.title + " " + course.code + " " + course.term + " " + course.id).toLowerCase().includes(query); });
@@ -636,7 +811,10 @@
         attrs: { "aria-disabled": state.recordings.backgroundPending || state.recordings.syncPending || state.recordings.task.state === "running" || state.recordings.background.state === "running",
           "style": state.recordings.backgroundPending || state.recordings.syncPending || state.recordings.task.state === "running" || state.recordings.background.state === "running" ? "opacity:.55;cursor:not-allowed;transform:none" : "" }
       }) +
-      '</div>' + recordingTaskStatus() + backgroundSyncStatus() +
+      (state.campus.courses.some(function (course) { return course.recordings > 0; }) ?
+        button(state.batchOrganize && state.batchOrganize.open ? '收起一键整理' : '一键整理笔记', 'toggle-batch-organize',
+          {small:true, quiet:Boolean(state.batchOrganize && state.batchOrganize.open)}) : '') +
+      '</div>' + recordingTaskStatus() + backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel() +
        (state.campus.courses.some(function (course) { return !course.synced_at; }) ?
          '<p class="form-note hint">部分课程尚未更新，请先更新目录。</p>' : '') +
        (state.campus.courses.length ? '<label class="campus-search-label">查找课程<input class="text-input" type="search" data-campus-search placeholder="输入课程名或课程号" value="' + esc(state.campus.query) + '"></label>' : '') + (state.recordings.error ? '<p role="alert">' + esc(state.recordings.error) + '</p>' : '') +
@@ -1268,7 +1446,6 @@
     }
     var rawLines = String(markdown || '').split(/\r?\n/);
     var out = [];
-    var sections = [];
     var fenced = false;
     var mathBlock = null;
     for (var i = 0; i < rawLines.length; i += 1) {
@@ -1319,14 +1496,7 @@
       if (heading) {
         var level = Math.max(heading[1].length, 2);
         var headingHtml = inline(heading[2]);
-        var headingId = '';
-        if (level === 2 || level === 3) {
-          var headingText = document.createElement('span');
-          headingText.innerHTML = headingHtml;
-          sections.push(headingText.textContent);
-          headingId = ' id="note-sec-' + sections.length + '"';
-        }
-        out.push('<h' + level + headingId + '>' + headingHtml + '</h' + level + '>' + (/^#{2,3}$/.test(heading[1]) ? sectionVisuals(heading[2]) : ''));
+        out.push('<h' + level + '>' + headingHtml + '</h' + level + '>' + (/^#{2,3}$/.test(heading[1]) ? sectionVisuals(heading[2]) : ''));
         continue;
       }
       var image = /^\s*!\[([^\]]*)\]\(([^\s]+)\)\s*$/.exec(line);
@@ -1346,11 +1516,7 @@
       if (line.trim()) out.push('<p>' + inline(line) + '</p>');
     }
     if (mathBlock !== null) out.push('<div class="math-block">' + formatMath(mathBlock.join(' ')) + '</div>');
-    var outline = sections.length >= 3 ? '<nav class="note-outline" aria-label="笔记章节导航">' + sections.map(function (text, index) {
-      return '<button type="button" class="note-outline-link" data-action="campus-scroll-note-section" data-target="note-sec-' + (index + 1) + '">' + esc(text) + '</button>';
-    }).join('') + '</nav>' : '';
-    var footer = sections.length >= 3 ? '<div class="note-outline-footer"><button type="button" class="note-outline-link" data-action="campus-scroll-note-top">返回目录与工具栏</button></div>' : '';
-    return outline + out.join('') + (fenced ? '</code></pre></div>' : '') + footer;
+    return out.join('') + (fenced ? '</code></pre></div>' : '');
   }
 
   function highlightStudyText(html, query, hitIndex) {
@@ -1562,13 +1728,14 @@
         attrs: { "data-course": course.id,
           "aria-disabled": courseTaskBusy(course.id),
           "style": courseTaskBusy(course.id) ? "opacity:.55;cursor:not-allowed;transform:none" : "" }
-      }) + '</div></section>';
+      }) + (course.lessons.length > 1 ? button('批量整理本课', 'open-course-batch-organize',
+        {small:true, quiet:true, attrs:{'data-course':course.id}}) : '') + '</div></section>';
     var notice = course.read_only ? '<section class="panel" role="status">' + esc(course.read_only_message || "教学网尚未完整读取；旧目录保留为只读，请更新这门课或打开教学网核对。") + '</section>' : '';
     if (state.campus.loading) notice += '<p role="status">正在读取本课最新缓存；已有内容可继续浏览。</p>';
     if (state.campus.error) notice += '<p role="alert">' + esc(state.campus.error) + '</p>';
     if (state.recordings.error && (!state.recordings.errorCourseId || state.recordings.errorCourseId === course.id))
       notice += '<p role="alert">' + esc(state.recordings.error) + '</p>';
-    notice += backgroundSyncStatus();
+    notice += backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel();
     if (section === "assignments" || section === "notices") return header + hero + notice + recordingTaskStatus() + campusOfficialSections(course, section);
     var summaryPreviewOpen = Boolean(readingPreviews[course.id + ':summary'] && readingPreviews[course.id + ':summary'].open);
     if (section === "materials") {
@@ -1665,7 +1832,7 @@
     state.campus.assignmentStatuses = {};
     state.termReview = { courseId: "", recordingId: "", status: "idle", target: null, transcriptSha256: "", videoAvailable: false, confirmed: false, error: "" };
     state.campus.submission = { selectedId: "", draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } };
-    loadCampusCourse(courseId);
+    return loadCampusCourse(courseId);
   }
 
   function termReviewPanel(lesson) {
@@ -2490,6 +2657,7 @@
       var field = document.getElementById(id);
       if (field) field.value = codeDrafts[id];
     });
+    document.querySelectorAll('[data-batch-indeterminate]').forEach(function (element) { element.indeterminate = true; });
     document.querySelectorAll('[data-persistent-disclosure]').forEach(function (element) {
       var key = element.dataset.persistentDisclosure;
       if (Object.prototype.hasOwnProperty.call(disclosures, key)) element.open = disclosures[key];
@@ -2679,6 +2847,8 @@
     state.recordings.error = "";
     state.recordings.errorCourseId = "";
     state.recordings.background = { state: "idle" };
+    state.recordings.batch = { state: "idle" };
+    state.batchOrganize = null;
     state.recordings.backgroundPending = false;
     settledQuotaRead = null;
     notionParentsEpoch += 1;
@@ -3097,6 +3267,24 @@
     else if (action === "revoke-notion") disconnectNotion();
     else if (action === "connect-notion") connectNotion();
     else if (action === "open-dashboard") openDashboard();
+    else if (action === 'toggle-batch-organize') {
+      if (state.batchOrganize && state.batchOrganize.open) { state.batchOrganize.open = false; render(); }
+      else openBatchOrganize('');
+    }
+    else if (action === 'open-course-batch-organize') openBatchOrganize(target.dataset.course);
+    else if (action === 'batch-preview-retry') openBatchOrganize(state.batchOrganize.courseId);
+    else if (action === 'batch-select-pending' || action === 'batch-select-all' || action === 'batch-select-none') {
+      selectBatchLessons(action.replace('batch-select-', '')); render();
+    }
+    else if (action === 'batch-organize-start') startBatchOrganize();
+    else if (action === 'batch-organize-cancel') cancelBatchOrganize();
+    else if (action === 'batch-open-note') {
+      var noteEpoch = accountQuotaEpoch;
+      openCampusCourse(target.dataset.course).then(function () {
+        if (noteEpoch === accountQuotaEpoch && state.campus.courseId === target.dataset.course && state.campus.course)
+          openCampusLesson(target.dataset.recording);
+      });
+    }
     else if (action === "campus-account-settings") {
       state.view = "campus-account";
       render();
@@ -3112,14 +3300,6 @@
       state.campus.section = target.dataset.center; render();
     }
     else if (action === "campus-open-lesson") { openCampusLesson(target.dataset.recording); }
-    else if (action === "campus-scroll-note-section") {
-      var noteSection = document.getElementById(target.dataset.target);
-      if (noteSection) noteSection.scrollIntoView({ block: "start" });
-    }
-    else if (action === "campus-scroll-note-top") {
-      var noteReader = target.closest('.lecture-note-reader');
-      if (noteReader) noteReader.scrollIntoView({ block: 'start' });
-    }
     else if (action === "campus-load-parents") loadNotionParents();
     else if (action === "campus-create-workspace") createWorkspace();
     else if (action === 'campus-replace-workspace') {
@@ -3326,6 +3506,19 @@
     }
   });
   document.addEventListener("change", function (event) {
+    if (event.target.matches('[data-batch-note-style]')) {
+      state.batchOrganize.notesStrategy = event.target.value; return;
+    }
+    if (event.target.matches('[data-action="batch-toggle-course"], [data-action="batch-toggle-lesson"]')) {
+      var control = event.target;
+      var batchCourse = batchCourses().find(function (course) { return course.course_id === control.dataset.course; });
+      if (!batchCourse) return;
+      batchCourse.lessons.forEach(function (lesson) {
+        if (lesson.eligible && (!control.dataset.recording || lesson.id === control.dataset.recording))
+          state.batchOrganize.selected[batchLessonKey(batchCourse.course_id, lesson.id)] = control.checked;
+      });
+      render(); return;
+    }
     if (event.target.matches("[data-term-review-confirm]")) {
       state.termReview.confirmed = event.target.checked;
       var submit = document.querySelector('[data-action="campus-submit-term-review"]');

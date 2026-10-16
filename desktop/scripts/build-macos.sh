@@ -24,11 +24,11 @@ xattr -cr \
   "$SRC_TAURI/binaries" \
   "$SRC_TAURI/resources/runtime" \
   "$TARGET_ROOT/release"
-APP="$TARGET_ROOT/release/bundle/macos/PKU All in Notion.app"
+APP="$TARGET_ROOT/release/bundle/macos/PKU All in One.app"
 DMG_DIR="$TARGET_ROOT/release/bundle/dmg"
 DMG_STAGE="$TARGET_ROOT/release/bundle/dmg-stage"
 VERSION="$(node -p "require('./package.json').version")"
-DMG="$DMG_DIR/PKU All in Notion_${VERSION}_aarch64.dmg"
+DMG="$DMG_DIR/PKU All in One_${VERSION}_aarch64.dmg"
 
 # Tauri's Finder-based DMG decorator writes com.apple.FinderInfo back onto
 # the already signed app when the repository lives under Desktop/iCloud. A
@@ -43,10 +43,10 @@ PATH="$SCRIPT_DIR/macos-tools:$PATH" npx tauri bundle --bundles app \
 /usr/bin/codesign --verify --deep --strict "$APP"
 rm -rf "$DMG_STAGE"
 mkdir -p "$DMG_STAGE" "$DMG_DIR"
-/usr/bin/ditto "$APP" "$DMG_STAGE/PKU All in Notion.app"
+/usr/bin/ditto "$APP" "$DMG_STAGE/PKU All in One.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 /usr/bin/hdiutil create \
-  -volname "PKU All in Notion" \
+  -volname "PKU All in One" \
   -srcfolder "$DMG_STAGE" \
   -ov \
   -format UDZO \

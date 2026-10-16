@@ -27,7 +27,7 @@
 #define MyAppPublisher "PKU All in Notion"
 ; Exe name as produced by Tauri (productName). Override with /DMyAppExeName=...
 #ifndef MyAppExeName
-  #define MyAppExeName "PKU All in Notion.exe"
+  #define MyAppExeName "PKU All in One.exe"
 #endif
 
 [Setup]

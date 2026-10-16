@@ -5,6 +5,7 @@ import hashlib
 import errno
 import json
 import logging
+import math
 import re
 import shutil
 import sqlite3
@@ -12,6 +13,7 @@ import threading
 import time
 import uuid
 from copy import copy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -103,6 +105,59 @@ class CampusProcessRequest(BaseModel):
     regenerate: bool = False
     reuse_existing: bool = False
     notes_strategy: Literal["transcript", "topics"] | None = None
+
+
+class BatchOrganizeItem(BaseModel):
+    course_id: str
+    recording_id: str
+
+
+class BatchOrganizeRequest(BaseModel):
+    items: list[BatchOrganizeItem]
+    notes_strategy: Literal["transcript", "topics"] = "topics"
+    regenerate: bool = False
+    direct_oss: bool = True
+    max_parallel_courses: int = Field(default=3, ge=1, le=6)
+
+
+def batch_organize_preview(settings) -> dict:
+    from .campus_catalog import campus_courses, campus_course
+    root = Path(settings.data_dir)
+    model = settings.notes_model
+    points = {"qwen3.5-flash": (1, 2), "qwen3.8-max": (10, 18),
+              "qwen3.8-max-0902": (10, 18)}.get(model, (2, 4))
+    courses = []
+    for summary in campus_courses(root)["courses"]:
+        course = campus_course(root, summary["id"])
+        if not course.get("lessons"):
+            continue
+        read_only = bool(course.get("read_only"))
+        lessons = []
+        for lesson in course["lessons"]:
+            duration = max(0, int(lesson.get("duration_seconds") or 0))
+            periods = re.search(r"第\s*(\d+)\s*[-—–~～至]\s*(\d+)\s*节", lesson["title"])
+            estimate = 5400
+            if periods:
+                start, end = map(int, periods.groups())
+                if end >= start >= 1:
+                    estimate = (end - start + 1) * 45 * 60
+            estimate = duration or estimate
+            transcript = bool(lesson.get("transcript_available"))
+            notes = bool(lesson.get("notes_available"))
+            reason = lesson.get("unavailable_reason") or ""
+            eligible = not read_only and not reason
+            lessons.append({"id": lesson["id"], "title": lesson["title"],
+                            "date": lesson.get("date", ""), "notes_available": notes,
+                            "transcript_available": transcript, "unavailable_reason": reason,
+                            "eligible": eligible, "needs_organize": eligible and not notes,
+                            "duration_seconds": duration, "estimated_duration_seconds": estimate,
+                            "duration_is_estimated": duration <= 0 and not transcript,
+                            "estimated_transcribe_minutes": 0 if transcript else math.ceil(estimate / 60),
+                            "estimated_points_min": points[0], "estimated_points_max": points[1]})
+        courses.append({"course_id": course["id"], "title": course["title"],
+                        "term": course.get("term", ""), "read_only": read_only,
+                        "read_only_message": course.get("read_only_message") or "", "lessons": lessons})
+    return {"notes_model": model, "courses": courses}
 
 
 class HomeRequest(BaseModel):
@@ -946,6 +1001,9 @@ class RecordingWorkManager:
         self._background = None
         self._background_cancel = threading.Event()
         self._background_child = None
+        self._batch_organize: dict | None = None
+        self._batch_cancel = threading.Event()
+        self._batch_children: dict[str, RecordingWorkManager] = {}
         self._owner_check = lambda: None
         self._background_recovered = False
         self._restore_background()
@@ -981,7 +1039,157 @@ class RecordingWorkManager:
             value = self._work.as_dict() if visible_work else {"state": "idle"}
             if self._background is not None and self._background_binding == current:
                 value["background_sync"] = self._background_snapshot()
+            if self._batch_organize is not None and self._batch_binding == current:
+                value["batch_organize"] = self._batch_organize_snapshot()
             return value
+
+    def _batch_organize_snapshot(self):
+        from copy import deepcopy
+        return deepcopy(self._batch_organize) if self._batch_organize else {"state": "idle"}
+
+    def _batch_check(self):
+        self._owner_check()
+        if self._account_binding() != self._batch_binding:
+            self._batch_cancel.set()
+            raise ValueError("账号或连接已改变，批量整理已停止。")
+        if self._batch_cancel.is_set():
+            raise ValueError("批量整理已取消。")
+
+    def start_batch_organize(self, body: BatchOrganizeRequest) -> dict:
+        with self._lock:
+            if not getattr(self.settings, "platform_token", ""):
+                raise ValueError("请先登录并完成邮箱验证。")
+            if not body.items:
+                raise ValueError("请至少选择一节要整理的录像。")
+            if self._batch_organize and self._batch_organize["state"] == "running":
+                raise ValueError("批量整理正在进行，请查看进度或取消。")
+            preview = batch_organize_preview(self.settings)
+            candidates = {(course["course_id"], lesson["id"]): (course, lesson)
+                          for course in preview["courses"] for lesson in course["lessons"]}
+            rows = []
+            for pair in dict.fromkeys((item.course_id, item.recording_id) for item in body.items):
+                if pair not in candidates:
+                    raise ValueError("所选录像不属于当前课程目录，请刷新后重试。")
+                course, lesson = candidates[pair]
+                if not lesson["eligible"]:
+                    raise ValueError(lesson["unavailable_reason"] or course["read_only_message"] or "这门课当前只读。")
+                rows.append({"course_id": pair[0], "course_title": course["title"],
+                             "recording_id": pair[1], "title": lesson["title"], "date": lesson["date"],
+                             "state": "pending", "stage": "等待中", "progress_percent": 0,
+                             "error": "", "result_url": ""})
+            self._batch_binding = self._account_binding()
+            self._batch_settings = copy(self.settings)
+            self._batch_cancel.clear()
+            self._batch_organize = {"id": uuid.uuid4().hex, "kind": "batch_organize", "scope": "batch",
+                                    "state": "running", "stage": "正在并行整理所选课程录像",
+                                    "max_parallel_courses": body.max_parallel_courses, "active_courses": 0,
+                                    "progress_done": 0, "progress_total": len(rows),
+                                    "progress_remaining": len(rows), "progress_percent": 0,
+                                    "items": rows, "error": ""}
+            accepted = self._batch_organize_snapshot()
+        try:
+            threading.Thread(target=self._run_batch_organize, args=(body,), daemon=True).start()
+        except BaseException:
+            with self._lock:
+                for row in rows:
+                    row.update(state="failed", stage="任务未启动", error="本机任务没有启动，请稍后重试。")
+                self._batch_organize.update(state="failed", stage="批量整理未启动", active_courses=0)
+                self._batch_progress()
+            raise
+        return accepted
+
+    def cancel_batch_organize(self):
+        with self._lock:
+            if (not self._batch_organize or self._batch_organize["state"] != "running"
+                    or self._batch_binding != self._account_binding()):
+                raise ValueError("当前没有可取消的批量整理。")
+            self._batch_cancel.set()
+            self._batch_organize["stage"] = "正在取消，等待当前讲次安全收尾"
+            for child in self._batch_children.values():
+                child._cancel_sync.set()
+            return self._batch_organize_snapshot()
+
+    def _batch_progress(self):
+        batch = self._batch_organize
+        # Completed includes failed/cancelled items; success counts are separate in the UI.
+        done = sum(row["state"] in {"done", "failed", "cancelled"} for row in batch["items"])
+        batch.update(progress_done=done, progress_remaining=batch["progress_total"] - done,
+                     progress_percent=int(100 * done / batch["progress_total"]))
+
+    def _run_batch_course(self, rows, body):
+        for row in rows:
+            child = None
+            try:
+                self._batch_check()
+                child = RecordingWorkManager(copy(self._batch_settings))
+                child._writes = self._writes
+                child._owner_check = self._batch_check
+                with self._lock:
+                    self._batch_children[row["course_id"]] = child
+                    row.update(state="running", stage="准备整理")
+                    self._batch_organize["active_courses"] = len(self._batch_children)
+                child.start_campus_process(row["recording_id"], row["course_id"],
+                                           direct_oss=body.direct_oss, regenerate=body.regenerate,
+                                           notes_strategy=body.notes_strategy)
+                while not child._finished.wait(.05):
+                    if self._batch_cancel.is_set() or self._account_binding() != self._batch_binding:
+                        self._batch_cancel.set()
+                        child._cancel_sync.set()
+                    current = child.state()
+                    with self._lock:
+                        row.update(stage=current.get("stage", "正在整理"),
+                                   progress_percent=current.get("progress_percent", 0))
+                        if not self._batch_cancel.is_set():
+                            self._batch_organize["stage"] = (
+                                f"正在并行整理 {len(self._batch_children)} 门课 · {row['course_title']}：{row['stage']}")
+                current = child.state()
+                with self._lock:
+                    if current.get("state") == "done":
+                        row.update(state="done", stage="已完成", progress_percent=100,
+                                   result_url=current.get("result_url", ""))
+                    else:
+                        row.update(state="cancelled" if self._batch_cancel.is_set() else "failed",
+                                   stage="已取消" if self._batch_cancel.is_set() else "整理未完成",
+                                   error=current.get("error") or "整理未完成")
+            except Exception as exc:
+                with self._lock:
+                    row.update(state="cancelled" if self._batch_cancel.is_set() else "failed",
+                               stage="已取消" if self._batch_cancel.is_set() else "整理未完成",
+                               error=str(exc) if isinstance(exc, ValueError) else "整理未完成，请稍后重试。")
+            finally:
+                with self._lock:
+                    self._batch_children.pop(row["course_id"], None)
+                    self._batch_organize["active_courses"] = len(self._batch_children)
+                    self._batch_progress()
+
+    def _run_batch_organize(self, body):
+        batch = self._batch_organize
+        groups = {}
+        for row in batch["items"]:
+            groups.setdefault(row["course_id"], []).append(row)
+        try:
+            with ThreadPoolExecutor(max_workers=min(body.max_parallel_courses, len(groups))) as pool:
+                futures = [pool.submit(self._run_batch_course, rows, body) for rows in groups.values()]
+                for future in futures:
+                    future.result()
+        except Exception:
+            logger.exception("batch organize worker failed")
+            with self._lock:
+                for row in batch["items"]:
+                    if row["state"] in {"pending", "running"}:
+                        row.update(state="failed", stage="整理未完成", error="本机任务中断，请稍后重试。")
+        finally:
+            with self._lock:
+                done = sum(row["state"] == "done" for row in batch["items"])
+                total = batch["progress_total"]
+                status = ("cancelled" if self._batch_cancel.is_set() else "done" if done == total
+                          else "partial" if done else "failed")
+                stage = (f"批量整理已完成（共 {total} 讲）" if status == "done" else
+                         f"已完成 {done} / {total} 讲 · {total - done} 讲未完成")
+                if status == "cancelled":
+                    stage = "批量整理已取消；" + stage
+                batch.update(state=status, stage=stage, active_courses=0)
+                self._batch_progress()
 
     def _background_snapshot(self):
         from copy import deepcopy
@@ -1974,6 +2182,24 @@ class RecordingWorkManager:
 
 def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_connection: bool = False) -> None:
     credentials_lock = threading.Lock()
+    @app.get("/api/campus/batch-organize/preview")
+    def batch_organize_preview_endpoint() -> dict:
+        return batch_organize_preview(manager.settings)
+
+    @app.post("/api/campus/batch-organize")
+    def batch_organize_endpoint(body: BatchOrganizeRequest) -> dict:
+        try:
+            return manager.start_batch_organize(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/campus/batch-organize/cancel")
+    def batch_organize_cancel_endpoint() -> dict:
+        try:
+            return manager.cancel_batch_organize()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/campus/courses")
     def campus_courses_endpoint() -> dict:
         from .campus_catalog import campus_courses
@@ -2384,7 +2610,8 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         try:
             binding = manager._account_binding()
             current = manager.state()
-            if current.get("state") == "running" or current.get("background_sync", {}).get("state") == "running":
+            if (current.get("state") == "running" or current.get("background_sync", {}).get("state") == "running"
+                    or current.get("batch_organize", {}).get("state") == "running"):
                 raise HTTPException(status_code=409, detail="请等待当前课程任务结束后再更换教学网账号。")
             try:
                 client = get_session(username=username, password=body.password)
@@ -2399,7 +2626,8 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                 if binding != manager._account_binding():
                     raise HTTPException(status_code=409, detail="账号或连接已改变，请重新验证教学网账号。")
                 current = manager.state()
-                if current.get("state") == "running" or current.get("background_sync", {}).get("state") == "running":
+                if (current.get("state") == "running" or current.get("background_sync", {}).get("state") == "running"
+                        or current.get("batch_organize", {}).get("state") == "running"):
                     raise HTTPException(status_code=409, detail="课程任务已开始，请等待任务结束后再保存账号。")
                 try:
                     write_env_values(env_file_path(manager.settings),

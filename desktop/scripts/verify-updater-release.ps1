@@ -12,8 +12,8 @@ if (-not $ExpectedVersion) {
 if (-not $ManifestPath) {
     $ManifestPath = Join-Path $repo "dist\latest-$ExpectedVersion.json"
 }
-$signed = Join-Path $desktop "src-tauri\target\release\bundle\nsis\PKU All in Notion_$($ExpectedVersion)_x64-setup.exe"
-$published = Join-Path $repo "dist\PKU-All-in-Notion-Windows-$ExpectedVersion.exe"
+$signed = Join-Path $desktop "src-tauri\target\release\bundle\nsis\PKU All in One_$($ExpectedVersion)_x64-setup.exe"
+$published = Join-Path $repo "dist\PKU-All-in-One-Windows-$ExpectedVersion.exe"
 $sig = "$signed.sig"
 foreach ($file in @($ManifestPath, $signed, $published, $sig)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release file: $file" }

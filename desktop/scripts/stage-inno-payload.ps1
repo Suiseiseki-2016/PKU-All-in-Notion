@@ -33,7 +33,7 @@ if (-not (Test-Path $ReleaseDir)) {
 }
 
 $preferred = @(
-    (Join-Path $ReleaseDir "PKU All in Notion.exe"),
+    (Join-Path $ReleaseDir "PKU All in One.exe"),
     (Join-Path $ReleaseDir "pku-desktop.exe")
 )
 $appExe = $null
@@ -74,7 +74,7 @@ if (Test-Path $Payload) {
 }
 New-Item -ItemType Directory -Force -Path $Payload | Out-Null
 
-Copy-Item -Force $appExe.FullName (Join-Path $Payload "PKU All in Notion.exe")
+Copy-Item -Force $appExe.FullName (Join-Path $Payload "PKU All in One.exe")
 Copy-Item -Force $sidecar (Join-Path $Payload "pku-sync.exe")
 Copy-Item -Recurse -Force $resources (Join-Path $Payload "resources")
 

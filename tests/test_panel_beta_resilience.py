@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+import threading
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -37,6 +39,354 @@ def api(root):
     app = FastAPI()
     recordings_api.add_recording_routes(app, SimpleNamespace(settings=settings))
     return TestClient(app), settings
+
+
+def batch_fixture(root):
+    from pku_sync import catalog_snapshots
+    from pku_sync.models import Course
+    items = []
+    for course_id in ('net', 'math'):
+        folder, _ = seed(root, course_id, course_id)
+        (folder / 'recordings/index.json').write_text(json.dumps([
+            {'course_id': course_id, 'title': '第1-2节', 'recorded_at': '2026-10-01 08:00:00'},
+            {'course_id': course_id, 'title': '第3-5节', 'recorded_at': '2026-10-02 08:00:00'}]), 'utf8')
+        items.extend({'course_id': course_id, 'recording_id': recordings_api.recording_id(job)}
+                     for job in collect_jobs(root, course_id))
+        catalog_snapshots.save_cache(root, {'revision': 1, 'snapshot': catalog_snapshots.build_snapshot(
+            Course(course_id=course_id, name=course_id),
+            [job.recording for job in collect_jobs(root, course_id)], [], [], [])})
+    settings = Settings(_env_file=None, data_dir=root, platform_token='fixture-account', notion_token='')
+    manager = recordings_api.RecordingWorkManager(settings)
+    app = FastAPI()
+    recordings_api.add_recording_routes(app, manager)
+    return TestClient(app), manager, items
+
+
+def wait_for_batch(manager):
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        snapshot = manager.state().get('batch_organize', {})
+        if snapshot.get('state') != 'running':
+            return snapshot
+        time.sleep(.01)
+    pytest.fail('Batch worker did not finish')
+
+
+@pytest.mark.parametrize('model,points', [
+    ('qwen3.5-flash', (1, 2)), ('qwen3.7-plus', (2, 4)),
+    ('qwen3.8-max', (10, 18)), ('qwen3.8-max-0902', (10, 18))])
+def test_batch_organize_preview_estimates(tmp_path, model, points):
+    client, manager, _ = batch_fixture(tmp_path)
+    manager.settings.notes_model = model
+    jobs = list(collect_jobs(tmp_path, 'net'))
+    jobs[0].directory.mkdir(parents=True, exist_ok=True)
+    (jobs[0].directory / 'duration.json').write_text('{"duration_seconds": 3601}', 'utf8')
+    (jobs[0].directory / 'transcript.json').write_text('{"segments": []}', 'utf8')
+    payload = client.get('/api/campus/batch-organize/preview').json()
+    assert payload['notes_model'] == model
+    assert len(payload['courses']) == 2
+    by_id = {lesson['id']: lesson for course in payload['courses'] for lesson in course['lessons']}
+    cached = by_id[recordings_api.recording_id(jobs[0])]
+    assert cached['duration_seconds'] == cached['estimated_duration_seconds'] == 3601
+    assert cached['estimated_transcribe_minutes'] == 0
+    assert cached['duration_is_estimated'] is False
+    assert cached['transcript_available'] and cached['needs_organize']
+    unknown = by_id[recordings_api.recording_id(jobs[1])]
+    assert unknown['estimated_duration_seconds'] == 8100
+    assert unknown['estimated_transcribe_minutes'] == 135
+    assert unknown['duration_is_estimated'] and unknown['eligible']
+    for lesson in by_id.values():
+        assert (lesson['estimated_points_min'], lesson['estimated_points_max']) == points
+    (jobs[0].directory / 'transcript.json').unlink()
+    payload = client.get('/api/campus/batch-organize/preview').json()
+    known = next(lesson for course in payload['courses'] for lesson in course['lessons']
+                 if lesson['id'] == recordings_api.recording_id(jobs[0]))
+    assert known['estimated_transcribe_minutes'] == 61
+    assert not known['duration_is_estimated']
+
+
+def test_batch_preview_duration_fallback_and_readonly(monkeypatch, tmp_path):
+    from pku_sync.panel import campus_catalog
+    course = {'id': 'net', 'title': 'Networks', 'read_only': True, 'read_only_message': '只读',
+              'lessons': [{'id': str(i), 'title': title} for i, title in enumerate(
+                  ('无课时', '第0-2节', '第3-1节', '第2-4节'))]}
+    monkeypatch.setattr(campus_catalog, 'campus_courses', lambda _: {'courses': [{'id': 'net'}]})
+    monkeypatch.setattr(campus_catalog, 'campus_course', lambda *args: course)
+    result = recordings_api.batch_organize_preview(Settings(_env_file=None, data_dir=tmp_path))
+    lessons = result['courses'][0]['lessons']
+    assert [lesson['estimated_transcribe_minutes'] for lesson in lessons] == [90, 90, 90, 135]
+    assert all(not lesson['eligible'] and not lesson['needs_organize'] for lesson in lessons)
+    course['read_only'] = False
+    course['lessons'][0]['unavailable_reason'] = '录像不可用'
+    course['lessons'][1]['notes_available'] = True
+    lessons = recordings_api.batch_organize_preview(Settings(_env_file=None, data_dir=tmp_path))['courses'][0]['lessons']
+    assert not lessons[0]['eligible'] and not lessons[0]['needs_organize']
+    assert lessons[1]['eligible'] and not lessons[1]['needs_organize']
+
+
+def test_batch_organize_parallel_courses_and_progress(tmp_path, monkeypatch):
+    client, manager, items = batch_fixture(tmp_path)
+    rendezvous = threading.Barrier(2)
+    release = threading.Event()
+    both_started = threading.Event()
+    calls, active, maximum = [], set(), []
+    lock = threading.Lock()
+
+    def start(child, key, course_id, **kwargs):
+        assert child._writes is manager._writes
+        assert kwargs == {'direct_oss': True, 'regenerate': False, 'notes_strategy': 'transcript'}
+        def action():
+            with lock:
+                assert course_id not in active
+                first = not any(course == course_id for course, _ in calls)
+                active.add(course_id)
+                calls.append((course_id, key))
+                maximum.append(len(active))
+            try:
+                if first:
+                    rendezvous.wait(5)
+                    both_started.set()
+                    assert release.wait(5)
+                child._stage('正在生成笔记')
+                return '/notes/' + key
+            finally:
+                with lock:
+                    active.remove(course_id)
+        return child._start('process', key, action, course_id=course_id)
+
+    monkeypatch.setattr(recordings_api.RecordingWorkManager, 'start_campus_process', start)
+    try:
+        response = client.post('/api/campus/batch-organize', json={
+            'items': items + items[:1], 'notes_strategy': 'transcript', 'max_parallel_courses': 2})
+        assert response.status_code == 200
+        assert response.json()['progress_total'] == 4  # duplicate excluded
+        assert both_started.wait(5)
+        snapshot = manager.state()['batch_organize']
+        assert snapshot['state'] == 'running' and snapshot['active_courses'] == 2
+        assert sum(row['state'] == 'running' for row in snapshot['items']) == 2
+        snapshot['items'][0]['title'] = 'cannot mutate manager'
+        assert manager.state()['batch_organize']['items'][0]['title'] != 'cannot mutate manager'
+        assert client.post('/api/campus/batch-organize', json={'items': items}).status_code == 400
+        with pytest.raises(ValueError, match='这门课'):
+            manager._start('process', 'conflict', lambda: '', course_id='net')
+    finally:
+        release.set()
+    result = wait_for_batch(manager)
+    assert result['state'] == 'done'
+    assert result['progress_done'] == result['progress_total'] == 4
+    assert result['progress_remaining'] == 0 and result['progress_percent'] == 100
+    assert maximum and max(maximum) == 2
+    assert all(row['state'] == 'done' and row['result_url'] for row in result['items'])
+    for course_id in ('net', 'math'):
+        assert [key for course, key in calls if course == course_id] == [
+            item['recording_id'] for item in items if item['course_id'] == course_id]
+    assert manager._writes.owners == {} and manager._batch_children == {}
+
+
+@pytest.mark.parametrize('outcome', ['cancel', 'account-change', 'partial', 'failed'])
+def test_batch_organize_cancellation_and_failures(tmp_path, monkeypatch, outcome):
+    client, manager, items = batch_fixture(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def start(child, key, course_id, **kwargs):
+        def action():
+            calls.append(key)
+            started.set()
+            assert release.wait(5)
+            child._stage('正在整理')  # real owner/cancellation boundary
+            if outcome == 'failed' or outcome == 'partial' and course_id == 'net':
+                raise ValueError('fixture failure; cached transcript retained')
+            return '/notes/' + key
+        return child._start('process', key, action, course_id=course_id)
+
+    monkeypatch.setattr(recordings_api.RecordingWorkManager, 'start_campus_process', start)
+    body = recordings_api.BatchOrganizeRequest(items=items, max_parallel_courses=1)
+    try:
+        manager.start_batch_organize(body)
+        assert started.wait(5)
+        if outcome == 'cancel':
+            assert client.post('/api/campus/batch-organize/cancel').status_code == 200
+            assert all(child._cancel_sync.is_set() for child in manager._batch_children.values())
+        elif outcome == 'account-change':
+            manager.settings.platform_token = 'other-account'
+            assert 'batch_organize' not in manager.state()
+            assert client.post('/api/campus/batch-organize/cancel').status_code == 400
+    finally:
+        release.set()
+    if outcome == 'account-change':
+        deadline = time.monotonic() + 5
+        while manager._batch_organize['state'] == 'running' and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert manager._batch_organize['state'] == 'cancelled'
+        manager.settings.platform_token = 'fixture-account'
+    result = wait_for_batch(manager)
+    assert result['state'] == {'cancel': 'cancelled', 'account-change': 'cancelled',
+                               'partial': 'partial', 'failed': 'failed'}[outcome]
+    assert result['progress_remaining'] == 0 and result['active_courses'] == 0
+    if outcome in ('cancel', 'account-change'):
+        assert len(calls) == 1
+        assert all(row['state'] == 'cancelled' for row in result['items'])
+    assert manager._writes.owners == {}
+
+
+def test_batch_organize_validation(tmp_path):
+    client, manager, items = batch_fixture(tmp_path)
+    assert client.post('/api/campus/batch-organize', json={'items': []}).status_code == 400
+    for value in (0, 7):
+        assert client.post('/api/campus/batch-organize', json={
+            'items': items, 'max_parallel_courses': value}).status_code == 422
+    assert client.post('/api/campus/batch-organize', json={
+        'items': [{'course_id': 'other', 'recording_id': items[0]['recording_id']}]}).status_code == 400
+    manager.settings.platform_token = ''
+    response = client.post('/api/campus/batch-organize', json={'items': items})
+    assert response.status_code == 400 and '登录' in response.json()['detail']
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_batch_organize_selection_cost_and_live_progress_in_edge(width):
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state:state, render:render, poll:pollRecordingTask, busy:courseTaskBusy};})();')
+    def lesson(key, minutes=90, transcript=False, notes=False, eligible=True):
+        return {'id': key, 'title': key, 'date': '2026-10-01', 'eligible': eligible,
+                'needs_organize': eligible and not notes, 'notes_available': notes,
+                'transcript_available': transcript, 'unavailable_reason': '' if eligible else '录像不可用',
+                'duration_is_estimated': not transcript, 'estimated_transcribe_minutes': 0 if transcript else minutes,
+                'estimated_points_min': 2, 'estimated_points_max': 4, 'materials': []}
+    preview = {'notes_model': 'qwen3.7-plus', 'courses': [
+        {'course_id': 'net', 'title': 'Networks <img onerror="bad()">', 'term': '秋季', 'read_only': False,
+         'lessons': [lesson('n1'), lesson('n2', transcript=True), lesson('n3', transcript=True, notes=True)]},
+        {'course_id': 'math', 'title': 'Math', 'term': '秋季', 'read_only': False,
+         'lessons': [lesson('m1', 45), lesson('m2', eligible=False)]}]}
+    courses = [{'id': course['course_id'], 'title': course['title'], 'recordings': len(course['lessons']),
+                'synced_at': '2026-10-01'} for course in preview['courses']]
+    quota = {'active': True, 'available': True, 'email': 'fixture@example.invalid', 'email_verified': True,
+             'transcribe_seconds_remaining': 120 * 60, 'llm_points_remaining': 5}
+    observed, errors, reads = [], [], []
+    batch = {'state': 'idle'}
+
+    def serve(route):
+        nonlocal batch
+        path = urlsplit(route.request.url).path
+        reads.append(path)
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width, initial-scale=1"><div id="app"></div><div id="toast"></div>')
+        elif path == '/api/campus/batch-organize/preview':
+            route.fulfill(json=preview)
+        elif path == '/api/campus/batch-organize':
+            observed.append(route.request.post_data_json)
+            rows = [{**item, 'course_title': item['course_id'], 'title': item['recording_id'],
+                     'state': 'pending', 'stage': '等待中', 'progress_percent': 0, 'error': ''}
+                    for item in observed[-1]['items']]
+            batch = {'id': 'batch-1', 'state': 'running', 'stage': '正在并行整理所选课程录像',
+                     'progress_done': 0, 'progress_total': len(rows), 'active_courses': 2, 'items': rows}
+            route.fulfill(json=batch)
+        elif path == '/api/campus/batch-organize/cancel':
+            batch = {**batch, 'stage': '正在取消，等待当前讲次安全收尾'}
+            route.fulfill(json=batch)
+        elif path == '/api/recordings/task':
+            route.fulfill(json={'state': 'idle', 'batch_organize': batch})
+        elif path == '/api/campus/courses':
+            route.fulfill(json={'courses': courses, 'campus_configured': True})
+        elif path == '/api/platform/quota':
+            route.fulfill(json=quota)
+        else:
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 1000})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''({courses, quota}) => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = quota;
+                s.campus.configured = true; s.campus.courses = courses;
+                s.view = 'dashboard'; window.__beta.render();
+            }''', {'courses': courses, 'quota': quota})
+            page.get_by_role('button', name='一键整理笔记', exact=True).click()
+            estimate = page.locator('[data-batch-cost-estimate]')
+            pw.expect(estimate).to_contain_text('2 门课程 · 3 节录像')
+            pw.expect(estimate).to_contain_text('约 135 分钟')
+            pw.expect(estimate).to_contain_text('约 6–12 点')
+            pw.expect(estimate).to_contain_text('含 1 讲复用已有转写')
+            pw.expect(page.get_by_text('提示：预估消耗高于当前剩余额度', exact=False)).to_be_visible()
+            assert page.locator('.batch-course-heading img').count() == 0
+            start = page.locator('[data-action="batch-organize-start"]')
+            page.get_by_role('button', name='清空选择', exact=True).click()
+            pw.expect(estimate).to_contain_text('0 门课程 · 0 节录像')
+            pw.expect(start).to_be_disabled()
+            page.get_by_role('button', name='全选全部讲次', exact=True).click()
+            pw.expect(estimate).to_contain_text('2 门课程 · 4 节录像')
+            pw.expect(estimate).to_contain_text('约 8–16 点')
+            net_check = page.locator('[data-action="batch-toggle-course"][data-course="net"]')
+            net_check.uncheck()
+            pw.expect(estimate).to_contain_text('1 门课程 · 1 节录像')
+            pw.expect(estimate).to_contain_text('约 45 分钟')
+            net_check.check()
+            page.locator('.batch-course-lessons').first.locator('summary').click()
+            page.locator('[data-action="batch-toggle-lesson"][data-recording="n1"]').uncheck()
+            pw.expect(estimate).to_contain_text('2 门课程 · 3 节录像')
+            assert net_check.evaluate('(el) => el.indeterminate')
+            pw.expect(page.locator('[data-recording="m2"]')).to_be_disabled()
+            page.locator('[data-batch-note-style]').select_option('transcript')
+            page.get_by_role('button', name='全选待整理', exact=True).click()
+            pw.expect(estimate).to_contain_text('约 135 分钟')
+            pw.expect(page.locator('[data-batch-note-style]')).to_have_value('transcript')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            start.click()
+            banner = page.locator('[data-batch-organize]')
+            pw.expect(banner).to_have_attribute('data-batch-state', 'running')
+            assert len(observed) == 1 and len(observed[0]['items']) == 3
+            assert observed[0]['notes_strategy'] == 'transcript'
+            assert observed[0]['max_parallel_courses'] == 3
+            assert page.evaluate('window.__beta.busy("net")')
+            assert page.evaluate('window.__beta.busy("math")')
+            assert not page.evaluate('window.__beta.busy("other")')
+            banner.locator('summary').click()
+            batch['items'][0].update(state='running', stage='正在生成笔记', progress_percent=50)
+            page.evaluate('window.__beta.poll()')  # foreground is idle; batch alone keeps polling
+            pw.expect(banner).to_contain_text('正在生成笔记 · 50%')
+            assert banner.locator('details').evaluate('(el) => el.open')
+            page.get_by_role('button', name='取消批量整理', exact=True).click()
+            pw.expect(banner).to_contain_text('正在取消，等待当前讲次安全收尾')
+            for item in batch['items']:
+                item.update(state='done', stage='已完成', progress_percent=100)
+            batch.update(state='done', progress_done=3, active_courses=0, stage='批量整理已完成（共 3 讲）')
+            before = reads.count('/api/platform/quota')
+            page.evaluate('window.__beta.poll()')
+            pw.expect(banner).to_have_attribute('data-batch-state', 'done')
+            pw.expect(banner.get_by_role('button', name='查看笔记', exact=True)).to_have_count(3)
+            assert reads.count('/api/platform/quota') > before
+            assert '/api/campus/courses' in reads
+            assert not page.evaluate('window.__beta.busy("net")')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            # The course entry preselects only this course's pending lectures.
+            page.evaluate('''course => { const s = window.__beta.state; s.view = "campus-course";
+                s.campus.courseId = "net"; s.campus.section = "home";
+                s.campus.course = {...course, id:"net", unassigned_materials:[], assignments:[], announcements:[]};
+                window.__beta.render(); }''', preview['courses'][0])
+            page.get_by_role('button', name='批量整理本课', exact=True).click()
+            pw.expect(estimate).to_contain_text('1 门课程 · 2 节录像')
+            pw.expect(estimate).to_contain_text('约 90 分钟')
+            pw.expect(page.locator('.batch-course')).to_have_count(1)
+            assert not errors
+        finally:
+            browser.close()
 
 
 def test_corrupted_course_does_not_poison_healthy_courses(tmp_path, monkeypatch):
@@ -529,7 +879,7 @@ def test_local_reading_search_and_material_filter_in_edge(width):
                     pw.expect(search).to_be_focused()
                     pw.expect(active).to_have_count(int(count > 0))
                     assert content.locator('img').evaluate('(el) => Array.from(el.attributes, a => [a.name, a.value])') == image_attributes
-                    pw.expect(content.locator('#note-sec-1')).to_have_text('TCP theorem')
+                    pw.expect(content.locator('h2').first).to_have_text('TCP theorem')
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 for query in ('', '   '):
                     search.fill(query)
@@ -656,7 +1006,7 @@ def test_source_preparation_matches_existing_keyframes_offline(tmp_path):
     assert paths[0].is_relative_to(folder / 'materials/.lecture-sources')
 
 
-def test_inline_lecture_pager_and_note_outline_in_edge():
+def test_inline_lecture_pager_and_code_copy_without_note_outline_in_edge():
     pw = pytest.importorskip('playwright.sync_api')
     from browser_support import EDGE, browser_launch_options
     if not EDGE.is_file():
@@ -729,7 +1079,7 @@ def test_inline_lecture_pager_and_note_outline_in_edge():
             pw.expect(page.locator('.study-markdown h3')).to_have_text('例题')
             pw.expect(page.locator('.note-outline')).to_have_count(0)
             pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
-            pw.expect(page.locator('.study-markdown [id^="note-sec-"]')).to_have_count(2)
+            pw.expect(page.locator('.study-markdown [id^="note-sec-"]')).to_have_count(0)
             code_wraps = page.locator('.study-markdown .study-code-wrap')
             pw.expect(code_wraps).to_have_count(2)
             code_copy = code_wraps.last.locator('[data-action="campus-copy-code"]')
@@ -760,7 +1110,9 @@ def test_inline_lecture_pager_and_note_outline_in_edge():
             page.keyboard.press('[')
             assert page.evaluate('window.__beta.state.campus.lessonId') == 'first'
             page.keyboard.press(']')
-            pw.expect(page.locator('.note-outline')).to_be_visible()
+            pw.expect(page.locator('.study-markdown h2')).to_have_text(['基础', long_heading])
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
             assert page.evaluate('window.__beta.state.campus.lessonId') == 'middle'
             page.keyboard.press('[')
             pw.expect(code_wraps).to_have_count(2)
@@ -769,43 +1121,25 @@ def test_inline_lecture_pager_and_note_outline_in_edge():
             pw.expect(next_).to_be_disabled()
             pw.expect(next_).to_have_attribute('data-recording', '')
             pw.expect(prev).to_be_enabled()
-            outline = page.get_by_role('navigation', name='笔记章节导航')
-            pw.expect(outline).to_be_visible()
-            links = outline.locator('.note-outline-link')
-            pw.expect(links).to_have_text(['基础', '例题', long_heading])
-            pw.expect(outline.locator('strong, code, img')).to_have_count(0)
+            pw.expect(page.locator('.study-markdown h2, .study-markdown h3')).to_have_text(
+                ['基础', '例题', long_heading])
+            pw.expect(page.locator('.study-markdown h2 strong')).to_have_text('基础')
+            pw.expect(page.locator('.study-markdown h3 code')).to_have_text('例题')
+            pw.expect(page.locator('.study-markdown img')).to_have_count(0)
+            pw.expect(page.locator('.study-markdown [id^="note-sec-"]')).to_have_count(0)
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
             assert page.evaluate('window.noteXss === undefined')
-            assert page.locator('.study-markdown h2, .study-markdown h3').evaluate_all(
-                '(items) => items.map(item => item.id)') == ['note-sec-1', 'note-sec-2', 'note-sec-3']
-            page.evaluate('''() => {
-                const scroll = Element.prototype.scrollIntoView;
-                Element.prototype.scrollIntoView = function(options) {
-                    window.noteScroll = {id:this.id, reader:this.matches('.lecture-note-reader'), options};
-                    scroll.call(this, options);
-                };
-            }''')
-            links.last.click()
-            assert page.evaluate('window.noteScroll') == {
-                'id': 'note-sec-3', 'reader': False, 'options': {'block': 'start'}}
-            pw.expect(page.locator('#note-sec-3')).to_be_in_viewport()
-            footer = page.locator('.study-markdown > .note-outline-footer:last-child')
-            pw.expect(footer).to_have_count(1)
-            footer.get_by_role('button', name='返回目录与工具栏', exact=True).click()
-            assert page.evaluate('window.noteScroll') == {
-                'id': '', 'reader': True, 'options': {'block': 'start'}}
-            pw.expect(page.locator('.lecture-note-reader .reader-toolbar')).to_be_in_viewport()
-            pw.expect(outline).to_be_in_viewport()
             page.set_viewport_size({'width': 390, 'height': 900})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-            assert outline.evaluate('(el) => el.scrollWidth <= el.clientWidth')
-            assert links.evaluate_all('(items) => items.every(el => el.scrollWidth <= el.clientWidth)')
             prev.click()
             pw.expect(page.locator('.note-outline')).to_have_count(0)
             pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
             next_.click()
-            pw.expect(outline).to_be_visible()
-            assert links.evaluate_all('(items) => items.map(el => el.dataset.target)') == [
-                'note-sec-1', 'note-sec-2', 'note-sec-3']
+            pw.expect(page.locator('.study-markdown h2, .study-markdown h3')).to_have_text(
+                ['基础', '例题', long_heading])
+            pw.expect(page.locator('.note-outline')).to_have_count(0)
+            pw.expect(page.locator('.note-outline-footer')).to_have_count(0)
             page.evaluate('''() => {
                 const s = window.__beta.state;
                 s.campus.course.lessons.push({...s.campus.course.lessons[0], id:'last', title:'第三讲'});
