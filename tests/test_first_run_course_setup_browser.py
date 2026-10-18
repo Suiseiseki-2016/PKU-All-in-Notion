@@ -89,13 +89,93 @@ def test_empty_account_can_sync_retry_and_use_local_courses_from_welcome(width, 
             page.screenshot(path=str(tmp_path / f'failed-sync-{width}.png'), full_page=True)
             sync.click()
             playwright.expect(page.locator('.campus-setup')).to_contain_text('已就绪')
+            enter_courses = page.locator('.campus-setup [data-action="open-dashboard"]')
+            playwright.expect(enter_courses).to_have_text('进入我的课程')
+            assert 'btn-primary' in enter_courses.get_attribute('class').split()
             assert create.count() == 0
             assert 'Notion' not in page.locator('body').inner_text()
             assert writes == ['/api/recordings/credentials', '/api/recordings/sync', '/api/recordings/sync']
             assert page.locator('#auth-form').count() == 0
             page.screenshot(path=str(tmp_path / f'home-ready-{width}.png'), full_page=True)
+            enter_courses.click()
+            playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
             page.reload()
             playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
             assert page.locator('.welcome-screen').count() == 0
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('entry', ['welcome-loading', 'login', 'register'])
+def test_verified_new_user_goes_directly_to_campus_credentials(entry):
+    signed_in = entry == 'welcome-loading'
+    verified = entry != 'register'
+    held_quota = []
+    posts = []
+
+    def quota():
+        return {'active': signed_in, 'available': True, 'email': 'new@example.test',
+                'email_verified': verified}
+
+    def serve(route):
+        nonlocal signed_in
+        path = urlsplit(route.request.url).path
+        if path == '/app':
+            route.fulfill(body=student_page(), content_type='text/html')
+            return
+        if path in ('/app/app.js', '/app/app.css'):
+            route.fulfill(body=(STATIC_DIR / path.rsplit('/', 1)[1]).read_bytes(),
+                          content_type='text/javascript' if path.endswith('.js') else 'text/css')
+            return
+        body = {}
+        if path == '/api/platform/quota':
+            if entry == 'welcome-loading':
+                held_quota.append(route)
+                return
+            body = quota()
+        elif path in ('/api/auth/login', '/api/auth/register'):
+            posts.append(path)
+            signed_in = True
+        elif path == '/api/auth/me':
+            body = {'available': True, 'email': 'new@example.test', 'email_verified': verified}
+        elif path == '/api/campus/courses':
+            body = {'campus_configured': False, 'courses': []}
+        elif path == '/api/recordings/task':
+            body = {'state': 'idle'}
+        route.fulfill(body=json.dumps(body), content_type='application/json')
+
+    with playwright.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 900})
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/app')
+            welcome_action = 'welcome-skip' if entry == 'login' else 'welcome-start'
+            page.locator(f'[data-action="{welcome_action}"]').click()
+            if entry == 'welcome-loading':
+                playwright.expect(page.locator('#auth-form')).to_be_visible()
+                assert len(held_quota) == 1
+                held_quota.pop().fulfill(body=json.dumps(quota()), content_type='application/json')
+            else:
+                if entry == 'register':
+                    page.locator('.auth-switches [data-action="auth-mode-register"]').click()
+                page.locator('#auth-email').fill('new@example.test')
+                page.locator('#auth-password').fill('fixture-password')
+                if entry == 'register':
+                    page.locator('#auth-password-confirm').fill('fixture-password')
+                page.locator('[data-action="auth-submit"]').click()
+                playwright.expect(page.locator('#auth-form')).to_have_count(0)
+                if entry == 'register':
+                    playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
+                    verified = True
+                    page.locator('[data-action="refresh-verification"]').first.click()
+                assert posts == ['/api/auth/' + entry]
+            playwright.expect(page.get_by_role('heading', name='连接设置', exact=True)).to_be_visible()
+            playwright.expect(page.locator('#recording-username')).to_be_visible()
+            playwright.expect(page.locator('#recording-password')).to_be_visible()
+            playwright.expect(page.locator('.sidebar')).to_contain_text('AI 点 0')
+            # Consuming welcome intent must leave later navigation alone.
+            page.locator('.sidebar [data-action="open-dashboard"]').click()
+            playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
         finally:
             browser.close()

@@ -161,6 +161,8 @@ class LocalCourseTools:
     def get_course_assignments(self, course_folder: str) -> list[dict]:
         """Read the selected course's local assignment index."""
         folder = self._course_dir(course_folder)
+        if not (folder / 'assignments/index.json').exists():
+            return []
         path = self._resolve((folder / 'assignments/index.json').relative_to(self.data_dir).as_posix())
         assignments = json.loads(path.read_text('utf-8'))
         if not isinstance(assignments, list):

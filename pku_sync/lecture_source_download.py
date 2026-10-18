@@ -11,7 +11,9 @@ import json
 import logging
 import re
 import shutil
+import threading
 import unicodedata
+import uuid
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -25,11 +27,133 @@ from .media import extract_keyframes
 logger = logging.getLogger(__name__)
 
 SUPPORTED = frozenset({".pdf", ".pptx", ".docx"})
+LOCAL_UPLOAD_SUPPORTED = SUPPORTED | {".md", ".txt"}
 MAX_FILES = 6
 KEYFRAME_MATCHES_FILENAME = "keyframe-matches.json"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_BYTES = 40 * 1024 * 1024
+_LOCAL_UPLOAD_LOCK = threading.RLock()
 _ASSIGNMENT_WORDS = ("作业", "考试", "测试", "测验", "提交")
+
+
+def _override_lecture_ids(override) -> list[str]:
+    values = [override] if isinstance(override, str) else override if isinstance(override, list) else []
+    return list(dict.fromkeys(value for value in values
+                             if isinstance(value, str) and value and value not in {"ignore", "unassigned"}))
+
+
+def _override_matches_lecture(override, recording_key: str) -> bool:
+    return recording_key in _override_lecture_ids(override)
+
+
+def _local_upload_dir(job: RecordingJob, recording_key: str) -> Path:
+    cache_key = hashlib.sha256(recording_key.encode("utf-8")).hexdigest()[:24]
+    folder = job.course_dir / "materials" / ".lecture-uploads" / cache_key
+    if not folder.resolve().is_relative_to((job.course_dir / "materials").resolve()):
+        raise ValueError("本讲课件目录无效。")
+    return folder
+
+
+def _looks_like_text_note(data: bytes) -> bool:
+    if not data or b"\x00" in data or data.startswith((b"%PDF-", b"PK\x03\x04", b"MZ")):
+        return False
+    try:
+        return bool(data.decode("utf-8").strip())
+    except UnicodeDecodeError:
+        return False
+
+
+def _looks_like_local_upload(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".txt"}:
+        return _looks_like_text_note(path.read_bytes())
+    return suffix in SUPPORTED and _looks_like_document(path)
+
+
+def _verified_local_uploads(job: RecordingJob, recording_key: str) -> list[tuple[dict, Path]]:
+    folder = _local_upload_dir(job, recording_key)
+    rows = _read_json(folder / "index.json", [])
+    verified, total = [], 0
+    for row in rows if isinstance(rows, list) else []:
+        if (not isinstance(row, dict) or not re.fullmatch(r"[0-9a-f]{32}", str(row.get("id", "")))
+                or not isinstance(row.get("filename"), str)
+                or row["filename"] != safe_name(row["filename"])
+                or Path(row["filename"]).suffix.lower() not in LOCAL_UPLOAD_SUPPORTED):
+            continue
+        path = folder / (row["id"] + "-" + row["filename"])
+        try:
+            size = path.stat().st_size
+            if (path.is_symlink() or not path.resolve().is_relative_to(folder.resolve())
+                    or not path.is_file() or not 0 < size <= MAX_FILE_BYTES
+                    or size != row.get("size") or total + size > MAX_TOTAL_BYTES
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != row.get("sha256")
+                    or not _looks_like_local_upload(path)):
+                continue
+        except (OSError, ValueError):
+            continue
+        verified.append((row, path.resolve()))
+        total += size
+        if len(verified) >= MAX_FILES:
+            break
+    return verified
+
+
+def list_local_lecture_materials(job: RecordingJob, recording_key: str) -> list[dict]:
+    with _LOCAL_UPLOAD_LOCK:
+        return [{key: row.get(key) for key in ("id", "filename", "size", "uploaded_at")}
+                for row, _ in _verified_local_uploads(job, recording_key)]
+
+
+def local_upload_source_paths(job: RecordingJob, recording_key: str) -> list[Path]:
+    with _LOCAL_UPLOAD_LOCK:
+        return [path for _, path in _verified_local_uploads(job, recording_key)]
+
+
+def save_local_lecture_materials(job: RecordingJob, recording_key: str,
+                                uploads: list[tuple[str, bytes]]) -> list[dict]:
+    with _LOCAL_UPLOAD_LOCK:
+        existing = _verified_local_uploads(job, recording_key)
+        if not uploads or len(existing) + len(uploads) > MAX_FILES:
+            raise ValueError(f"每讲最多上传 {MAX_FILES} 份课件。")
+        if sum(row["size"] for row, _ in existing) + sum(len(data) for _, data in uploads) > MAX_TOTAL_BYTES:
+            raise ValueError("本讲上传课件总大小不能超过 40 MB。")
+        folder = _local_upload_dir(job, recording_key)
+        folder.mkdir(parents=True, exist_ok=True)
+        created, rows = [], [row for row, _ in existing]
+        try:
+            for name, data in uploads:
+                filename = safe_name(name.replace("\\", "/").rsplit("/", 1)[-1])
+                if Path(filename).suffix.lower() not in LOCAL_UPLOAD_SUPPORTED:
+                    raise ValueError("仅支持 .pdf、.pptx、.docx、.md、.txt 课件或笔记。")
+                if not 0 < len(data) <= MAX_FILE_BYTES:
+                    raise ValueError("每份课件大小须在 1 字节至 20 MB 之间。")
+                material_id = uuid.uuid4().hex
+                path = folder / (material_id + "-" + filename)
+                created.append(path)
+                path.write_bytes(data)
+                if not _looks_like_local_upload(path):
+                    raise ValueError("课件内容与文件格式不符。")
+                rows.append({"id": material_id, "filename": filename, "size": len(data),
+                             "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                             "sha256": hashlib.sha256(data).hexdigest()})
+            _atomic_json(folder / "index.json", rows)
+        except Exception:
+            for path in created:
+                path.unlink(missing_ok=True)
+            raise
+        return list_local_lecture_materials(job, recording_key)
+
+
+def remove_local_lecture_material(job: RecordingJob, recording_key: str, material_id: str) -> list[dict]:
+    with _LOCAL_UPLOAD_LOCK:
+        existing = _verified_local_uploads(job, recording_key)
+        found = next((path for row, path in existing if row["id"] == material_id), None)
+        if found is None:
+            raise ValueError("找不到这份本地课件。")
+        _atomic_json(_local_upload_dir(job, recording_key) / "index.json",
+                     [row for row, _ in existing if row["id"] != material_id])
+        found.unlink(missing_ok=True)
+        return list_local_lecture_materials(job, recording_key)
 
 
 def _read_json(path: Path, fallback):
@@ -79,7 +203,7 @@ def _candidate_attachments(job: RecordingJob, recording_key: str) -> list[tuple[
         if kind in {"作业", "考试", "测试"} or any(word in title for word in _ASSIGNMENT_WORDS):
             continue
         override = matches.get(path)
-        manual = override == recording_key
+        manual = _override_matches_lecture(override, recording_key)
         if override is not None and not manual:
             continue
         assets = row.get("attachments") or []
@@ -293,7 +417,7 @@ def _keyframe_candidate_attachments(job: RecordingJob, recording_key: str) -> li
         override = overrides.get(path)
         if (not path or row.get("kind") in {"作业", "考试", "测试"}
                 or any(word in title for word in _ASSIGNMENT_WORDS)
-                or override not in (None, "", recording_key)):
+                or (override not in (None, "") and not _override_matches_lecture(override, recording_key))):
             continue
         for asset in row.get("attachments") or []:
             if not isinstance(asset, dict):
@@ -303,7 +427,7 @@ def _keyframe_candidate_attachments(job: RecordingJob, recording_key: str) -> li
                 continue
             value = unicodedata.normalize("NFKC", path + " " + title + " " + filename)
             number = re.search(r"第\s*(\d+)\s*讲|(?:ch(?:apter)?|week|l|ppt)\s*0*(\d+)", value, re.I)
-            if override == recording_key:
+            if _override_matches_lecture(override, recording_key):
                 rank = (0, 0)
             elif day and _explicit_date(value, day):
                 rank = (1, 0)
@@ -331,7 +455,7 @@ def keyframe_source_paths(job: RecordingJob, recording_key: str) -> list[Path]:
         return []
     paths = []
     for row in receipt.get("matches", []):
-        if not isinstance(row, dict) or overrides.get(row.get("material_path")) != recording_key:
+        if not isinstance(row, dict) or not _override_matches_lecture(overrides.get(row.get("material_path")), recording_key):
             continue
         path = (job.course_dir / str(row.get("local_path") or "")).resolve()
         if (path.is_relative_to(job.course_dir.resolve()) and path.is_file()
@@ -452,13 +576,15 @@ def match_materials_by_keyframes(job: RecordingJob, recording_key: str, settings
     cache_key = hashlib.sha256(recording_key.encode("utf-8")).hexdigest()[:24]
     for deck, pages in pages_by_deck.items():
         row, asset, pdf, digest = resolved[deck]
-        if overrides.get(row["path"]) not in (None, "", recording_key):
+        override = overrides.get(row["path"])
+        if override not in (None, "") and not _override_matches_lecture(override, recording_key):
             continue
         target = material_dir / ".lecture-sources" / cache_key / f"{digest}-{safe_name(pdf.name)}"
         target.parent.mkdir(parents=True, exist_ok=True)
         if pdf.resolve() != target.resolve():
             shutil.copy2(pdf, target)
-        overrides[row["path"]] = recording_key
+        if not _override_matches_lecture(override, recording_key):
+            overrides[row["path"]] = recording_key
         matches.append({"material_path": row["path"], "title": row.get("title", ""),
                         "filename": asset["filename"], "local_path": str(target.relative_to(job.course_dir)),
                         "matched_frames": len(pages), "pages": sorted(set(pages))})
@@ -476,7 +602,7 @@ def prepare_lesson_sources(job: RecordingJob, recording_key: str, settings, stag
             match_materials_by_keyframes(job, recording_key, settings, stage=stage)
         except Exception as exc:
             logger.warning("keyframe matching failed: %s", type(exc).__name__)
-    paths = keyframe_source_paths(job, recording_key)
+    paths = list(dict.fromkeys(keyframe_source_paths(job, recording_key) + local_upload_source_paths(job, recording_key)))
     receipt = _read_json(frames_dir / KEYFRAME_MATCHES_FILENAME, {})
     matched_assets = {(row.get("material_path"), row.get("filename"))
                       for row in receipt.get("matches", []) if isinstance(row, dict)

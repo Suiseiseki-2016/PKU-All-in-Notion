@@ -49,6 +49,35 @@ def ui():
         browser.close()
 
 
+@pytest.mark.parametrize("width", [390, 800, 1100, 1280])
+def test_auth_mode_tabs_switch_and_fit_viewport(ui, width):
+    page, _, _ = ui
+    page.set_viewport_size({"width": width, "height": 850})
+    tabs = page.locator(".auth-mode-tabs")
+    login = tabs.locator('[data-action="auth-mode-login"]')
+    register = tabs.locator('[data-action="auth-mode-register"]')
+    playwright.expect(page.locator("#auth-form")).to_have_attribute("data-auth-mode", "login")
+    playwright.expect(page.locator(".card-subtitle")).to_have_text(PANEL_COPY["auth"]["login"]["subtitle"])
+    assert page.locator("#auth-title").evaluate("el => el.previousElementSibling.matches('.auth-mode-tabs')")
+    page.locator("#auth-email").fill("fixture@example.com")
+    for mode, active, inactive in (("login", login, register), ("register", register, login), ("login", login, register)):
+        if mode != page.locator("#auth-form").get_attribute("data-auth-mode"):
+            active.click()
+        playwright.expect(active).to_have_text(PANEL_COPY["auth"]["modes"][mode])
+        playwright.expect(active).to_have_attribute("aria-pressed", "true")
+        assert "active" in active.get_attribute("class").split()
+        playwright.expect(inactive).to_have_attribute("aria-pressed", "false")
+        assert "active" not in inactive.get_attribute("class").split()
+        assert page.locator("#auth-email").input_value() == "fixture@example.com"
+        playwright.expect(page.locator("#auth-password-confirm")).to_have_count(1 if mode == "register" else 0)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert tabs.evaluate("el => el.scrollWidth <= el.clientWidth")
+    page.locator('.auth-switches [data-action="auth-mode-forgot"]').click()
+    playwright.expect(tabs).to_have_count(0)
+    page.locator('.auth-switches [data-action="auth-mode-login"]').click()
+    playwright.expect(tabs).to_be_visible()
+
+
 def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     page, held, posted = ui
     page.locator("#auth-email").fill("fixture@example.com")
@@ -62,6 +91,8 @@ def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     page.locator("#auth-password").press("Enter")
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_have_text("正在登录…")
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_disabled()
+    for tab in page.locator(".auth-mode-tabs button").all():
+        playwright.expect(tab).to_be_disabled()
     page.wait_for_function("window.__testPostsCaptured === 1")
     assert posted == [("/api/auth/login", {"email": "fixture@example.com", "password": "fixture-password"})]
     page.evaluate("document.getElementById('auth-form').requestSubmit()")
@@ -77,7 +108,7 @@ def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     held.pop().abort()
     playwright.expect(page.locator("#auth-help")).to_have_text(PANEL_COPY["auth"]["network_failed"])
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_enabled()
-    page.locator('[data-action="auth-mode-register"]').click()
+    page.locator('.auth-switches [data-action="auth-mode-register"]').click()
     assert page.locator("#auth-email").input_value() == "fixture@example.com"
     assert page.locator("#auth-password").input_value() == ""
 

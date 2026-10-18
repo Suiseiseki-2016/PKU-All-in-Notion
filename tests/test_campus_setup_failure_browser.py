@@ -62,6 +62,7 @@ def test_new_account_can_sync_and_browse_without_workspace_preparation():
             page.route('http://panel.test/**', serve)
             page.goto('http://panel.test/app')
             page.locator('.sidebar [data-action="campus-account-settings"]').click()
+            playwright.expect(page.locator('#recording-username')).to_be_focused()
             page.locator('#recording-username').fill('fixture-student')
             page.locator('#recording-password').fill('fixture-password')
             page.locator('[data-action="recording-save-credentials"]').click()

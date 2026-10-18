@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from ..pipeline import collect_jobs, recording_stage
+from ..lecture_source_download import _override_lecture_ids, list_local_lecture_materials
 from .recordings_api import recording_id, publication_matches_job, _safe_attachment_path
 from .campus_todos import distinct_announcement_tasks, announcement_source_url
 from .handbook_requirements import handbook_review_cards
@@ -286,6 +287,7 @@ def campus_course(root: Path, course_id: str) -> dict:
             "video_size": job.video.stat().st_size if job.video.exists() else None,
             "unavailable_reason": unavailable,
             "materials": [],
+            "local_materials": list_local_lecture_materials(job, recording_id(job)),
         }
         note_topic = ""
         if row["notes_available"]:
@@ -363,27 +365,31 @@ def campus_course(root: Path, course_id: str) -> dict:
                 "body_text": str(item.get("body_text") or ""),
                 "category": _category(item),
                 "index": len(all_materials),
+                "assigned_lecture_ids": [],
             }
             all_materials.append(material)
             override = overrides.get(material["path"])
-            if override == "ignore":
-                material["match_state"] = "ignored"
+            if override in ("ignore", "unassigned"):
+                material["match_state"] = "ignored" if override == "ignore" else "needs_review"
                 unassigned.append(material)
                 continue
-            if isinstance(override, str) and override:
-                match = next((lesson for lesson in lessons if lesson["id"] == override), None)
-                if match:
+            if lecture_ids := _override_lecture_ids(override):
+                matched_lessons = [lesson for lesson in lessons if lesson["id"] in lecture_ids]
+                if matched_lessons:
                     material["match_state"] = "confirmed"
-                    entry = keyframe_matches_by_path.get((material["path"], match["id"]))
-                    material["match_source"] = "keyframe" if entry else "manual"
-                    if entry:
-                        material["matched_frames"] = entry.get("matched_frames", 0)
-                    match["materials"].append(material)
+                    material["assigned_lecture_ids"] = [lesson["id"] for lesson in matched_lessons]
+                    for match in matched_lessons:
+                        entry = keyframe_matches_by_path.get((material["path"], match["id"]))
+                        match["materials"].append({**material, "match_source": "keyframe" if entry else "manual",
+                                                   **({"matched_frames": entry.get("matched_frames", 0)} if entry else {})})
                     continue
             number = _number(material["path"] + " " + material["title"])
             matches = by_number.get(number, []) if number is not None else []
             if len(matches) == 1:
-                matches[0]["materials"].append(material)
+                material["match_state"] = "auto"
+                material["match_source"] = "auto"
+                material["assigned_lecture_ids"] = [matches[0]["id"]]
+                matches[0]["materials"].append({**material})
             else:
                 material["match_state"] = "needs_review"
                 unassigned.append(material)

@@ -84,6 +84,19 @@ def test_course_summary_isolates_assignment_read_failure(local_knowledge, monkey
     assert summary['markdown']
 
 
+def test_missing_assignment_index_returns_empty_list(local_knowledge):
+    assert local_knowledge.get_course_assignments('Networks') == []
+
+
+@pytest.mark.parametrize('content', ['{broken', 'null', '{}'])
+def test_existing_invalid_assignment_index_raises(local_knowledge, content):
+    folder = local_knowledge.data_dir / 'Networks' / 'assignments'
+    folder.mkdir()
+    (folder / 'index.json').write_text(content, 'utf8')
+    with pytest.raises(ValueError):
+        local_knowledge.get_course_assignments('Networks')
+
+
 @pytest.mark.parametrize('query', ['Lec03_SlidingWindow.pdf', '第三讲课件', '确认机制', '课堂课件'])
 def test_search_local_materials_and_attachment_filenames(local_knowledge, query):
     hits = local_knowledge.search_course_knowledge(query, 'networks')

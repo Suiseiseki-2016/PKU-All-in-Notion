@@ -13,6 +13,52 @@ def config(model="qwen3.5-flash"):
         _metered_operation_context={"purpose":"lecture-notes", "source_id":"pku:test:lecture"})
 
 
+@pytest.mark.parametrize("strategy", ["topics", "transcript"])
+@pytest.mark.parametrize("model", [None, "qwen3.7-plus", "qwen3.5-flash", "qwen3.8-max", "test-model"])
+@pytest.mark.parametrize("via_settings", [False, True])
+def test_notes_model_routing_preserves_explicit_settings(monkeypatch, strategy, model, via_settings):
+    from pku_sync.config import Settings
+    from pku_sync.media import resolve_notes_model
+
+    monkeypatch.delenv("NOTES_MODEL", raising=False)
+    monkeypatch.delenv("NOTES_STRATEGY", raising=False)
+    options = {} if model is None else {"notes_model": model}
+    if via_settings:
+        options["notes_strategy"] = strategy
+    cfg = Settings(_env_file=None, **options)
+    expected = model or ("qwen3.5-flash" if strategy == "transcript" else "qwen3.7-plus")
+    assert resolve_notes_model(cfg, None if via_settings else strategy) == expected
+    assert cfg.notes_model == (model or "qwen3.7-plus")
+
+
+@pytest.mark.parametrize("strategy", ["topics", "transcript"])
+@pytest.mark.parametrize("model", [None, "qwen3.7-plus", "qwen3.5-flash"])
+def test_media_uses_routed_model_without_mutating_settings(tmp_path, monkeypatch, strategy, model):
+    from pku_sync import media, knowledge_workflow
+    from pku_sync.config import Settings
+
+    monkeypatch.delenv("NOTES_MODEL", raising=False)
+    options = {} if model is None else {"notes_model": model}
+    cfg = Settings(_env_file=None, platform_token="offline", **options)
+    fields_set = cfg.model_fields_set.copy()
+    calls = []
+
+    def ask(llm, selected_model, prompt, system, configured):
+        calls.append((selected_model, configured.notes_model))
+        if system == knowledge_workflow.PLAN_SYSTEM:
+            return json.dumps({"units": [
+                {"title": "课堂内容", "first_segment": 0, "reference_segments": [], "courseware_indices": []}]})
+        return "完整课堂笔记。"
+
+    monkeypatch.setattr(media, "_recovery_llm", ask)
+    target = tmp_path / "notes.md"
+    assert media.write_notes(original(), [], target, cfg, "课程", strategy=strategy) == target
+    expected = model or ("qwen3.5-flash" if strategy == "transcript" else "qwen3.7-plus")
+    assert calls and all(call == (expected, expected) for call in calls)
+    assert cfg.notes_model == (model or "qwen3.7-plus")
+    assert cfg.model_fields_set == fields_set
+
+
 def legacy_paid_note(transcript, target, cfg, title, strategy, sources):
     """Create authentic old-policy receipts for restart compatibility checks."""
     from pku_sync import media

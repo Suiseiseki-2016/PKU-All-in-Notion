@@ -968,7 +968,8 @@ def test_regeneration_keeps_old_note_on_generation_or_publish_failure(tmp_path, 
 
 
 @pytest.mark.parametrize('notes_strategy', [None, 'topics'])
-def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monkeypatch, notes_strategy):
+@pytest.mark.parametrize('default_model', [False, True])
+def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monkeypatch, notes_strategy, default_model):
     key, directory = setup_index(tmp_path)
     directory.mkdir()
     old = "# 原有笔记\n\n*已整理至录像 0:10。*"
@@ -982,6 +983,10 @@ def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monke
     monkeypatch.setattr(note_sources, "collect_note_sources", lambda *args, **kwargs: [])
     def fresh_notes(transcript, frames, target, config, title, **kwargs):
         assert getattr(config,'notes_strategy','transcript') == (notes_strategy or 'transcript')
+        expected_model = 'test-model'
+        if default_model:
+            expected_model = 'qwen3.7-plus' if notes_strategy == 'topics' else 'qwen3.5-flash'
+        assert config.notes_model == expected_model
         return save_reviewed_note(target.parent, config, "# 更好的笔记", transcript, target=target)
     monkeypatch.setattr(media, "write_notes", fresh_notes)
     seen = []
@@ -993,9 +998,16 @@ def test_regeneration_publishes_new_note_then_keeps_local_backup(tmp_path, monke
     from pku_sync.panel import notion_home
     monkeypatch.setattr(notion_home, "saved_home", lambda root: {"id": "home"})
     shared_settings = settings(tmp_path)
+    if default_model:
+        from pku_sync.config import Settings
+        monkeypatch.delenv('NOTES_MODEL', raising=False)
+        options = vars(shared_settings).copy()
+        options.pop('notes_model')
+        shared_settings = Settings(_env_file=None, **options, notes_strategy='transcript')
     url = recordings_api.RecordingWorkManager(shared_settings)._process(
         recordings_api.find_job(tmp_path, key), "a" * 32, regenerate=True, notes_strategy=notes_strategy)
     assert getattr(shared_settings,'notes_strategy','transcript') == 'transcript'
+    assert shared_settings.notes_model == ('qwen3.7-plus' if default_model else 'test-model')
     assert url.endswith("new-note")
     assert "更好的笔记" in (directory / "notes.md").read_text("utf-8")
     assert [path.read_text("utf-8") for path in directory.glob("notes.previous-*.md")] == [old]
@@ -1528,6 +1540,223 @@ def test_campus_material_can_be_assigned_ignored_and_restored(tmp_path):
     assert ignored["unassigned_materials"][0]["match_state"] == "ignored"
     restored = client.post(path, json={}).json()
     assert restored["unassigned_materials"][0]["match_state"] == "needs_review"
+
+
+def lecture_material_fixture(root):
+    setup_index(root)
+    folder = root / "测试课程"
+    index = folder / "recordings/index.json"
+    first = json.loads(index.read_text("utf-8"))[0]
+    first["title"] = "第1讲"
+    second = {**first, "title": "第2讲", "recorded_at": "2026-09-25 09:00:00"}
+    index.write_text(json.dumps([first, second]), "utf-8")
+    jobs = sorted(recordings_api.collect_jobs(root), key=lambda job: job.recording.date)
+    (folder / "materials").mkdir()
+    (folder / "materials/index.json").write_text(json.dumps([
+        {"title": "第1讲课件", "kind": "课件", "path": "slides/week1", "files": ["shared.pdf"],
+         "attachments": [{"filename": "shared.pdf", "path": "/bbcswebdav/shared.pdf"}]},
+        {"title": "补充阅读", "kind": "课件", "path": "extra", "files": []},
+    ]), "utf-8")
+    app = FastAPI()
+    recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(root)))
+    return TestClient(app), folder, jobs
+
+
+def test_lecture_material_multi_assignment_and_explicit_unassign(tmp_path):
+    from pku_sync.lecture_source_download import _candidate_attachments, _keyframe_candidate_attachments
+    client, folder, jobs = lecture_material_fixture(tmp_path)
+    first, second = map(recordings_api.recording_id, jobs)
+    route = "/api/campus/courses/course-1/materials/0/match"
+    marker = folder / "materials/matches.json"
+    course = client.get("/api/campus/courses/course-1").json()
+    assert course["all_materials"][0]["assigned_lecture_ids"] == [first]
+    assert course["lessons"][0]["materials"][0]["match_source"] == "auto"
+    for _ in range(2):  # Append preserves the automatic assignment and deduplicates.
+        response = client.post(route, json={"lecture_id": second, "append": True})
+        assert response.status_code == 200
+    course = response.json()
+    assert json.loads(marker.read_text("utf-8"))["slides/week1"] == [first, second]
+    assert all(lesson["materials"][0]["match_source"] == "manual" for lesson in course["lessons"])
+    assert all(_candidate_attachments(job, key) for job, key in zip(jobs, [first, second]))
+    assert all(_keyframe_candidate_attachments(job, key) for job, key in zip(jobs, [first, second]))
+    course = client.post(route, json={"unassign_lecture_id": first}).json()
+    assert course["lessons"][0]["materials"] == []
+    assert course["all_materials"][0]["assigned_lecture_ids"] == [second]
+    assert json.loads(marker.read_text("utf-8"))["slides/week1"] == second
+    course = client.post(route, json={"unassign_lecture_id": second}).json()
+    assert json.loads(marker.read_text("utf-8"))["slides/week1"] == "unassigned"
+    assert course["all_materials"][0]["assigned_lecture_ids"] == []
+    assert course["all_materials"][0]["match_state"] == "needs_review"
+    assert _candidate_attachments(jobs[0], first) == []
+    assert _keyframe_candidate_attachments(jobs[0], first) == []
+    assert client.post(route, json={"unassign_lecture_id": "foreign"}).status_code == 422
+    # Restore reinstates auto matching; removing that auto match persists too.
+    assert client.post(route, json={}).json()["all_materials"][0]["match_state"] == "auto"
+    client.post(route, json={"unassign_lecture_id": first})
+    assert json.loads(marker.read_text("utf-8"))["slides/week1"] == "unassigned"
+    # Legacy replacement, ignore and restore retain their existing meaning.
+    client.post(route, json={"lecture_id": second})
+    assert json.loads(marker.read_text("utf-8"))["slides/week1"] == second
+    assert client.post(route, json={"ignore": True}).json()["all_materials"][0]["match_state"] == "ignored"
+    client.post(route, json={})
+    assert "slides/week1" not in json.loads(marker.read_text("utf-8"))
+    extra = route.replace("/0/", "/1/")
+    client.post(extra, json={"lecture_id": second})
+    client.post(extra, json={"unassign_lecture_id": second})
+    assert "extra" not in json.loads(marker.read_text("utf-8"))
+
+
+def local_courseware_bytes(suffix):
+    import io
+    import zipfile
+    if suffix in {".md", ".txt"}:
+        return "# Local lecture courseware\n\n课堂补充笔记。\n".encode("utf-8")
+    if suffix == ".pdf":
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=400, height=300)
+        font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+                                 NameObject("/Subtype"): NameObject("/Type1"),
+                                 NameObject("/BaseFont"): NameObject("/Helvetica")})
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+        stream = DecodedStreamObject()
+        stream.set_data(b"BT /F1 12 Tf 20 200 Td (Local lecture courseware) Tj ET")
+        page[NameObject("/Contents")] = writer._add_object(stream)
+        output = io.BytesIO()
+        writer.write(output)
+        return output.getvalue()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        if suffix == ".docx":
+            archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Local lecture courseware</w:t></w:r></w:p></w:body></w:document>')
+        else:
+            archive.writestr("ppt/presentation.xml", '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>')
+            archive.writestr("ppt/slides/slide1.xml", '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:t>Local lecture courseware</a:t></p:sld>')
+    return output.getvalue()
+
+
+def test_local_lecture_courseware_upload_sources_render_and_remove(tmp_path):
+    import hashlib
+    from pku_sync.lecture_source_download import list_local_lecture_materials, local_upload_source_paths, prepare_lesson_sources
+    from pku_sync.note_sources import collect_note_sources
+    from pku_sync.panel.note_images import _local_material
+    client, folder, jobs = lecture_material_fixture(tmp_path)
+    # No Teaching Network candidates: local sources must still disable date fallback.
+    (folder / "materials/index.json").write_text("[]", "utf-8")
+    job = jobs[0]
+    key = recordings_api.recording_id(job)
+    route = f"/api/campus/courses/course-1/recordings/{key}/local-materials"
+    uploads = [("files", ("20260925-local" + suffix, local_courseware_bytes(suffix)))
+               for suffix in (".pdf", ".pptx", ".docx", ".md", ".txt")]
+    assert client.post(route.replace("course-1", "other"), files=uploads).status_code == 404
+    response = client.post(route, files=uploads)
+    assert response.status_code == 200, response.text
+    materials = response.json()["lessons"][0]["local_materials"]
+    assert len(materials) == 5
+    cache_key = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+    assert (folder / "materials/.lecture-uploads" / cache_key / "index.json").is_file()
+    assert list_local_lecture_materials(job, key) == materials
+    assert all(row["uploaded_at"] and row["size"] > 0 for row in materials)
+    paths, failures = prepare_lesson_sources(job, key, settings(tmp_path))
+    assert paths == local_upload_source_paths(job, key) and len(paths) == 5 and not failures
+    sources = collect_note_sources(folder, job.recording.date, job.recording.title, allowed_paths=paths)
+    assert len(sources) == 5
+    assert all(row["status"] == "readable" and "Local lecture courseware" in row["text"] for row in sources)
+    assert _local_material(job, materials[0]["filename"]) == paths[0]
+    assert _local_material(job, paths[0].name) == paths[0]
+    preview = client.get(route.replace("/local-materials", "/slide-page"),
+                         params={"file": paths[0].name, "page": 1})
+    assert preview.status_code == 200, preview.text if preview.status_code != 200 else ""
+    assert preview.headers["content-type"] == "image/jpeg"
+    other_key = recordings_api.recording_id(jobs[1])
+    assert local_upload_source_paths(jobs[1], other_key) == []
+    other_paths, _ = prepare_lesson_sources(jobs[1], other_key, settings(tmp_path))
+    assert collect_note_sources(folder, jobs[1].recording.date, "", allowed_paths=other_paths) == []
+    # API removal is lecture scoped, and both HTTP forms work.
+    other_route = route.replace(key, other_key)
+    assert client.delete(other_route + "/" + materials[0]["id"]).status_code == 404
+    assert client.delete(route + "/" + materials[0]["id"]).status_code == 200
+    assert not paths[0].exists()
+    assert client.post(route + "/" + materials[1]["id"] + "/remove").status_code == 200
+    assert len(list_local_lecture_materials(job, key)) == 3
+    # Edited files are no longer trusted as note sources.
+    for path in paths[2:]:
+        path.write_bytes(b"%PDF-tampered")
+    assert local_upload_source_paths(job, key) == []
+
+
+@pytest.mark.parametrize("suffix", [".md", ".txt"])
+def test_text_note_sources_require_explicit_paths_and_bound_chunks(tmp_path, monkeypatch, suffix):
+    from pku_sync import note_sources
+    folder = tmp_path / "materials"
+    folder.mkdir()
+    note = folder / ("20260925-notes" + suffix)
+    text = "课堂笔记\n" * 1500
+    note.write_text("\n" + text + "\n", "utf-8")
+    document = folder / "20260925-slides.docx"
+    document.write_bytes(local_courseware_bytes(".docx"))
+    automatic = note_sources.collect_note_sources(tmp_path, "2026-09-25", "")
+    assert [row["title"] for row in automatic] == [document.name]
+    explicit = note_sources.collect_note_sources(tmp_path, "2026-09-25", "", allowed_paths=[note])
+    assert [row["locator"] for row in explicit] == ["第 1 节", "第 2 节"]
+    assert all(row["status"] == "readable" and len(row["text"]) <= 4000 for row in explicit)
+    assert "".join(row["text"] for row in explicit) == text.strip()
+    monkeypatch.setattr(note_sources, "_PAGE_LIMIT", 1)
+    limited = note_sources.collect_note_sources(tmp_path, "2026-09-25", "", allowed_paths=[note])
+    assert len(limited) == 2 and limited[-1]["status"] == "truncated"
+    for content, status in [(b"short note", "readable"), (b" \n\t", "unreadable"),
+                            (b"\xff\xfe", "unreadable")]:
+        note.write_bytes(content)
+        rows = note_sources.collect_note_sources(tmp_path, "2026-09-25", "", allowed_paths=[note])
+        assert len(rows) == 1 and rows[0]["status"] == status
+
+
+def test_local_lecture_upload_validation_and_batch_rollback(tmp_path, monkeypatch):
+    from pku_sync import lecture_source_download as source
+    client, _, jobs = lecture_material_fixture(tmp_path)
+    job = jobs[0]
+    key = recordings_api.recording_id(job)
+    route = f"/api/campus/courses/course-1/recordings/{key}/local-materials"
+    for filename, data in [("file.exe", b"%PDF-test"), ("file.pdf", b"html"),
+                           ("file.pptx", b"not-a-zip"), ("file.docx", b"not-a-zip"), ("file.pdf", b"")]:
+        assert client.post(route, files=[("files", (filename, data))]).status_code == 422
+    for suffix in (".md", ".txt"):
+        for data in (b"", b" \n\t", b"note\x00text", b"\xff\xfe", b"%PDF-disguised",
+                     b"PK\x03\x04disguised", b"MZdisguised"):
+            assert client.post(route, files=[("files", ("note" + suffix, data))]).status_code == 422
+    assert client.post(route, files=[("files", ("a.pdf", b"%PDF-ok")),
+                                     ("files", ("bad.docx", b"bad"))]).status_code == 422
+    assert source.list_local_lecture_materials(job, key) == []
+    assert client.post(route, files=[("files", ("valid.md", b"valid notes")),
+                                     ("files", ("invalid.txt", b"\xff"))]).status_code == 422
+    folder = source._local_upload_dir(job, key)
+    assert list(folder.glob("*.pdf")) == []
+    assert list(folder.glob("*.md")) == []
+    assert list(folder.glob("*.txt")) == []
+    monkeypatch.setattr(source, "MAX_FILES", 2)
+    source.save_local_lecture_materials(job, key, [("same.pdf", b"%PDF-a")])
+    with pytest.raises(ValueError):
+        source.save_local_lecture_materials(job, key, [("a.pdf", b"%PDF-b"), ("b.pdf", b"%PDF-c")])
+    monkeypatch.setattr(source, "MAX_FILE_BYTES", 10)
+    with pytest.raises(ValueError):
+        source.save_local_lecture_materials(job, key, [("large.pdf", b"%PDF-" + b"a" * 6)])
+    monkeypatch.setattr(source, "MAX_TOTAL_BYTES", 10)
+    with pytest.raises(ValueError):
+        source.save_local_lecture_materials(job, key, [("total.pdf", b"%PDF-b")])
+    monkeypatch.setattr(source, "MAX_TOTAL_BYTES", 100)
+    saved = source.save_local_lecture_materials(job, key, [("../../same.pdf", b"%PDF-b")])
+    assert len(saved) == 2 and saved[0]["id"] != saved[1]["id"]
+    assert all(row["filename"] == "same.pdf" for row in saved)
+    assert all(path.is_relative_to(folder.resolve()) for path in source.local_upload_source_paths(job, key))
+
+
+@pytest.mark.parametrize("override,expected", [(None, []), ("ignore", []), ("unassigned", []),
+    ("first", ["first"]), (["first", "second", "first", 7, ""], ["first", "second"])])
+def test_material_override_lecture_ids(override, expected):
+    from pku_sync.lecture_source_download import _override_lecture_ids, _override_matches_lecture
+    assert _override_lecture_ids(override) == expected
+    assert _override_matches_lecture(override, "first") == ("first" in expected)
 
 
 def test_demo_notion_connection_is_labeled_without_claiming_real_pages(tmp_path):

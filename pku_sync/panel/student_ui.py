@@ -60,7 +60,7 @@ AUTH_COPY = {
     "login": {
         "eyebrow": "我的账号",
         "title": "登录学习空间",
-        "subtitle": "使用你注册的邮箱和密码登录。",
+        "subtitle": "使用学习空间邮箱登录；首次使用请先切换到「注册」（登录后再绑定教学网账号）。",
         "submit": "登录",
         "submitting": "正在登录…",
         "switch_register": "没有账号？注册",

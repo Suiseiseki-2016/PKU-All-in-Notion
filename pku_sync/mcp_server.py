@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from mcp.server.fastmcp import FastMCP
 
-from .config import Settings
-from .mcp_tools import LocalCourseTools
+from pku_sync.config import Settings
+from pku_sync.mcp_tools import LocalCourseTools
 
 mcp = FastMCP(
     "pku-course-sync",

@@ -763,6 +763,19 @@ def _chapter_cache_fingerprint(title: str, span: str, transcript: str,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
+def resolve_notes_model(settings, strategy: str | None = None) -> str:
+    """Route default note models by strategy while preserving explicit choices."""
+    effective_strategy = strategy if strategy is not None else getattr(settings, "notes_strategy", "transcript")
+    configured_model = getattr(settings, "notes_model", "qwen3.7-plus")
+    fields_set = getattr(settings, "model_fields_set", set())
+    if configured_model == "qwen3.7-plus" and "notes_model" not in fields_set:
+        if effective_strategy == "transcript":
+            return "qwen3.5-flash"
+        if effective_strategy == "topics":
+            return "qwen3.7-plus"
+    return configured_model
+
+
 def write_notes(
     transcript: dict,
     keyframes: list[dict],
@@ -782,6 +795,10 @@ def write_notes(
     merge_model = merge_model or getattr(settings, "notes_merge_model", "") or None
     if strategy not in {"transcript", "topics"}:
         raise ValueError("未知的笔记整理方式。")
+    if strategy == "transcript":
+        routed_settings = copy.copy(settings)
+        routed_settings.notes_model = resolve_notes_model(settings, strategy)
+        settings = routed_settings
     if target.exists():
         # A selection describes a new generation, not the policy used by a
         # saved note. Changing defaults must not invalidate paid output.
@@ -804,10 +821,9 @@ def write_notes(
     if restore_saved_note(target, transcript, source_context):
         return target
     if strategy == "topics":
-        from copy import copy
         from .knowledge_workflow import LEGACY_POLICY, selected_policy, write_notes as write_topic_notes
 
-        merged_settings = copy(settings)
+        merged_settings = copy.copy(settings)
         merged_settings.notes_model = merge_model or settings.notes_model
         requested_models = [settings.notes_model]
         if selected_policy(target) == LEGACY_POLICY:

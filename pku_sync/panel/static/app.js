@@ -17,6 +17,7 @@
   var POLL_MAX_ATTEMPTS = 240;
   var welcomeKey = "pku-panel-welcome-v1";
   var welcomeOpen = true;
+  var welcomeStartPending = false;
   try { welcomeOpen = window.localStorage.getItem(welcomeKey) !== "seen"; } catch (_) {}
 
   function welcomeScreen() {
@@ -34,8 +35,9 @@
 
   function closeWelcome(start) {
     welcomeOpen = false;
+    if (start) welcomeStartPending = true;
     try { window.localStorage.setItem(welcomeKey, "seen"); } catch (_) {}
-    if (start && state.activated) state.view = "campus-account";
+    if (start && state.activated && state.campus.configured) state.view = "campus-account";
     render();
     var heading = document.querySelector('main h1, #auth-email');
     if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
@@ -344,6 +346,7 @@
       var wasVerified = accountVerified();
       state.quota.email_verified = Boolean(result.body.email_verified);
       if (!wasVerified && accountVerified()) {
+        openCampusSetupIfNeeded();
         render();
         showToast(COPY.account.verified_toast);
       }
@@ -363,6 +366,13 @@
     if (state.quota.legacy_activate) return true;
     if (!state.quota.email) return true;
     return Boolean(state.quota.email_verified);
+  }
+
+  function openCampusSetupIfNeeded() {
+    if (state.activated && accountVerified() && !state.campus.configured) {
+      state.view = "campus-account";
+      welcomeStartPending = false;
+    }
   }
 
   function canRedeem() {
@@ -590,6 +600,9 @@
       !state.campus.configured ? button("设置教学网账号", "campus-account-settings", { small: true, primary: true }) :
       !catalogReady ? (includeSyncAction === false ? '' : button(syncBusy ? "正在更新课程目录…" : "更新课程目录", "recording-sync", { small: true, primary: true, disabled: syncBusy })) :
       '';
+    if (!next && state.view === 'campus-account') {
+      nextAction = button('进入我的课程', 'open-dashboard', { small: true, primary: true });
+    }
     return '<section class="panel campus-setup"><h2>开始使用</h2><ul class="setup-steps">' +
       steps.map(function (step) { return '<li><span class="setup-mark" aria-hidden="true">' + (step[1] ? '✓' : '○') + '</span><span>' + esc(step[0]) + '</span></li>'; }).join("") +
       '</ul><p>' + (state.campus.demoConnection ? '演示模式：此处不会创建真实页面。' :
@@ -666,13 +679,17 @@
     if (panel.loading) return header + '<p role="status">正在读取录像与成本预估…</p></section>';
     if (!panel.preview) return header + '<p role="alert">' + esc(panel.error) + '</p>' +
       button('重新读取', 'batch-preview-retry', {small:true}) + '</section>';
+    var useFlashForTranscript = panel.notesStrategy === 'transcript' && panel.preview.notes_model === 'qwen3.7-plus';
+    var activeModel = useFlashForTranscript ? 'qwen3.5-flash' : panel.preview.notes_model;
     var items = selectedBatchItems();
     var coursesCount = new Set(items.map(function (item) { return item.course.course_id; })).size;
     var minutes = 0, minPoints = 0, maxPoints = 0, reuse = 0, estimated = false;
     items.forEach(function (item) {
       var lesson = item.lesson;
+      var lessonMinPoints = useFlashForTranscript ? 1 : lesson.estimated_points_min;
+      var lessonMaxPoints = useFlashForTranscript ? 2 : lesson.estimated_points_max;
       minutes += lesson.estimated_transcribe_minutes;
-      minPoints += lesson.estimated_points_min; maxPoints += lesson.estimated_points_max;
+      minPoints += lessonMinPoints; maxPoints += lessonMaxPoints;
       if (lesson.transcript_available) reuse += 1;
       if (!lesson.transcript_available && lesson.duration_is_estimated) estimated = true;
     });
@@ -687,7 +704,7 @@
       '<div><small>预计转写时长</small><strong>约 ' + minutes + ' 分钟</strong><span>' +
       (reuse ? '含 ' + reuse + ' 讲复用已有转写；' : '') + (estimated ? '未读时长讲次按标准课时估算' : '按录像实际时长计算') +
       '</span><span>当前剩余 ' + (remainingMinutes === null ? '暂不可用' : remainingMinutes + ' 分钟') + '</span></div>' +
-      '<div><small>预计 AI 点数</small><strong>约 ' + minPoints + '–' + maxPoints + ' 点</strong><span>' + esc(panel.preview.notes_model) +
+      '<div><small>预计 AI 点数</small><strong>约 ' + minPoints + '–' + maxPoints + ' 点</strong><span>' + esc(activeModel) +
       '</span><span>当前剩余 ' + (remainingPoints === null ? '暂不可用' : remainingPoints + ' 点') + '</span></div></div>' +
       '<p class="form-note">以上为估算，实际消耗以处理结果为准。已有笔记会优先复用。</p>' +
       (warning ? '<p class="form-note hint" role="status">提示：预估消耗高于当前剩余额度，整理会在额度用尽处安全停止，已完成的转写与笔记均会保留。</p>' : '') +
@@ -704,12 +721,14 @@
         (course.read_only ? '<p class="form-note">' + esc(course.read_only_message) + '</p>' : '') +
         '<details class="batch-course-lessons" data-persistent-disclosure="batch-course-' + esc(course.course_id) + '"><summary>展开选择具体讲次</summary>' +
         course.lessons.map(function (lesson) {
+          var lessonMinPoints = useFlashForTranscript ? 1 : lesson.estimated_points_min;
+          var lessonMaxPoints = useFlashForTranscript ? 2 : lesson.estimated_points_max;
           return '<label class="batch-lesson"><input type="checkbox" data-action="batch-toggle-lesson"' + attrs + ' data-recording="' + esc(lesson.id) + '"' +
             (panel.selected[batchLessonKey(course.course_id, lesson.id)] ? ' checked' : '') + (!lesson.eligible ? ' disabled' : '') +
             '><span><strong>' + esc(lesson.date) + ' ' + esc(lesson.title) + '</strong><small>' +
             esc(lesson.unavailable_reason || (course.read_only ? '课程只读' : lesson.notes_available ? '已生成笔记' : lesson.transcript_available ? '已有转写' : '待整理')) +
             ' · ' + (lesson.transcript_available ? '转写 0 分钟' : '约 ' + lesson.estimated_transcribe_minutes + ' 分钟') +
-            ' · AI 约 ' + lesson.estimated_points_min + '–' + lesson.estimated_points_max + ' 点</small></span></label>';
+            ' · ' + esc(activeModel) + ' · AI 约 ' + lessonMinPoints + '–' + lessonMaxPoints + ' 点</small></span></label>';
         }).join('') + '</details></article>';
     }).join('');
     var running = state.recordings.batch.state === 'running' || panel.starting;
@@ -959,6 +978,128 @@
     if (hoursLeft > 0 && hoursLeft <= 24) return 'today';
     if (hoursLeft > 24 && hoursLeft <= 72) return 'soon';
     return '';
+  }
+
+  var lectureMaterialPicker = { recording: "", query: "", filter: "recommended", busy: false };
+
+  function lectureMaterialTerms(value) {
+    var text = String(value || '').normalize('NFKC').toLowerCase();
+    var digits = {零:0, 〇:0, 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9};
+    text = text.replace(/[零〇一二两三四五六七八九十]+/g, function (part) {
+      var number;
+      if (part.indexOf('十') >= 0) {
+        var halves = part.split('十');
+        if (halves.length !== 2 || halves.some(function (s) { return s.length > 1; })) return part;
+        number = (halves[0] ? digits[halves[0]] : 1) * 10 + (halves[1] ? digits[halves[1]] : 0);
+      } else if (part.length === 1) number = digits[part];
+      return number > 0 && number <= 20 ? String(number) : part;
+    });
+    var dates = [];
+    text = text.replace(/(?:20\d{2}[-/.年]\s*)?(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?:日)?|\b20\d{2}(\d{2})(\d{2})\b/g,
+      function (whole, month, day, compactMonth, compactDay) {
+        var m = Number(month || compactMonth), d = Number(day || compactDay);
+        if (m < 1 || m > 12 || d < 1 || d > 31) return whole;
+        dates.push(m + '-' + d); return ' ';
+      });
+    text = text.replace(/(?:chapter|lecture|week|lec|ppt|ch|第)\s*[-_ ]*0*(\d+)\s*(?:讲|章|周|课|节)?/g, ' $1 ')
+      .replace(/(\d+)\s*(?:讲|章|周|课|节)/g, ' $1 ')
+      .replace(/\d+/g, function (n) { return ' ' + Number(n) + ' '; });
+    var terms = text.split(/[\s\p{P}\p{S}]+/u).filter(Boolean);
+    return { dates: dates, numbers: terms.filter(function (t) { return /^\d+$/.test(t); }), terms: terms, text: text };
+  }
+
+  function lectureMaterialRows(course, lesson) {
+    var query = lectureMaterialTerms(lectureMaterialPicker.query);
+    var lessonTerms = lectureMaterialTerms((lesson.date || '') + ' ' + (lesson.title || ''));
+    var number = String(lesson.number || lessonTerms.numbers[0] || course.lessons.indexOf(lesson) + 1);
+    var items = course.all_materials || (course.unassigned_materials || []).concat.apply(course.unassigned_materials || [],
+      course.lessons.map(function (row) { return row.materials || []; }));
+    var seen = {};
+    return items.filter(function (item) {
+      if (seen[item.index]) return false;
+      seen[item.index] = true; return true;
+    }).map(function (item) {
+      var terms = lectureMaterialTerms([item.title, item.path, item.body_text, (item.files || []).join(' '),
+        (item.attachments || []).map(function (asset) { return asset.filename; }).join(' ')].join(' '));
+      var ids = item.assigned_lecture_ids || course.lessons.filter(function (row) {
+        return (row.materials || []).some(function (material) { return material.index === item.index; });
+      }).map(function (row) { return row.id; });
+      return { item: item, linked: ids.indexOf(lesson.id) >= 0,
+        unassigned: !ids.length && item.match_state !== 'ignored',
+        recommended: terms.numbers.indexOf(number) >= 0 || terms.dates.some(function (d) { return lessonTerms.dates.indexOf(d) >= 0; }),
+        matches: query.dates.every(function (d) { return terms.dates.indexOf(d) >= 0; }) &&
+          query.terms.every(function (term) { return /^\d+$/.test(term) ? terms.numbers.indexOf(term) >= 0 : terms.text.indexOf(term) >= 0; }) };
+    }).filter(function (row) {
+      if (!row.matches) return false;
+      if (lectureMaterialPicker.filter === 'unassigned') return row.unassigned;
+      if (lectureMaterialPicker.filter === 'all') return true;
+      return row.linked || row.recommended && row.item.match_state !== 'ignored' || row.unassigned;
+    }).sort(function (a, b) { return Number(b.recommended) - Number(a.recommended) || Number(b.linked) - Number(a.linked) || a.item.index - b.item.index; });
+  }
+
+  function lectureMaterialsBox(course, lesson) {
+    var busy = lectureMaterialPicker.busy;
+    var attrs = { 'data-recording': lesson.id };
+    var linked = (lesson.materials || []).map(function (item) {
+      var source = item.match_source === 'keyframe' ? '关键帧匹配' : item.match_source === 'auto' ? '自动匹配' : '手动选择';
+      return '<li class="lecture-material-row"><div>' + campusMaterial(item, course.id).replace(/^<li>|<\/li>$/g, '') +
+        (item.match_source === 'keyframe' ? '' : '<span class="status-badge indexed">' + source + '</span>') + '</div>' +
+        button('取消关联', 'lecture-unassign-material', {small:true, quiet:true, disabled:busy,
+          attrs:{'data-material':item.index, 'data-recording':lesson.id}}) + '</li>';
+    }).join('');
+    var local = (lesson.local_materials || []).map(function (item) {
+      return '<li class="lecture-material-row"><div><strong>' + esc(item.filename) + '</strong> <small>' +
+        esc(formatTransfer(item.size)) + '</small> <span class="status-badge indexed">本地上传</span></div>' +
+        button('移除', 'lecture-remove-local-material', {small:true, quiet:true, disabled:busy,
+          attrs:{'data-local-material':item.id, 'data-recording':lesson.id}}) + '</li>';
+    }).join('');
+    var picker = '';
+    if (lectureMaterialPicker.recording === lesson.id) {
+      var rows = lectureMaterialRows(course, lesson);
+      picker = '<section class="lecture-material-picker" data-lecture-material-picker="' + esc(lesson.id) + '">' +
+        '<input type="search" class="lesson-filter-input" data-lecture-material-search="' + esc(lesson.id) +
+        '" aria-label="搜索教学网课件" placeholder="搜索标题、章节或日期，如第1讲 / ch1 / 第一讲" value="' + esc(lectureMaterialPicker.query) + '">' +
+        '<div class="lecture-material-filters">' + [['recommended','本讲推荐'],['unassigned','尚未关联'],['all','全部课件']].map(function (filter) {
+          return button(filter[1], 'lecture-material-filter', {small:true, quiet:lectureMaterialPicker.filter !== filter[0],
+            attrs:{'data-filter':filter[0], 'data-recording':lesson.id, 'aria-pressed':String(lectureMaterialPicker.filter === filter[0])}});
+        }).join('') + '</div><ul class="lecture-material-options">' + rows.map(function (row) {
+          return '<li class="lecture-material-row" data-lecture-material-option="' + esc(row.item.index) + '"><div><strong>' + esc(row.item.title) +
+            '</strong>' + (row.recommended ? ' <span class="status-badge indexed">本讲推荐</span>' : '') +
+            '<small>' + esc((row.item.files || []).join(' · ')) + '</small></div>' +
+            button(row.linked ? '已选 · 取消' : '关联到本讲', row.linked ? 'lecture-unassign-material' : 'lecture-assign-material',
+              {small:true, quiet:row.linked, disabled:busy, attrs:{'data-material':row.item.index, 'data-recording':lesson.id}}) + '</li>';
+        }).join('') + '</ul>' + (rows.length ? '' : '<p class="empty-materials">没有找到匹配的教学网课件，可切换筛选或上传本地文件。</p>') + '</section>';
+    }
+    return '<section class="lecture-materials-box"><h4>本讲课件</h4>' +
+      (linked || local ? '<ul class="lecture-linked-materials">' + linked + local + '</ul>' :
+        '<div class="empty-materials lecture-empty-materials"><p>本讲尚未关联课件</p><small>可从教学网选择课件、从电脑上传，或按视频关键帧匹配。</small></div>') +
+      '<div class="lecture-materials-toolbar">' + button('从教学网选择课件', 'lecture-toggle-material-picker',
+        {small:true, quiet:true, attrs:Object.assign({'aria-expanded':String(lectureMaterialPicker.recording === lesson.id)}, attrs)}) +
+      '<label class="btn btn-small btn-quiet lecture-upload-label">上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)<input type="file" data-lecture-local-upload="' +
+        esc(lesson.id) + '" accept=".pdf,.pptx,.docx,.md,.txt" multiple hidden' + (busy ? ' disabled' : '') + '></label></div>' + picker + '</section>';
+  }
+
+  function updateLectureMaterials(url, options) {
+    if (lectureMaterialPicker.busy) return;
+    lectureMaterialPicker.busy = true;
+    var courseId = state.campus.courseId, epoch = accountQuotaEpoch;
+    render();
+    return requestJson(url, options).then(function (result) {
+      if (!result.ok || !result.body || !result.body.lessons) throw new Error(result.body && result.body.detail || '课件更新失败，请重试。');
+      if (epoch === accountQuotaEpoch && courseId === state.campus.courseId) {
+        state.campus.course = result.body;
+        rememberCampusCourse(result.body);
+      }
+    }).catch(function (error) { showToast(error.message || '课件更新失败，请重试。'); })
+      .finally(function () { lectureMaterialPicker.busy = false; render(); });
+  }
+
+  function changeLectureMaterial(target, unassign) {
+    return updateLectureMaterials('/api/campus/courses/' + encodeURIComponent(state.campus.courseId) +
+      '/materials/' + encodeURIComponent(target.dataset.material) + '/match', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(unassign ?
+          {unassign_lecture_id:target.dataset.recording} : {lecture_id:target.dataset.recording, append:true})
+      });
   }
 
   function campusOfficialSections(course, section) {
@@ -1654,11 +1795,6 @@
           ((lesson.materials || []).length ? '<small class="lesson-material-count">已关联 ' + esc(lesson.materials.length) + ' 份课件</small>' : '') + '</div></div>' +
           button("进入讲次", "campus-open-lesson", { small: true, attrs: { "data-recording": lesson.id } }) + '</article>';
       }
-      var materials = lesson.materials.filter(function (item) {
-        return state.campus.category === "all" || item.category === state.campus.category;
-      }).map(function (item) {
-        return campusMaterial(item, course.id);
-      }).join("");
       var publishExisting = Boolean(lesson.publish_ready && !lesson.video_available);
       var canRegenerate = Boolean(lesson.transcript_available && lesson.notes_available);
       var publishSaved = publishExisting && !canRegenerate;
@@ -1677,7 +1813,7 @@
       var review = state.termReview.courseId === course.id && state.termReview.recordingId === lesson.id ? termReviewPanel(lesson) : "";
       return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课</span><h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) +
         '</h3>' + topicLine + (metaText ? '<p>' + esc(metaText) + '</p>' : '') +
-        (materials ? '<ul>' + materials + '</ul>' : '<div class="empty-materials lecture-empty-materials"><p>暂无明确对应的课件</p><small>' + (lesson.video_available || lesson['keyframe' + 's_available'] ? '已备好本讲视频画面，可点击「按关键帧匹配课件」自动识别投影页，或在「课程资料」中手动关联。' : '下载或整理本讲录像后，将自动根据视频关键帧匹配对应课件；也可在「课程资料」中手动关联。') + '</small></div>') + '</div><div class="recording-row-actions">' +
+        lectureMaterialsBox(course, lesson) + '</div><div class="recording-row-actions">' +
         '<div class="recording-primary-bar">' + (lesson.notes_available ? button(lessonPreviewOpen ? '收起本讲总结' : '阅读本讲总结', 'campus-preview-lecture-note', {small:true, primary:!lessonPreviewOpen, quiet:lessonPreviewOpen, attrs:{'data-recording':lesson.id}}) : '') + (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
         (canRegenerate ? '' : button(lesson.notes_available ? "重新整理笔记" : "整理这节录像", "campus-process", { small: true, primary: !lesson.notes_available,
               disabled: Boolean(blocked),
@@ -1983,6 +2119,15 @@
   function authScreen() {
     var copy = COPY.auth;
     var mode = authModeCopy();
+    var modeTabs = state.authMode === "login" || state.authMode === "register"
+      ? '<div class="auth-mode-tabs">' +
+        '<button type="button" class="auth-mode-tab' + (state.authMode === "login" ? " active" : "") +
+        '" data-action="auth-mode-login" aria-pressed="' + (state.authMode === "login") + '">' +
+        esc(copy.modes.login) + '</button>' +
+        '<button type="button" class="auth-mode-tab' + (state.authMode === "register" ? " active" : "") +
+        '" data-action="auth-mode-register" aria-pressed="' + (state.authMode === "register") + '">' +
+        esc(copy.modes.register) + '</button></div>'
+      : "";
     var note = state.notice || "";
     var noteClass = state.notice && state.noticeKind === "error" ? "form-note" : "form-note hint";
     var passwordField =
@@ -2046,7 +2191,7 @@
       "</small></span></header>" +
       '<p class="eyebrow">' +
       esc(mode.eyebrow) +
-      '</p><h2 class="card-title" id="auth-title">' +
+      '</p>' + modeTabs + '<h2 class="card-title" id="auth-title">' +
       esc(mode.title) +
       '</h2><p class="card-subtitle">' +
       esc(mode.subtitle) +
@@ -2163,7 +2308,7 @@
             )
           ) +
           " 分钟</p><p>AI 点 " +
-          esc(quota.llm_points_remaining) +
+          esc(quota.llm_points_remaining === undefined ? 0 : quota.llm_points_remaining) +
           "</p>";
     if (state.quotaStale) {
       balance += '<p class="form-note hint" role="status">' + esc(copy.quota_stale) + '</p>';
@@ -2591,6 +2736,7 @@
       if (!document.querySelector('.welcome-screen')) app.innerHTML = welcomeScreen();
       return;
     }
+    if (welcomeStartPending) openCampusSetupIfNeeded();
     var focusedLessonFilter = document.activeElement && document.activeElement.matches('[data-campus-lesson-filter]') ?
       { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
         direction: document.activeElement.selectionDirection } : null;
@@ -2600,6 +2746,9 @@
     var focusedReadingSearch = document.activeElement && document.activeElement.matches('[data-reader-search], [data-campus-material-filter]') ?
       { key: document.activeElement.dataset.readerSearch, start: document.activeElement.selectionStart,
         end: document.activeElement.selectionEnd, direction: document.activeElement.selectionDirection } : null;
+    var focusedMaterialSearch = document.activeElement && document.activeElement.matches('[data-lecture-material-search]') ?
+      { key:document.activeElement.dataset.lectureMaterialSearch, start:document.activeElement.selectionStart,
+        end:document.activeElement.selectionEnd, direction:document.activeElement.selectionDirection } : null;
     // Keep an in-progress code only in this account's current DOM. Never
     // carry it through logout/login or persist it to browser storage.
     var sameAccount = state.activated && renderedAccountEpoch === accountQuotaEpoch &&
@@ -2704,6 +2853,15 @@
       if (readingSearch) {
         readingSearch.focus({ preventScroll: true });
         readingSearch.setSelectionRange(focusedReadingSearch.start, focusedReadingSearch.end, focusedReadingSearch.direction);
+      }
+    }
+    if (focusedMaterialSearch) {
+      var materialSearch = Array.from(document.querySelectorAll('[data-lecture-material-search]')).find(function (input) {
+        return input.dataset.lectureMaterialSearch === focusedMaterialSearch.key;
+      });
+      if (materialSearch) {
+        materialSearch.focus({preventScroll:true});
+        materialSearch.setSelectionRange(focusedMaterialSearch.start, focusedMaterialSearch.end, focusedMaterialSearch.direction);
       }
     }
   }
@@ -2820,6 +2978,7 @@
         .then(loadCampusCourses)
         .then(function () { return pollRecordingTask(true); })
         .then(function () {
+          openCampusSetupIfNeeded();
           render();
           showToast(toast);
         });
@@ -3061,8 +3220,8 @@
   function recordingNoteStyle(recordingId, disabled) {
     var selected = state.recordings.noteStrategyByKey[recordingId] || "topics";
     return '<label class="recording-note-style">笔记方式<select data-recording-note-strategy="' + esc(recordingId) + '" aria-label="笔记方式"' + (disabled ? ' disabled' : '') + '>' +
-      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + '>按知识点图文整理</option>' +
-      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理</option></select></label>';
+      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + '>按知识点图文整理（Plus · 约 2–4 点）</option>' +
+      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理（Flash · 约 1–2 点）</option></select></label>';
   }
 
   function openNotionPreview(url, onFailure) {
@@ -3290,6 +3449,10 @@
       render();
       var settingsPanel = document.querySelector(state.campus.configured ? ".home-setup" : "#recording-credentials-form");
       if (settingsPanel) settingsPanel.scrollIntoView({ block: "start" });
+      if (!state.campus.configured) {
+        var username = document.getElementById("recording-username");
+        if (username) username.focus();
+      }
     }
     else if (action === "open-campus-course") openCampusCourse(target.dataset.course);
     else if (action === "campus-course-home") { state.campus.section = "home"; render(); }
@@ -3400,6 +3563,16 @@
     else if (action === "campus-material-assign") saveCampusMaterialMatch(target.dataset.material, "assign");
     else if (action === "campus-material-ignore") saveCampusMaterialMatch(target.dataset.material, "ignore");
     else if (action === "campus-material-restore") saveCampusMaterialMatch(target.dataset.material, "restore");
+    else if (action === 'lecture-toggle-material-picker') {
+      lectureMaterialPicker.recording = lectureMaterialPicker.recording === target.dataset.recording ? '' : target.dataset.recording;
+      lectureMaterialPicker.query = ''; lectureMaterialPicker.filter = 'recommended'; render();
+    }
+    else if (action === 'lecture-material-filter') { lectureMaterialPicker.filter = target.dataset.filter; render(); }
+    else if (action === 'lecture-assign-material') changeLectureMaterial(target, false);
+    else if (action === 'lecture-unassign-material') changeLectureMaterial(target, true);
+    else if (action === 'lecture-remove-local-material') updateLectureMaterials('/api/campus/courses/' +
+      encodeURIComponent(state.campus.courseId) + '/recordings/' + encodeURIComponent(target.dataset.recording) +
+      '/local-materials/' + encodeURIComponent(target.dataset.localMaterial) + '/remove', {method:'POST'});
     else if (action === "campus-review-handbook") reviewCampusHandbook(target);
     else if (action === "campus-open-lecture" && target.dataset.url) openNotionPreview(target.dataset.url);
     else if (action === "recording-edit-credentials") { state.recordings.editingCredentials = true; render(); }
@@ -3471,6 +3644,9 @@
   });
 
   document.addEventListener("input", function (event) {
+    if (event.target.matches('[data-lecture-material-search]')) {
+      lectureMaterialPicker.query = event.target.value; render(); return;
+    }
     if (event.target.matches('[data-reader-search]')) {
       var previewKey = event.target.dataset.readerSearch;
       if (readingPreviews[previewKey]) {
@@ -3506,8 +3682,22 @@
     }
   });
   document.addEventListener("change", function (event) {
+    if (event.target.matches('[data-lecture-local-upload]')) {
+      var files = Array.from(event.target.files || []);
+      if (!files.length) return;
+      if (files.some(function (file) { return !/\.(pdf|pptx|docx|md|txt)$/i.test(file.name); })) {
+        showToast('仅支持 .pdf、.pptx、.docx、.md、.txt 课件或笔记。');
+        event.target.value = '';
+        return;
+      }
+      var form = new FormData();
+      files.forEach(function (file) { form.append('files', file); });
+      updateLectureMaterials('/api/campus/courses/' + encodeURIComponent(state.campus.courseId) + '/recordings/' +
+        encodeURIComponent(event.target.dataset.lectureLocalUpload) + '/local-materials', {method:'POST', body:form});
+      return;
+    }
     if (event.target.matches('[data-batch-note-style]')) {
-      state.batchOrganize.notesStrategy = event.target.value; return;
+      state.batchOrganize.notesStrategy = event.target.value; render(); return;
     }
     if (event.target.matches('[data-action="batch-toggle-course"], [data-action="batch-toggle-lesson"]')) {
       var control = event.target;

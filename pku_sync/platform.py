@@ -438,6 +438,10 @@ _LLM_JOB_DEADLINE_SECONDS = 12 * 60
 
 
 def _llm_error(response: httpx.Response) -> PlatformError:
+    if response.status_code == 403 and "AI model not enabled" in _relay_detail(response, ""):
+        error = PlatformError("当前账号尚未开通所选 AI 模型，请切换模型或联系管理员。")
+        error.status_code = 403
+        return error
     safe = {
         401: "云端登录已失效，请重新激活后重试。",
         402: "AI 点不足，请兑换新额度后重试。",

@@ -21,6 +21,8 @@ HOSTS = ("factory", "claude", "codex")
 # iCloud's Desktop sync keeps re-applying that flag. The launcher script
 # puts the project root on sys.path itself, so registration is immune.
 LAUNCHER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_launcher.py"
+if not LAUNCHER.exists():
+    LAUNCHER = Path(__file__).resolve().parent / "mcp_server.py"
 
 
 def host_integration_catalog(python: str | None = None, data_dir: Path | None = None) -> dict:

@@ -19,6 +19,16 @@ def settings(tmp_path):
     )
 
 
+@pytest.mark.parametrize("detail,message", [
+    ("AI model not enabled for this account", "当前账号尚未开通所选 AI 模型，请切换模型或联系管理员。"),
+    ("email verification required", "请先完成邮箱验证后再使用转写、AI 或兑换额度"),
+])
+def test_llm_forbidden_error_distinguishes_model_access_from_email_verification(detail, message):
+    error = platform._llm_error(httpx.Response(403, json={"detail": detail}))
+    assert str(error) == message
+    assert error.status_code == 403
+
+
 @pytest.mark.parametrize("model", ["qwen3.5-flash", "qwen3.7-plus", "qwen3.8-max-0902", "qwen3.8-max"])
 def test_notes_explicit_cloud_model_binds_payload_key_and_lost_enqueue(monkeypatch, tmp_path, model):
     s = settings(tmp_path)

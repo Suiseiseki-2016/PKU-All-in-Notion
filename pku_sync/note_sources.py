@@ -16,8 +16,10 @@ from xml.etree import ElementTree
 
 from pypdf.errors import PdfReadError
 
-_SUPPORTED = {".pdf", ".pptx", ".docx"}
-_EXCLUDED_DIRS = {"课程资料", "教学大纲", "课程作业", "参考资料", "参考文献"}
+_AUTO_SUPPORTED = {".pdf", ".pptx", ".docx"}
+_SUPPORTED = _AUTO_SUPPORTED | {".md", ".txt"}
+# Lecture uploads are eligible only through that lecture's explicit paths.
+_EXCLUDED_DIRS = {"课程资料", "教学大纲", "课程作业", "参考资料", "参考文献", ".lecture-uploads"}
 # The matching chapter may be near the end of a full-semester slide deck.
 # The editor separately batches extracted text to fit requests. Any local
 # page ceiling must be reported; individual page text must never be cropped.
@@ -32,6 +34,20 @@ def _material_matches(stem: str, recording_date: date) -> bool:
 
 def _clean(text: str) -> str:
     return text.strip()
+
+
+def _text_pages(path: Path) -> list[tuple[str, str, str]]:
+    text = path.read_text("utf-8").strip()
+    chunk_size = 4000
+    total = max(1, (len(text) + chunk_size - 1) // chunk_size)
+    pages = []
+    for index in range(min(total, _PAGE_LIMIT)):
+        chunk = text[index * chunk_size:(index + 1) * chunk_size]
+        label = "正文" if total == 1 else f"第 {index + 1} 节"
+        pages.append((label, chunk, "readable" if chunk.strip() else "unreadable"))
+    if total > _PAGE_LIMIT:
+        pages.append((f"第 {_PAGE_LIMIT + 1}–{total} 节（共 {total} 节）", "", "truncated"))
+    return pages
 
 
 def _office_pages(path: Path) -> list[tuple[str, str, str]]:
@@ -100,6 +116,7 @@ def collect_note_sources(course_directory: Path, recording_date: str, title: str
         return []
     sources = []
     candidates = sorted(root.rglob("*")) if allowed_paths is None else allowed_paths
+    supported = _AUTO_SUPPORTED if allowed_paths is None else _SUPPORTED
     seen: set[Path] = set()
     for candidate in candidates:
         path = Path(candidate).resolve()
@@ -107,14 +124,17 @@ def collect_note_sources(course_directory: Path, recording_date: str, title: str
             relative = path.relative_to(root)
         except ValueError:
             continue
-        if path in seen or not path.is_file() or path.suffix.lower() not in _SUPPORTED:
+        if path in seen or not path.is_file() or path.suffix.lower() not in supported:
             continue
         seen.add(path)
         if allowed_paths is None and (any(part in _EXCLUDED_DIRS for part in relative.parts)
                                       or not _material_matches(path.stem, day)):
             continue
         try:
-            pages = _pdf_pages(path) if path.suffix.lower() == ".pdf" else _office_pages(path)
+            if path.suffix.lower() in {".md", ".txt"}:
+                pages = _text_pages(path)
+            else:
+                pages = _pdf_pages(path) if path.suffix.lower() == ".pdf" else _office_pages(path)
         except (OSError, ValueError, KeyError, EOFError, TypeError, PdfReadError,
                 zipfile.BadZipFile, ElementTree.ParseError):
             pages = []

@@ -3,10 +3,41 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
+import runpy
+import subprocess
+import sys
 
 import pytest
 
 from pku_sync import mcp_setup
+
+
+@pytest.mark.parametrize('with_launcher', [False, True])
+def test_launcher_resolution_in_installed_layout(tmp_path, with_launcher):
+    package = tmp_path / 'site-packages' / 'pku_sync'
+    package.mkdir(parents=True)
+    setup = package / 'mcp_setup.py'
+    setup.write_bytes(Path(mcp_setup.__file__).read_bytes())
+    server = package / 'mcp_server.py'
+    server.write_text('', 'utf8')
+    launcher = package.parent / 'scripts' / 'mcp_launcher.py'
+    if with_launcher:
+        launcher.parent.mkdir()
+        launcher.write_text('', 'utf8')
+    namespace = runpy.run_path(str(setup), run_name='pku_sync._packaged_mcp_setup')
+    expected = launcher if with_launcher else server
+    assert namespace['LAUNCHER'] == expected
+    assert namespace['host_integration_catalog']()['launcher_path'] == expected.resolve().as_posix()
+
+
+def test_mcp_server_starts_as_direct_script_outside_repository(tmp_path):
+    server = Path(mcp_setup.__file__).with_name('mcp_server.py')
+    result = subprocess.run(
+        [sys.executable, '-I', str(server)], cwd=tmp_path, input='',
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("host,binary", [("factory", "droid"), ("claude", "claude"), ("codex", "codex")])

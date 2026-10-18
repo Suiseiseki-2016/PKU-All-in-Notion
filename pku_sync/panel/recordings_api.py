@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Callable, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -171,6 +171,8 @@ class SummaryAcceptanceRequest(BaseModel):
 class MaterialMatchRequest(BaseModel):
     lecture_id: str = ""
     ignore: bool = False
+    unassign_lecture_id: str = ""
+    append: bool = False
 
 class ExistingNotionLink(BaseModel):
     url: str
@@ -1934,7 +1936,7 @@ class RecordingWorkManager:
                  notes_strategy: str | None = None) -> str:
         from ..auth import get_session
         from ..lecture_source_download import prepare_lesson_sources
-        from ..media import write_notes
+        from ..media import resolve_notes_model, write_notes
         from ..note_sources import collect_note_sources
         from .transcript_review import clear_regeneration_pending, review_pending
         from ..catalog_snapshots import recording_source_id
@@ -1945,6 +1947,8 @@ class RecordingWorkManager:
             if notes_strategy not in {"transcript", "topics"}:
                 raise ValueError("请选择保留讲述顺序或知识点图文笔记。")
             metered_settings.notes_strategy = notes_strategy
+        metered_settings.notes_model = resolve_notes_model(
+            self.settings, getattr(metered_settings, "notes_strategy", "transcript"))
         source_id = recording_source_id(job.recording)
         metered_settings._metered_operation_context = {
             'purpose': 'lecture-notes', 'course_id': job.recording.course_id,
@@ -2263,6 +2267,41 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             raise HTTPException(status_code=404, detail="这节录像不属于该课程。")
         return job
 
+    @app.post("/api/campus/courses/{course_id}/recordings/{key}/local-materials")
+    async def lecture_local_materials_upload(course_id: str, key: str, files: list[UploadFile] = File(...)):
+        from ..lecture_source_download import save_local_lecture_materials, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES
+        from .campus_catalog import campus_course
+        job = visual_job(course_id, key)
+        try:
+            if len(files) > MAX_FILES:
+                raise ValueError(f"每讲最多上传 {MAX_FILES} 份课件。")
+            uploads, total = [], 0
+            for file in files:
+                data = await file.read(MAX_FILE_BYTES + 1)
+                total += len(data)
+                if len(data) > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+                    raise ValueError("单份课件不能超过 20 MB，本讲合计不能超过 40 MB。")
+                uploads.append((file.filename or "", data))
+            save_local_lecture_materials(job, key, uploads)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            for file in files:
+                await file.close()
+        return campus_course(Path(manager.settings.data_dir), course_id)
+
+    @app.delete("/api/campus/courses/{course_id}/recordings/{key}/local-materials/{material_id}")
+    @app.post("/api/campus/courses/{course_id}/recordings/{key}/local-materials/{material_id}/remove")
+    def lecture_local_material_remove(course_id: str, key: str, material_id: str):
+        from ..lecture_source_download import remove_local_lecture_material
+        from .campus_catalog import campus_course
+        job = visual_job(course_id, key)
+        try:
+            remove_local_lecture_material(job, key, material_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return campus_course(Path(manager.settings.data_dir), course_id)
+
     @app.get("/api/campus/courses/{course_id}/recordings/{key}/frames/{filename}")
     def lecture_frame(course_id: str, key: str, filename: str):
         from .note_images import _IMAGE_SUFFIXES
@@ -2405,6 +2444,8 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             raise HTTPException(status_code=404, detail="找不到这项资料。")
         if not body.ignore and body.lecture_id and body.lecture_id not in {row["id"] for row in course["lessons"]}:
             raise HTTPException(status_code=422, detail="请选择本课程的录像讲次。")
+        if body.unassign_lecture_id and body.unassign_lecture_id not in {row["id"] for row in course["lessons"]}:
+            raise HTTPException(status_code=422, detail="请选择本课程的录像讲次。")
         folder = next((path.parent for path in root.glob("*/course.json")
                        if json.loads(path.read_text("utf-8")).get("course_id") == course_id), None)
         if folder is None:
@@ -2417,10 +2458,23 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         except (OSError, ValueError):
             overrides = {}
         key = materials[material_index]["path"]
+        assigned = materials[material_index]["assigned_lecture_ids"]
         if body.ignore:
             overrides[key] = "ignore"
+        elif body.unassign_lecture_id:
+            from .campus_catalog import _number
+            remaining = [lecture_id for lecture_id in assigned if lecture_id != body.unassign_lecture_id]
+            number = _number(key + " " + materials[material_index]["title"])
+            auto_matches = [row for row in course["lessons"] if number is not None and row["number"] == number]
+            if remaining:
+                overrides[key] = remaining[0] if len(remaining) == 1 else remaining
+            elif len(auto_matches) == 1:
+                overrides[key] = "unassigned"
+            else:
+                overrides.pop(key, None)
         elif body.lecture_id:
-            overrides[key] = body.lecture_id
+            combined = list(dict.fromkeys(assigned + [body.lecture_id])) if body.append else [body.lecture_id]
+            overrides[key] = combined[0] if len(combined) == 1 else combined
         else:
             overrides.pop(key, None)
         marker.parent.mkdir(parents=True, exist_ok=True)

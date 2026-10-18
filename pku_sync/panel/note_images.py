@@ -342,6 +342,11 @@ def _local_material(job, name):
     """Resolve a local PDF by filename or catalog title, confined to materials."""
     folder = (job.course_dir / "materials").resolve()
     candidates = [folder / name]
+    from ..lecture_source_download import local_upload_source_paths
+    from .recordings_api import recording_id
+    for path in local_upload_source_paths(job, recording_id(job)):
+        if name == path.name or name == path.name[33:]:
+            candidates.append(path)
     for row in _visual_rows(_visual_json(folder / "index.json", []), "materials"):
         assets = [str(f) for f in (row.get("files") or []) if isinstance(f, str)]
         assets += [str(a.get("filename") or "") for a in (row.get("attachments") or []) if isinstance(a, dict)]

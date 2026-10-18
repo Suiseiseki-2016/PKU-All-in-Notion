@@ -344,6 +344,9 @@ def test_batch_organize_selection_cost_and_live_progress_in_edge(width):
             assert net_check.evaluate('(el) => el.indeterminate')
             pw.expect(page.locator('[data-recording="m2"]')).to_be_disabled()
             page.locator('[data-batch-note-style]').select_option('transcript')
+            pw.expect(estimate).to_contain_text('qwen3.5-flash')
+            pw.expect(estimate).to_contain_text('约 3–6 点')
+            pw.expect(page.locator('.batch-lesson').first).to_contain_text('qwen3.5-flash · AI 约 1–2 点')
             page.get_by_role('button', name='全选待整理', exact=True).click()
             pw.expect(estimate).to_contain_text('约 135 分钟')
             pw.expect(page.locator('[data-batch-note-style]')).to_have_value('transcript')
@@ -975,7 +978,7 @@ def test_download_automatically_matches_keyframes(tmp_path):
         'ch02-TCP滑动窗口.pdf': key}
 
 
-@pytest.mark.parametrize('override', ['ignore', 'another-recording'])
+@pytest.mark.parametrize('override', ['ignore', 'unassigned', 'another-recording', ['another-recording']])
 def test_keyframe_matching_preserves_explicit_assignments(tmp_path, override):
     from pku_sync.lecture_source_download import match_materials_by_keyframes
     folder, job = seed_keyframe_materials(tmp_path)
@@ -984,6 +987,22 @@ def test_keyframe_matching_preserves_explicit_assignments(tmp_path, override):
     path.write_text(json.dumps(overrides), 'utf8')
     assert match_materials_by_keyframes(job, recordings_api.recording_id(job)) == []
     assert json.loads(path.read_text('utf8')) == overrides
+
+
+def test_keyframe_matching_preserves_multi_lecture_override(tmp_path):
+    from pku_sync.lecture_source_download import match_materials_by_keyframes, keyframe_source_paths
+    from pku_sync.panel.campus_catalog import campus_course
+    folder, job = seed_keyframe_materials(tmp_path)
+    key = recordings_api.recording_id(job)
+    marker = folder / 'materials/matches.json'
+    override = {'ch02-TCP滑动窗口.pdf': [key, 'another-recording']}
+    marker.write_text(json.dumps(override), 'utf8')
+    assert len(match_materials_by_keyframes(job, key)) == 1
+    assert json.loads(marker.read_text('utf8')) == override
+    assert len(keyframe_source_paths(job, key)) == 1
+    assert campus_course(tmp_path, 'healthy')['lessons'][0]['materials'][0]['match_source'] == 'keyframe'
+    marker.write_text(json.dumps({'ch02-TCP滑动窗口.pdf': 'unassigned'}), 'utf8')
+    assert keyframe_source_paths(job, key) == []
 
 
 def test_keyframe_matching_without_material_index_is_noop(tmp_path, monkeypatch):
@@ -1678,3 +1697,150 @@ def test_direct_slide_anchor_and_supplemental_frame_preview(tmp_path):
     (frames / 'slide-alignment.json').write_text('null', 'utf8')
     (frames / 'keyframe-matches.json').write_text('{"matches":null}', 'utf8')
     assert build_note_visual_sections(job, 'healthy', key, '## Topic')[0]['slide_title'] == 'Slides.pdf'
+
+
+@pytest.mark.parametrize('width', [1440, 420])
+def test_lecture_courseware_picker_search_upload_and_remove_in_edge(tmp_path, width):
+    pw = pytest.importorskip('playwright.sync_api')
+    from browser_support import EDGE, browser_launch_options
+    from test_panel_recordings import lecture_material_fixture, local_courseware_bytes
+    if not EDGE.is_file():
+        pytest.skip('Microsoft Edge is required')
+    client, folder, jobs = lecture_material_fixture(tmp_path)
+    first, second = map(recordings_api.recording_id, jobs)
+    rows = json.loads((folder / 'materials/index.json').read_text('utf8'))
+    titles = ['Week 01 Intro', 'Ch1 Basics', '第一讲 概念', '第十讲 Other', '20260924 日期',
+              '9月24日 Handout', '09-24 Review', '第二十讲 Twenty', '第十二讲 Twelve',
+              '<img src=x onerror="window.materialXss=true">']
+    rows += [{'title': title, 'path': 'extra/' + str(i), 'files': ['deck.pdf'], 'kind': '课件'}
+             for i, title in enumerate(titles)]
+    (folder / 'materials/index.json').write_text(json.dumps(rows), 'utf8')
+    client.post('/api/campus/courses/course-1/materials/3/match', json={'lecture_id': second})
+    client.post('/api/campus/courses/course-1/materials/5/match', json={'lecture_id': second})
+    course = client.get('/api/campus/courses/course-1').json()
+    static = Path(__file__).parents[1] / 'pku_sync/panel/static'
+    script = (static / 'app.js').read_text('utf8')
+    script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + (
+        'window.__beta = {state, render};})();')
+    errors, mutations = [], []
+
+    def serve(route):
+        path = urlsplit(route.request.url).path
+        if path == '/':
+            route.fulfill(content_type='text/html; charset=utf-8', body=
+                '<!doctype html><meta charset="utf-8"><meta name="viewport" '
+                'content="width=device-width, initial-scale=1"><div id="app"></div><div id="toast"></div>')
+        elif path.startswith('/api/campus/courses/'):
+            request = route.request
+            if request.method != 'GET':
+                mutations.append(path)
+            response = client.request(request.method, path, content=request.post_data_buffer,
+                                      headers={'content-type': request.headers.get('content-type', 'application/json')})
+            route.fulfill(status=response.status_code, content_type='application/json', body=response.content)
+        else:
+            route.fulfill(json={})
+
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(**browser_launch_options(), headless=True)
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 1000})
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("localStorage.setItem('pku-panel-welcome-v1','seen')")
+            page.route('http://panel.test/**', serve)
+            page.goto('http://panel.test/')
+            page.evaluate('copy => window.PANEL_COPY = copy', PANEL_COPY)
+            page.add_style_tag(content=(static / 'app.css').read_text('utf8'))
+            page.add_script_tag(content=script)
+            page.evaluate('''({course, first}) => {
+                const s = window.__beta.state;
+                s.activated = true; s.quota = {active:true};
+                s.connection.connected = true; s.campus.configured = true;
+                s.view = 'campus-course'; s.campus.courseId = course.id; s.campus.course = course;
+                s.campus.section = 'lecture'; s.campus.lessonId = first; window.__beta.render();
+            }''', {'course': course, 'first': first})
+            box = page.locator('.lecture-materials-box')
+            pw.expect(box.locator('.lecture-linked-materials')).to_contain_text('自动匹配')
+            pw.expect(box.locator('a[download]')).to_have_attribute('href', '/api/campus/courses/course-1/materials/0/files/0')
+            style = page.locator('[data-recording-note-strategy]')
+            pw.expect(style.locator('option[value="topics"]')).to_contain_text('Plus · 约 2–4 点')
+            pw.expect(style.locator('option[value="transcript"]')).to_contain_text('Flash · 约 1–2 点')
+            box.locator('[data-action="lecture-unassign-material"]').click()
+            pw.expect(box.locator('.lecture-empty-materials')).to_contain_text('从电脑上传')
+            assert json.loads((folder / 'materials/matches.json').read_text('utf8'))['slides/week1'] == 'unassigned'
+            box.locator('[data-action="lecture-toggle-material-picker"]').click()
+            picker = box.locator('.lecture-material-picker')
+            options = picker.locator('[data-lecture-material-option]')
+            search = picker.locator('[data-lecture-material-search]')
+            pw.expect(picker.locator('[data-filter="recommended"]')).to_have_attribute('aria-pressed', 'true')
+            pw.expect(options.first.locator('.status-badge')).to_have_text('本讲推荐')
+            # A deck already assigned to the other lecture is still recommended here.
+            pw.expect(picker.locator('[data-lecture-material-option="3"]')).to_contain_text('本讲推荐')
+            pw.expect(picker.locator('[data-lecture-material-option="5"]')).to_have_count(0)
+            picker.locator('[data-filter="all"]').click()
+            for query in ('1', '第一讲', 'ch1', 'week 01', '第１讲'):
+                search.fill(query)
+                pw.expect(options).to_have_count(4)
+                assert options.evaluate_all('(els) => els.map(el => Number(el.dataset.lectureMaterialOption)).sort((a,b)=>a-b)') == [0, 2, 3, 4]
+                pw.expect(search).to_be_focused()
+            for query in ('09-24', '20260924', '9月24日', '2026-09-24'):
+                search.fill(query)
+                pw.expect(options).to_have_count(3)
+            for query, title in [('第二十讲', '第二十讲 Twenty'), ('ch12', '第十二讲 Twelve')]:
+                search.fill(query)
+                pw.expect(options).to_have_count(1)
+                pw.expect(options.locator('strong')).to_have_text(title)
+            search.fill('')
+            search.press_sequentially('ch1')
+            pw.expect(search).to_have_value('ch1')
+            search.evaluate("el => el.setSelectionRange(1, 3, 'backward')")
+            page.evaluate('window.__beta.render()')
+            pw.expect(search).to_be_focused()
+            assert search.evaluate('el => [el.selectionStart, el.selectionEnd, el.selectionDirection]') == [1, 3, 'backward']
+            search.fill('no-such-material')
+            pw.expect(options).to_have_count(0)
+            search.fill('')
+            pw.expect(picker.locator('img')).to_have_count(0)
+            assert page.evaluate('window.materialXss') is None
+            picker.locator('[data-filter="unassigned"]').click()
+            pw.expect(picker.locator('[data-lecture-material-option="3"]')).to_have_count(0)
+            picker.locator('[data-filter="all"]').click()
+            shared = picker.locator('[data-lecture-material-option="3"]')
+            shared.locator('[data-action="lecture-assign-material"]').click()
+            pw.expect(shared.locator('[data-action="lecture-unassign-material"]')).to_have_text('已选 · 取消')
+            marker = folder / 'materials/matches.json'
+            assert set(json.loads(marker.read_text('utf8'))['extra/1']) == {first, second}
+            pw.expect(box.locator('.lecture-linked-materials')).to_contain_text('手动选择')
+            shared.locator('[data-action="lecture-unassign-material"]').click()
+            pw.expect(shared.locator('[data-action="lecture-assign-material"]')).to_be_visible()
+            assert json.loads(marker.read_text('utf8'))['extra/1'] == second
+            # Browser multipart uploads go through the actual FastAPI endpoint.
+            pw.expect(box.locator('.lecture-upload-label')).to_contain_text(
+                '上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)')
+            pw.expect(box.locator('[data-lecture-local-upload]')).to_have_attribute(
+                'accept', '.pdf,.pptx,.docx,.md,.txt')
+            box.locator('[data-lecture-local-upload]').set_input_files([
+                {'name': 'Local' + suffix, 'mimeType': 'application/octet-stream', 'buffer': local_courseware_bytes(suffix)}
+                for suffix in ('.pdf', '.pptx', '.docx', '.md', '.txt')])
+            pw.expect(box.locator('.lecture-linked-materials .lecture-material-row')).to_have_count(5)
+            pw.expect(box.locator('.lecture-linked-materials')).to_contain_text('本地上传')
+            for suffix in ('.pdf', '.pptx', '.docx', '.md', '.txt'):
+                pw.expect(box.locator('.lecture-linked-materials')).to_contain_text('Local' + suffix)
+            for count in (4, 3, 2, 1, 0):
+                box.locator('[data-action="lecture-remove-local-material"]').first.click()
+                pw.expect(box.locator('[data-action="lecture-remove-local-material"]')).to_have_count(count)
+            pw.expect(box.locator('.lecture-empty-materials')).to_be_visible()
+            # With no number/date match, recommendation mode offers unassigned decks.
+            page.evaluate('''second => {
+                const s = window.__beta.state; s.campus.lessonId = second;
+                const lesson = s.campus.course.lessons.find(row => row.id === second);
+                lesson.title = '无章节课程'; lesson.number = 99; lesson.date = '2026-12-31';
+                window.__beta.render();
+            }''', second)
+            box.locator('[data-action="lecture-toggle-material-picker"]').click()
+            pw.expect(picker.locator('[data-lecture-material-option="1"]')).to_contain_text('补充阅读')
+            pw.expect(picker.locator('.status-badge')).to_have_count(0)
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert len(mutations) == 9
+            assert errors == []
+        finally:
+            browser.close()
