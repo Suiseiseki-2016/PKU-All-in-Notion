@@ -1,0 +1,22 @@
+{
+  "darwin-aarch64": {
+    "version": "0.1.64",
+    "installer": "PKU-All-in-One-0.1.64-Apple-Silicon.dmg",
+    "updater": "PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+    "github_url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/download/v0.1.64/PKU-All-in-One-0.1.64-Apple-Silicon.dmg",
+    "sha256": "2f2e0051233457c2802704619d1c9e0d5aecf4693b81a6d2f7e8dbcfff2b0bcc",
+    "updater_sha256": "448d277cb0d1a91aa7857a7a0166252b267cf128402eca9bd38fe583907732cc",
+    "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRamc5MWZEV2tmTDgzNTNhbXROWS9CSHZXRVVsOGIvSklWeTJ5RmViSUFMMksyRVgrRm5OdzJCclgwbGN0RlhmQjdXTTl1cHNHOFVHSWhrZmlWUXY2czQxQnVKZXhnL2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDE3NjUxCWZpbGU6UEtVLUFsbC1pbi1PbmUtMC4xLjY0LUFwcGxlLVNpbGljb24uYXBwLnRhci5negl2ZXJzaW9uOjAuMS42NApqbk51M1hXYnRJZ0V4YzRtNHZsQmp3Z1dFbTVVWndKc2RUenJSNHFPYmkrNlljdEpFQnpYQStoNUt2QysvQk1zd3ZJT21KSW9neStQM1VTNUcveXhCdz09Cg==",
+    "notes": "PKU All in One 0.1.64\n\n- 优化课堂笔记整理：结合课程与上下文纠正常见同音、近音错字，保留完整讲解、案例和限定语气。\n- 禁止正文出现编者按、ASR 元评注和纠错说明，直接使用准确通顺的表述。\n- 兼容上一版分段缓存，复用已完成的笔记响应，避免重复计费。\n- 合并笔记时隐藏无新增授课内容的课间占位注释。\n- 提供 Apple Silicon macOS 安装包及签名自动更新归档、Windows 安装包及自动更新签名。\n\nmacOS 沿用 ad-hoc 应用签名，未公证；自动更新归档使用现有 Tauri updater 密钥签名。\n",
+    "pub_date": "2026-10-19T13:49:02.875159Z"
+  },
+  "windows-x86_64": {
+    "version": "0.1.64",
+    "installer": "PKU-All-in-One-Windows-0.1.64.exe",
+    "github_url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/download/v0.1.64/PKU-All-in-One-Windows-0.1.64.exe",
+    "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRamc5MWZEV2tmTDh6OG1kNlZLMURKd2VHL09PcDNqd01EOVkrdEhESFZBOUNLcE9SQjFUUG9EbnVRU3lDUzBvRnM5Umd2YWMyOXRTeFNNb3NOVjNvamtUZXE4RHNtcHdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDE3ODc3CWZpbGU6UEtVIEFsbCBpbiBPbmVfMC4xLjY0X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjEuNjQKdFhxNWZvT1B6cEJRTUFuQldqQlArN1RpL0hqOXJsRnN4N0JzUHZ0MTBMRllCckY3NzgxRldSRmhTQ1U2dlJNRzZ2RVVYenJOQlVidGQwN2o2eU5SQWc9PQo=",
+    "sha256": "4a4c62f4bc48277e47205d308295e8864648ceeac278acbbd4a60a704382a28b",
+    "notes": "PKU All in One 0.1.64\n\n- 优化课堂笔记整理：结合课程与上下文纠正常见同音、近音错字，保留完整讲解、案例和限定语气。\n- 禁止正文出现编者按、ASR 元评注和纠错说明，直接使用准确通顺的表述。\n- 兼容上一版分段缓存，复用已完成的笔记响应，避免重复计费。\n- 合并笔记时隐藏无新增授课内容的课间占位注释。\n- 提供 Apple Silicon macOS 安装包及签名自动更新归档、Windows 安装包及自动更新签名。\n\nmacOS 沿用 ad-hoc 应用签名，未公证；自动更新归档使用现有 Tauri updater 密钥签名。\n",
+    "pub_date": "2026-10-19T13:49:02.875159Z"
+  }
+}

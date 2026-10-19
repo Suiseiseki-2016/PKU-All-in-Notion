@@ -1,0 +1,72 @@
+{
+  "version": "0.1.64",
+  "checked_at": "2026-10-19T14:02:05.468870+00:00",
+  "download_page": {
+    "status": 200,
+    "version": "0.1.64"
+  },
+  "healthz": 200,
+  "platforms": {
+    "darwin-aarch64": {
+      "update_feed": {
+        "status": 200,
+        "version": "0.1.64",
+        "signature_matches": true
+      },
+      "assets": {
+        "/download/mac/arm": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.dmg",
+          "length": 159268784,
+          "first_1024_bytes_match": true
+        },
+        "/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+          "length": 112286246,
+          "first_1024_bytes_match": true
+        },
+        "/download/update/darwin/aarch64/0.1.64": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/update/darwin/aarch64/0.1.64",
+          "length": 112286246,
+          "first_1024_bytes_match": true
+        }
+      },
+      "already_current_status": 204
+    },
+    "windows-x86_64": {
+      "update_feed": {
+        "status": 200,
+        "version": "0.1.64",
+        "signature_matches": true
+      },
+      "assets": {
+        "/download/windows": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.64.exe",
+          "length": 97567398,
+          "first_1024_bytes_match": true
+        },
+        "/download/release/PKU-All-in-One-Windows-0.1.64.exe": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.64.exe",
+          "length": 97567398,
+          "first_1024_bytes_match": true
+        },
+        "/download/update/windows/x86_64/0.1.64": {
+          "status": 200,
+          "url": "https://pku.aeoluswu.info/download/update/windows/x86_64/0.1.64",
+          "length": 97567398,
+          "first_1024_bytes_match": true
+        }
+      },
+      "already_current_status": 204
+    }
+  },
+  "python_package": {
+    "status": 200,
+    "version": "0.1.64",
+    "sha256": "5f4b891f58ec58ac35af8f94d2d5b29be59ed1e153d1c2af6effe93ad31e57bb"
+  }
+}

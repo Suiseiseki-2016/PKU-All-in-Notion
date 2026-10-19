@@ -1,0 +1,9 @@
+{
+  "darwin-aarch64": {
+    "version": "0.1.64",
+    "updater": "PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+    "signature": "verified",
+    "signed_version": "verified",
+    "sha256": "448d277cb0d1a91aa7857a7a0166252b267cf128402eca9bd38fe583907732cc"
+  }
+}

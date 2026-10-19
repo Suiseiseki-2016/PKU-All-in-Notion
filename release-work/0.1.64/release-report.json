@@ -1,0 +1,206 @@
+{
+  "version": "0.1.64",
+  "publication_status": "published",
+  "release_commit": "a12ef57d01be653f7662aadf6f485b030478dc51",
+  "note_tests": {
+    "passed": 447,
+    "failed": 0
+  },
+  "note_regeneration": {
+    "model": "qwen3.7-plus",
+    "regenerated_parts": [
+      5,
+      17,
+      18
+    ],
+    "cached_parts_reused": 16,
+    "points_charged": 0.419,
+    "receipt_integrity": "passed",
+    "unwanted_phrases_and_placeholder_comments": 0
+  },
+  "macos": {
+    "version": "0.1.64",
+    "source_files_equal": 93,
+    "bundle_files_checked": 8125,
+    "launches": [],
+    "signature": "ad-hoc, deep strict verification passed",
+    "notarized": false,
+    "native_smoke": "skipped_existing_desktop_instance_left_running",
+    "full_product_e2e_passed": false
+  },
+  "macos_runtime": {
+    "version": "0.1.64",
+    "source_files": 93,
+    "real_clip_checks": 3,
+    "tls": true
+  },
+  "macos_panel_smoke": {
+    "version": "0.1.64",
+    "bundled_panel_healthz": 200,
+    "bundled_panel_app": 200,
+    "port": 8792,
+    "existing_desktop_untouched": true
+  },
+  "native_e2e": "not_run_existing_desktop_instances_left_untouched",
+  "server_code_changes": false,
+  "release_url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/tag/v0.1.64",
+  "windows": {
+    "version": "0.1.64",
+    "build": "passed",
+    "build_host": "windows (DESKTOP-K717641, existing signing host)",
+    "source_files_equal": 93,
+    "real_clip_checks": 3,
+    "tls": true,
+    "dependency_lock_sha256": "15e251b1b85efcc4b8486eecbc52c08322b17726b5ec8580d2dae11debbd2541",
+    "updater_cryptography": "passed_using_repository_Rust_verifier",
+    "signed_version": "0.1.64",
+    "authenticode": false,
+    "native_smoke": "not_run",
+    "artifact_sha256": "4a4c62f4bc48277e47205d308295e8864648ceeac278acbbd4a60a704382a28b",
+    "artifact_size": 97567398
+  },
+  "published": true,
+  "verified_at": "2026-10-19T14:03:40.185488+00:00",
+  "production_version": "0.1.64",
+  "github_release": {
+    "url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/tag/v0.1.64",
+    "tag": "v0.1.64",
+    "published": true,
+    "asset_count": 7,
+    "all_asset_digests_verified": true
+  },
+  "server_publication": {
+    "version": "0.1.64",
+    "published": true,
+    "wheel_sha256": "5f4b891f58ec58ac35af8f94d2d5b29be59ed1e153d1c2af6effe93ad31e57bb",
+    "backup": "/opt/pku-server/deployments/0.1.64/publication-backup",
+    "assets": [
+      "PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+      "PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz.sig",
+      "PKU-All-in-One-0.1.64-Apple-Silicon.dmg",
+      "PKU-All-in-One-Windows-0.1.64.exe",
+      "PKU-All-in-One-Windows-0.1.64.exe.sig"
+    ],
+    "server_code_changed": false
+  },
+  "post_deploy_live_verification": {
+    "version": "0.1.64",
+    "checked_at": "2026-10-19T14:02:05.468870+00:00",
+    "download_page": {
+      "status": 200,
+      "version": "0.1.64"
+    },
+    "healthz": 200,
+    "platforms": {
+      "darwin-aarch64": {
+        "update_feed": {
+          "status": 200,
+          "version": "0.1.64",
+          "signature_matches": true
+        },
+        "assets": {
+          "/download/mac/arm": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.dmg",
+            "length": 159268784,
+            "first_1024_bytes_match": true
+          },
+          "/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+            "length": 112286246,
+            "first_1024_bytes_match": true
+          },
+          "/download/update/darwin/aarch64/0.1.64": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/update/darwin/aarch64/0.1.64",
+            "length": 112286246,
+            "first_1024_bytes_match": true
+          }
+        },
+        "already_current_status": 204
+      },
+      "windows-x86_64": {
+        "update_feed": {
+          "status": 200,
+          "version": "0.1.64",
+          "signature_matches": true
+        },
+        "assets": {
+          "/download/windows": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.64.exe",
+            "length": 97567398,
+            "first_1024_bytes_match": true
+          },
+          "/download/release/PKU-All-in-One-Windows-0.1.64.exe": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.64.exe",
+            "length": 97567398,
+            "first_1024_bytes_match": true
+          },
+          "/download/update/windows/x86_64/0.1.64": {
+            "status": 200,
+            "url": "https://pku.aeoluswu.info/download/update/windows/x86_64/0.1.64",
+            "length": 97567398,
+            "first_1024_bytes_match": true
+          }
+        },
+        "already_current_status": 204
+      }
+    },
+    "python_package": {
+      "status": 200,
+      "version": "0.1.64",
+      "sha256": "5f4b891f58ec58ac35af8f94d2d5b29be59ed1e153d1c2af6effe93ad31e57bb"
+    }
+  },
+  "updater_cryptography": {
+    "darwin-aarch64": {
+      "version": "0.1.64",
+      "updater": "PKU-All-in-One-0.1.64-Apple-Silicon.app.tar.gz",
+      "signature": "verified",
+      "signed_version": "verified",
+      "sha256": "448d277cb0d1a91aa7857a7a0166252b267cf128402eca9bd38fe583907732cc"
+    },
+    "windows-x86_64": {
+      "version": "0.1.64",
+      "updater": "PKU-All-in-One-Windows-0.1.64.exe",
+      "signature": "verified",
+      "signed_version": "verified",
+      "sha256": "4a4c62f4bc48277e47205d308295e8864648ceeac278acbbd4a60a704382a28b"
+    }
+  },
+  "macos_archive": {
+    "version": "0.1.64",
+    "updater_archive_matches_readonly_dmg_app": true,
+    "files_checked": 8018
+  },
+  "wheel": {
+    "version": "0.1.64",
+    "wheel_sha256": "5f4b891f58ec58ac35af8f94d2d5b29be59ed1e153d1c2af6effe93ad31e57bb",
+    "source_matches": true,
+    "user_data_or_private_key_files": 0
+  },
+  "download_page_alias": {
+    "version": "0.1.64",
+    "aliases": [
+      "/download",
+      "/download/"
+    ],
+    "nginx_config_test": "passed",
+    "reload": "graceful",
+    "before_sha256": "1c3c657485e593e93bff93dbbff5bfeb8e9ecc2846be8ea07959ff964901ed8c",
+    "after_sha256": "3a903f6af0e16a96a80976c301c5ff1b1c74568e58ae13815a986417c4154fcc",
+    "backup": "/opt/pku-server/deployments/0.1.64/pku.conf.before-download-alias"
+  },
+  "server_storage": {
+    "release_assets_use_hard_links": true,
+    "previous_macos_installer_deduplicated": true,
+    "previous_installer_both_paths_preserved": true,
+    "previous_installer_sha256": "86a68adb816088dbe35db91908bee2694a16ac534bedaaa167867e4a39cb32d5",
+    "free_including_root_reserve_mb": 360,
+    "available_mb": 0,
+    "limitation": "Storage remains low; available non-root space is zero. Publication uses hard links to avoid duplicate installer copies. Prior macOS artifact paths and bytes were preserved during deduplication."
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "version": "0.1.64",
+  "source_files": 93,
+  "real_clip_checks": 3,
+  "tls": true,
+  "lock_sha256": "15e251b1b85efcc4b8486eecbc52c08322b17726b5ec8580d2dae11debbd2541",
+  "lock_matches_staged_runtime": true,
+  "repository_rust_updater_verifier": "passed",
+  "native_e2e": "not_run"
+}

@@ -1,0 +1,12 @@
+{
+  "version": "0.1.64",
+  "aliases": [
+    "/download",
+    "/download/"
+  ],
+  "nginx_config_test": "passed",
+  "reload": "graceful",
+  "before_sha256": "1c3c657485e593e93bff93dbbff5bfeb8e9ecc2846be8ea07959ff964901ed8c",
+  "after_sha256": "3a903f6af0e16a96a80976c301c5ff1b1c74568e58ae13815a986417c4154fcc",
+  "backup": "/opt/pku-server/deployments/0.1.64/pku.conf.before-download-alias"
+}

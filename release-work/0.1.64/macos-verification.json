@@ -1,0 +1,10 @@
+{
+  "version": "0.1.64",
+  "source_files_equal": 93,
+  "bundle_files_checked": 8125,
+  "launches": [],
+  "signature": "ad-hoc, deep strict verification passed",
+  "notarized": false,
+  "native_smoke": "skipped_existing_desktop_instance_left_running",
+  "full_product_e2e_passed": false
+}
