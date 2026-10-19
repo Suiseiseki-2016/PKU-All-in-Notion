@@ -70,7 +70,9 @@ def test_terminal_processing_refreshes_real_quota_endpoint_and_visible_balance(r
     page.evaluate("window.__quotaTest.poll()")
     assert "/api/platform/quota" in requests
     assert page.evaluate("window.__quotaTest.state.quota.llm_points_remaining")==9.75
-    assert "AI 点 9.75" in page.locator('.sidebar [data-block="quota"]').inner_text()
+    assert "可用转写 10 分钟" in page.locator('.sidebar [data-block="quota"]').inner_text()
+    page.locator('.sidebar .account-drawer > summary').click()
+    assert "AI 点 9.75" in page.locator('.sidebar .account-drawer').inner_text()
 
 def test_quota_read_failure_preserves_authenticated_cached_data_and_marks_stale(renderer):
     page,controls,_ = renderer
@@ -135,6 +137,7 @@ def test_terminal_poll_keeps_scrolled_account_input_visible(renderer, terminal):
         window.__quotaTest.render();}""")
     field, menu = open_code_field(page)
     field.fill("LOCAL-DEMO-CODE")
+    page.set_viewport_size({"width": 1100, "height": 540})
     sidebar = page.locator('.sidebar')
     field.scroll_into_view_if_needed()
     before = sidebar.evaluate('element => element.scrollTop')

@@ -258,7 +258,26 @@ def _extract_audio_parts(video: Path, directory: Path, chunk_seconds: int, progr
 _RETRY_DELAY = 2.0  # covers an edge/failover reconnect window; tests zero it
 
 
-def _upload(url: str, key: str, audio: Path) -> dict:
+def _part_index_from_audio(audio: Path) -> int:
+    name = audio.stem  # e.g. "part-0002" or "audio"
+    if name.startswith("part-"):
+        suffix = name[5:]
+        if suffix.isdigit():
+            return int(suffix)
+    return 0
+
+
+def _transcribe_headers(key: str, audio: Path, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {key}"}
+    if source_id:
+        headers["X-PKU-Source-Id"] = str(source_id)
+        headers["X-PKU-Part-Index"] = str(_part_index_from_audio(audio))
+    if transcribe_mode in {"basic", "advanced"}:
+        headers["X-PKU-Transcribe-Mode"] = transcribe_mode
+    return headers
+
+
+def _upload(url: str, key: str, audio: Path, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict:
     """POST the audio to the relay; the relay answers with the transcript.
 
     One transport-level retry: a failover between relay hosts kills the
@@ -267,6 +286,7 @@ def _upload(url: str, key: str, audio: Path) -> dict:
     """
     import httpx
 
+    req_headers = _transcribe_headers(key, audio, source_id=source_id, transcribe_mode=transcribe_mode)
     for attempt in (1, 2):
         try:
             from .network import dead_loopback_proxy
@@ -274,7 +294,7 @@ def _upload(url: str, key: str, audio: Path) -> dict:
             with audio.open("rb") as source, httpx.Client(timeout=600.0, trust_env=not dead_loopback_proxy()) as client:
                 response = client.post(
                     url,
-                    headers={"Authorization": f"Bearer {key}"},
+                    headers=req_headers,
                     files={"audio": (audio.name, source, "audio/mp4")},
                 )
             break
@@ -309,7 +329,7 @@ def _upload(url: str, key: str, audio: Path) -> dict:
     return payload
 
 
-def _upload_direct(url: str, key: str, audio: Path, *, source_id=None) -> dict:
+def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcribe_mode: str | None = None) -> dict:
     """With explicit consent, send this audio part straight to private OSS."""
     import httpx
     from urllib.parse import urlsplit
@@ -319,12 +339,15 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None) -> dict:
     if not url.rstrip("/").endswith(suffix):
         raise RuntimeError("云端直传地址配置不正确。")
     base = url.rstrip("/")[:-len(suffix)]
-    headers = {"Authorization": f"Bearer {key}"}
+    headers = _transcribe_headers(key, audio, source_id=source_id, transcribe_mode=transcribe_mode)
     try:
         with httpx.Client(trust_env=not dead_loopback_proxy()) as client:
             body = {'size_bytes': audio.stat().st_size}
             if source_id is not None:
                 body['source_id'] = source_id
+                body['part_index'] = _part_index_from_audio(audio)
+            if transcribe_mode is not None:
+                body['transcribe_mode'] = transcribe_mode
             issued = client.post(base + suffix + "/direct/init", headers=headers,
                                  json=body, timeout=30)
             if issued.status_code != 200:
@@ -388,9 +411,11 @@ def transcribe_cloud(video: Path, target: Path, settings: "Settings", progress=N
             progress(0, len(parts), "audio_parts", 0)
         uploader = _upload_direct if direct_oss else _upload
         source_id = getattr(settings, '_metered_operation_context', {}).get('source_id')
-        if direct_oss and source_id:
+        strategy = getattr(settings, 'notes_strategy', None)
+        transcribe_mode = "advanced" if strategy == "topics" else "basic"
+        if (source_id or transcribe_mode == "advanced") and uploader in (_upload, _upload_direct):
             from functools import partial
-            uploader = partial(_upload_direct, source_id=source_id)
+            uploader = partial(uploader, source_id=source_id, transcribe_mode=transcribe_mode)
         if len(parts) == 1:
             payload = uploader(url, token, parts[0][0])
             if progress:

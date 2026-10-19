@@ -147,10 +147,10 @@ def test_panel_surfaces_version_notice_action_and_silent_unreachable_state(tmp_p
 
     shell = client.get("/app")
     assert shell.status_code == 200
-    assert "Version {version}" in shell.text
+    assert "版本 v{version}" in shell.text
     assert "发现新版本 {version}" in shell.text
     assert "下次启动时更新" in shell.text
-    assert "Retry on next start" in shell.text
+    assert "下次启动时重试" in shell.text
     assert '"data-version"' in client.get("/app/app.js").text
 
     payload = client.get("/api/update").json()

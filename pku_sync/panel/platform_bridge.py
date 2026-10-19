@@ -30,9 +30,17 @@ class RealPlatformBridge:
         from ..platform import redeem
         return redeem(code, self._settings)
 
-    def register(self, email: str, password: str) -> dict:
+    def exchange_quota(self, hours: int = 1, *, target: str = "advanced") -> dict:
+        from ..platform import exchange_quota
+        return exchange_quota(hours, self._settings, target=target)
+
+    def bind_campus(self, student_id: str) -> dict:
+        from ..platform import bind_campus
+        return bind_campus(student_id, self._settings)
+
+    def register(self, email: str, password: str, *, invite_code: str = "") -> dict:
         from ..platform import register
-        return register(email, password, self._settings)
+        return register(email, password, self._settings, invite_code=invite_code)
 
     def login(self, email: str, password: str) -> dict:
         from ..platform import login, sync_account_profile
@@ -107,7 +115,10 @@ class FakePlatformBridge:
                  grade_fail_status: int | None = None,
                  grade_fail_once: int | None = None,
                  email: str = "",
-                 email_verified: bool = False):
+                 email_verified: bool = False,
+                 tier: str = "pro",
+                 basic_seconds: int = FAKE_TRANSCRIBE_SECONDS // 2,
+                 advanced_seconds: int = FAKE_TRANSCRIBE_SECONDS - (FAKE_TRANSCRIBE_SECONDS // 2)):
         self._activated = bool(activated)
         self._llm_points = float(llm_points)
         self._points_charged = float(points_charged)
@@ -119,6 +130,16 @@ class FakePlatformBridge:
         self._email = (email or "").strip().lower()
         self._email_verified = bool(email_verified)
         self._password = "password1"
+        self._tier = (tier or "pro").strip().lower()
+        self._basic_seconds = int(basic_seconds)
+        self._advanced_seconds = int(advanced_seconds)
+        self._weekly_rollover_seconds = 90000
+        self._invite_code = "PKU-DEMO88"
+        self._invited_by = ""
+        self._invited_count = 0
+        self._campus_bound = False
+        self._invite_rewarded = False
+        self._rewarded_students: set[str] = set()
         self.llm_calls: list[dict] = []
         self.auth_calls: list[dict] = []
         if self._activated and not self._email:
@@ -138,14 +159,24 @@ class FakePlatformBridge:
                 "请先完成邮箱验证后再使用转写、AI 或兑换额度", 403
             )
 
+    def _total_seconds(self) -> int:
+        return max(0, int(self._basic_seconds) + int(self._advanced_seconds))
+
     def quota(self) -> dict:
         if not self._activated:
             return {"active": False}
         result = {
             "active": True,
             "available": True,
-            "transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS,
+            "transcribe_seconds_remaining": self._total_seconds(),
+            "basic_seconds_remaining": self._basic_seconds,
+            "advanced_seconds_remaining": self._advanced_seconds,
+            "weekly_rollover_seconds": self._weekly_rollover_seconds,
             "llm_points_remaining": self._llm_points,
+            "tier": self._tier,
+            "invite_code": self._invite_code,
+            "invited_count": self._invited_count,
+            "campus_bound": self._campus_bound,
         }
         if self._email:
             result["email"] = self._email
@@ -163,18 +194,94 @@ class FakePlatformBridge:
         self._activated = True
         self._email = ""
         self._email_verified = True
-        return {"transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS}
+        return {"transcribe_seconds_remaining": self._total_seconds()}
 
     def redeem(self, code: str) -> dict:
-        if not (code or "").strip():
+        from ..platform import _extract_code_from_input
+        clean = _extract_code_from_input(code)
+        if not clean:
             raise PlatformError("请输入兑换码")
         if not self._activated:
             raise PlatformError("请先登录后再兑换额度")
         self._require_verified_for_metered()
-        self.auth_calls.append({"op": "redeem"})
-        return {"transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS}
+        self.auth_calls.append({"op": "redeem", "code": clean})
+        if clean.upper().startswith("PKU-") or clean.upper().startswith("INV"):
+            self._invited_by = clean
+            return {
+                "transcribe_seconds_remaining": self._total_seconds(),
+                "basic_seconds_remaining": self._basic_seconds,
+                "advanced_seconds_remaining": self._advanced_seconds,
+                "llm_points_remaining": self._llm_points,
+                "tier": self._tier,
+                "kind": "invite",
+                "invite_bound": True,
+            }
+        return {
+            "transcribe_seconds_remaining": self._total_seconds(),
+            "basic_seconds_remaining": self._basic_seconds,
+            "advanced_seconds_remaining": self._advanced_seconds,
+            "llm_points_remaining": self._llm_points,
+            "tier": self._tier,
+            "kind": "gift",
+        }
 
-    def register(self, email: str, password: str) -> dict:
+    def exchange_quota(self, hours: int = 1, *, target: str = "advanced") -> dict:
+        if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 100:
+            raise self._relay_error("兑换小时数必须是正整数", 400)
+        clean_target = (target or "advanced").strip().lower()
+        if clean_target not in {"basic", "advanced"}:
+            raise self._relay_error("请选择兑换普通转写或高级转写时长", 400)
+        if not self._activated:
+            raise self._relay_error("请先登录后再兑换时长", 401)
+        self._require_verified_for_metered()
+        cost = float(hours * 10)
+        if self._llm_points < cost:
+            raise self._relay_error("AI 点不足（10 AI 点可兑换 1 小时转写时长）", 402)
+        self._llm_points -= cost
+        added = hours * 3600
+        if clean_target == "basic":
+            self._basic_seconds += added
+        else:
+            self._advanced_seconds += added
+        self.auth_calls.append({"op": "exchange", "hours": hours, "target": clean_target})
+        return {
+            "transcribe_seconds_remaining": self._total_seconds(),
+            "basic_seconds_remaining": self._basic_seconds,
+            "advanced_seconds_remaining": self._advanced_seconds,
+            "llm_points_remaining": self._llm_points,
+            "points_spent": cost,
+            "seconds_added": added,
+            "target": clean_target,
+            "tier": self._tier,
+        }
+
+    def bind_campus(self, student_id: str) -> dict:
+        clean_id = (student_id or "").strip()
+        if not clean_id:
+            raise self._relay_error("请输入教学网账号（学号）", 400)
+        if not self._activated:
+            return {"bound": False, "reason": "not_signed_in"}
+        self._campus_bound = True
+        reward_granted = False
+        if self._invited_by and not self._invite_rewarded and clean_id not in self._rewarded_students:
+            self._invite_rewarded = True
+            self._rewarded_students.add(clean_id)
+            self._basic_seconds += 90000  # First week 25h basic transcription
+            self._invited_count += 1
+            reward_granted = True
+        self.auth_calls.append({"op": "bind_campus", "student_id": clean_id, "reward_granted": reward_granted})
+        return {
+            "bound": True,
+            "campus_bound": True,
+            "reward_granted": reward_granted,
+            "transcribe_seconds_remaining": self._total_seconds(),
+            "basic_seconds_remaining": self._basic_seconds,
+            "advanced_seconds_remaining": self._advanced_seconds,
+            "tier": self._tier,
+        }
+
+    def register(self, email: str, password: str, *, invite_code: str = "") -> dict:
+        from ..platform import _extract_code_from_input
         clean = (email or "").strip().lower()
         if not clean or "@" not in clean:
             raise self._relay_error("请输入有效的邮箱地址", 400)
@@ -186,8 +293,17 @@ class FakePlatformBridge:
         self._password = password
         self._email_verified = False
         self._activated = True
-        self.auth_calls.append({"op": "register", "email": clean})
-        return {"email": clean, "email_verified": False, "active": True}
+        clean_invite = _extract_code_from_input(invite_code)
+        if clean_invite:
+            self._invited_by = clean_invite
+        entry = {"op": "register", "email": clean}
+        if clean_invite:
+            entry["invite_code"] = clean_invite
+        self.auth_calls.append(entry)
+        result = {"email": clean, "email_verified": False, "active": True}
+        if clean_invite:
+            result["invited_by"] = clean_invite
+        return result
 
     def login(self, email: str, password: str) -> dict:
         clean = (email or "").strip().lower()
@@ -221,8 +337,15 @@ class FakePlatformBridge:
             "email": self._email or None,
             "email_verified": self._email_verified if self._email else True,
             "legacy_activate": not bool(self._email),
-            "transcribe_seconds_remaining": FAKE_TRANSCRIBE_SECONDS,
+            "transcribe_seconds_remaining": self._total_seconds(),
+            "basic_seconds_remaining": self._basic_seconds,
+            "advanced_seconds_remaining": self._advanced_seconds,
+            "weekly_rollover_seconds": self._weekly_rollover_seconds,
             "llm_points_remaining": self._llm_points,
+            "tier": self._tier,
+            "invite_code": self._invite_code,
+            "invited_count": self._invited_count,
+            "campus_bound": self._campus_bound,
         }
 
     def forgot_password(self, email: str) -> dict:

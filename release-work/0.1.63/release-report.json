@@ -1,0 +1,71 @@
+{
+  "version": "0.1.63",
+  "publication_status": "blocked",
+  "client_targeted_tests": {
+    "passed": 122
+  },
+  "client_regression": {
+    "passed": 190,
+    "skipped": 29
+  },
+  "backend_isolated_tests": {
+    "passed": 249,
+    "failed": 0,
+    "skipped": 0
+  },
+  "backend_migration_check": "passed_on_private_copy_production_read_only",
+  "macos": {
+    "version": "0.1.63",
+    "source_files_equal": 93,
+    "bundle_files_checked": 8018,
+    "launches": [
+      {
+        "round": 1,
+        "startup_seconds": 6.121,
+        "port": 8791,
+        "native_quit": true,
+        "port_released": true,
+        "bundle_unchanged": true
+      },
+      {
+        "round": 2,
+        "startup_seconds": 3.098,
+        "port": 8791,
+        "native_quit": true,
+        "port_released": true,
+        "bundle_unchanged": true
+      }
+    ],
+    "signature": "ad-hoc, deep strict verification passed",
+    "notarized": false,
+    "full_product_e2e_passed": false
+  },
+  "wheel_sha256": "e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7",
+  "published": false,
+  "production_version": "0.1.62",
+  "windows_build": "passed",
+  "windows_sha256": "f4621ca57a7d3ec795e3d48c04fc4c613fe96e8fd0b1366e0cf197a7c328d2ef",
+  "windows_updater_cryptography": "passed",
+  "windows_release_verification": "blocked_missing_native_e2e_report",
+  "windows_updater_release_verification": "blocked_missing_native_e2e_report",
+  "windows_native_smoke": "blocked_existing_client_owns_port_8791",
+  "windows_browser_tests": {
+    "passed": 9,
+    "failed": 7,
+    "log": "windows-browser-tests.log"
+  },
+  "staged_endpoint_verification": {
+    "version": "0.1.63",
+    "installer_redirects": "passed",
+    "windows_update_manifest": "passed",
+    "current_version_no_update": 204,
+    "macos_dmg_manual_install_only": true,
+    "production_changed": false
+  },
+  "server_staging": "/opt/pku-server/deployments/0.1.63",
+  "blockers": [
+    "Fresh installed-native E2E report for this artifact and source is required by both Windows verification scripts.",
+    "Seven existing Windows browser checks failed and require investigation.",
+    "Native lifecycle smoke cannot start while the existing installed client owns port 8791."
+  ]
+}

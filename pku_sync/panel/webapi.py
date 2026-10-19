@@ -52,6 +52,7 @@ def create_app(
     from .recordings_api import RecordingWorkManager, add_recording_routes
     recording_manager = RecordingWorkManager(settings)
     app.state.recording_manager = recording_manager
+    recording_manager.platform_service = platform_service
     from .connection import FakeConnectionProvider
     demo_connection = (isinstance(connection_service.provider, FakeConnectionProvider)
                        and not getattr(settings, "notion_token", ""))
@@ -71,7 +72,7 @@ def create_app(
 
     def _platform_http(exc) -> HTTPException:
         status = int(getattr(exc, "status_code", None) or 400)
-        if status not in (400, 401, 403, 409, 429, 502, 503):
+        if status not in (400, 401, 402, 403, 409, 429, 502, 503):
             status = 400
         return HTTPException(status_code=status, detail=str(exc))
 
@@ -97,13 +98,45 @@ def create_app(
         except PlatformError as exc:
             raise _platform_http(exc) from exc
 
-    @app.post("/api/auth/register")
-    def auth_register(
-        email: str = Body(...), password: str = Body(...)
+    @app.post("/api/platform/exchange")
+    def platform_exchange(
+        hours: int = Body(1, strict=True, ge=1, le=100), target: str = Body("advanced")
     ) -> dict:
         from ..platform import PlatformError
 
         try:
+            if hasattr(platform_service, "exchange_quota"):
+                return platform_service.exchange_quota(hours, target=target)
+            from ..platform import exchange_quota
+
+            return exchange_quota(hours, settings, target=target)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/bind-campus")
+    def auth_bind_campus(student_id: str = Body(..., embed=True)) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            if hasattr(platform_service, "bind_campus"):
+                return platform_service.bind_campus(student_id)
+            from ..platform import bind_campus
+
+            return bind_campus(student_id, settings)
+        except PlatformError as exc:
+            raise _platform_http(exc) from exc
+
+    @app.post("/api/auth/register")
+    def auth_register(
+        email: str = Body(...),
+        password: str = Body(...),
+        invite_code: str = Body(""),
+    ) -> dict:
+        from ..platform import PlatformError
+
+        try:
+            if invite_code and hasattr(platform_service, "register"):
+                return platform_service.register(email, password, invite_code=invite_code)
             return platform_service.register(email, password)
         except PlatformError as exc:
             raise _platform_http(exc) from exc

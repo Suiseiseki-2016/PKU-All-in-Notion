@@ -1,4 +1,8 @@
+2a1de66498f9fb126dcece549d86bacffbe187cbaafdbe352621d6dcf5095d86  wheels/pku_course_sync-0.1.0-py3-none-any.whl
+c6c6a8ab7bbe8a2cf4f4000d672da2245fd10c1d966def15c8cb20654b344ea9  wheels/pku_course_sync-0.1.1-py3-none-any.whl
+328b8b486f82b68419964d8479c170a777e9e8baf58caefd7d21a28e8c7248e4  wheels/pku_course_sync-0.1.57-py3-none-any.whl
 fee44c226f86cbdb9e5d3df42b654e66f9050f7d30bf0c9f225b38cec3e022ed  wheels/pku_course_sync-0.1.59-py3-none-any.whl
 83a94b91daa6db3af85e7a4bd89e0d546466693e6a58fd751e84567a5b97530d  wheels/pku_course_sync-0.1.60-py3-none-any.whl
 97b07e7ba0e89f92ac75abd40a5a2c09aab784d5eeca785546499ac13dccdac7  wheels/pku_course_sync-0.1.61-py3-none-any.whl
 00a6ec43d2efd52eb4826a1c802b5cb8f9e55ac3a2e43df874e949b2488746a9  wheels/pku_course_sync-0.1.62-py3-none-any.whl
+e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7  wheels/pku_course_sync-0.1.63-py3-none-any.whl

@@ -1558,6 +1558,7 @@ def lecture_material_fixture(root):
         {"title": "补充阅读", "kind": "课件", "path": "extra", "files": []},
     ]), "utf-8")
     app = FastAPI()
+    app.state.platform_service = SimpleNamespace(quota=lambda: {"tier": "max"})
     recordings_api.add_recording_routes(app, recordings_api.RecordingWorkManager(settings(root)))
     return TestClient(app), folder, jobs
 

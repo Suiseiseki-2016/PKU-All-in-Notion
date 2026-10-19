@@ -4,11 +4,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from browser_support import browser_launch_options
+from browser_support import EDGE, browser_launch_options
 from pku_sync.panel.student_ui import PANEL_COPY, student_page
 
 playwright = pytest.importorskip("playwright.sync_api")
-EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 pytestmark = pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge required")
 
 
@@ -108,7 +107,7 @@ def test_enter_pending_error_and_rerender_preserve_login_inputs(ui):
     held.pop().abort()
     playwright.expect(page.locator("#auth-help")).to_have_text(PANEL_COPY["auth"]["network_failed"])
     playwright.expect(page.locator('[data-action="auth-submit"]')).to_be_enabled()
-    page.locator('.auth-switches [data-action="auth-mode-register"]').click()
+    page.locator('.auth-mode-tabs [data-action="auth-mode-register"]').click()
     assert page.locator("#auth-email").input_value() == "fixture@example.com"
     assert page.locator("#auth-password").input_value() == ""
 
@@ -147,27 +146,19 @@ def test_campus_enter_validates_before_saved_and_retains_failed_inputs(ui):
     assert page.evaluate("window.__uiTest.state.campus.configured") is True
 
 
-def test_home_setup_destination_pending_and_ready_layout(ui, tmp_path):
+def test_connection_setup_uses_local_workspace_and_fits_viewport(ui):
     page, held, posted = ui
     signed_in_setup(page)
-    # This focused control test starts after directory verification; the first-run
-    # journey tests that prerequisite through actual clicks and API responses.
-    page.evaluate("window.__uiTest.state.campus.courses=[{id:'fixture',synced_at:'2026-10-14'}];window.__uiTest.render()")
-    page.locator("#home-parent").select_option("parent-b")
-    playwright.expect(page.locator(".home-setup-footer")).to_contain_text("保存到「课程资料」下面")
-    page.locator(".home-setup").screenshot(path=str(tmp_path / "home-setup.png"))
-    page.locator('[data-action="campus-create-workspace"]').click()
-    playwright.expect(page.locator('[data-action="campus-create-workspace"]')).to_have_text("正在创建并验证…")
-    page.wait_for_function("window.__testPostsCaptured === 1")
-    assert posted[-1] == ("/api/campus/notion/workspace", {"parent_page_id": "parent-b"})
-    held.pop().fulfill(status=503, body=json.dumps({"detail": "Notion 暂时无法连接"}), content_type="application/json")
-    playwright.expect(page.locator(".home-setup-error")).to_have_text("Notion 暂时无法连接")
-    assert page.locator("#home-parent").input_value() == "parent-b"
-    page.locator('[data-action="campus-create-workspace"]').click()
-    playwright.expect(page.locator('[data-action="campus-create-workspace"]')).to_be_disabled()
-    page.wait_for_function("window.__testPostsCaptured === 2")
-    held.pop().fulfill(body=json.dumps({"id": "home", "parent_id": "parent-b", "active": True, "schema": 2, "url": "https://www.notion.so/fixture"}), content_type="application/json")
-    playwright.expect(page.locator(".home-ready-badge")).to_have_text("✓ 学习主页已就绪")
+    playwright.expect(page.get_by_role("heading", name="连接设置", exact=True)).to_be_visible()
+    playwright.expect(page.locator("#recording-credentials-form")).to_be_visible()
+    playwright.expect(page.locator(".main")).to_contain_text("资料与笔记保存在本机")
+    # 0.1.63 no longer asks students to create a Notion destination.
+    assert page.locator(".home-setup, #home-parent, [data-action=campus-create-workspace]").count() == 0
+    assert page.locator('.main [data-action="connect-notion"]').count() == 0
+    page.locator("#recording-username").fill("fixture-student")
     for width in (1100, 800, 390):
         page.set_viewport_size({"width": width, "height": 760})
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        playwright.expect(page.locator("#recording-username")).to_have_value("fixture-student")
+        playwright.expect(page.locator('[data-action="recording-save-credentials"]')).to_be_visible()
+    assert held == posted == []

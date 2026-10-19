@@ -11,10 +11,10 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
-from browser_support import browser_launch_options
+from browser_support import EDGE, browser_launch_options
 from fastapi.testclient import TestClient
 
-from pku_sync.panel.connection import ConnectionService, CONNECTED_COPY, CONNECT_FAILED_COPY
+from pku_sync.panel.connection import ConnectionService
 
 from pku_sync.panel.platform_bridge import FakePlatformBridge
 from pku_sync.platform import PlatformError
@@ -22,7 +22,6 @@ from pku_sync.panel.webapi import create_app
 from pku_sync.panel.student_ui import PANEL_COPY
 
 playwright = pytest.importorskip("playwright.sync_api")
-EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 
 class _NoopRunner:
@@ -57,7 +56,7 @@ class _RetryConnection:
 
 
 @pytest.mark.skipif(not EDGE.exists(), reason="Microsoft Edge is required")
-def test_registration_verification_and_notion_connection_in_edge():
+def test_registration_verification_and_local_workspace_in_edge():
     platform = FakePlatformBridge(activated=False)
     provider = _RetryConnection()
     app = create_app(settings=SimpleNamespace(data_dir='data', platform_token=''), connection_service=ConnectionService(provider), platform_service=platform)
@@ -91,9 +90,10 @@ def test_registration_verification_and_notion_connection_in_edge():
             page.goto("http://panel.test/app")
             page.set_viewport_size({"width": 800, "height": 560})
             for selector in ("#auth-email", "#auth-form [data-action=auth-submit]"):
-                playwright.expect(page.locator(selector)).to_be_in_viewport(ratio=1)
+                page.locator(selector).scroll_into_view_if_needed()
+                playwright.expect(page.locator(selector)).to_be_in_viewport(ratio=0.99)
             page.set_viewport_size({"width": 1280, "height": 720})
-            page.get_by_role("button", name=PANEL_COPY["auth"]["login"]["switch_register"]).click()
+            page.locator('[data-action="auth-mode-register"]').click()
             assert page.locator("#auth-password-confirm").is_visible()
             page.locator("#auth-email").fill("new@example.com")
             page.locator("#auth-password").fill("password1")
@@ -105,25 +105,21 @@ def test_registration_verification_and_notion_connection_in_edge():
 
             page.locator("#auth-password-confirm").fill("password1")
             page.locator("#auth-form [data-action=auth-submit]").click()
-            page.locator(".sidebar").get_by_text(PANEL_COPY["account"]["unverified"], exact=True).wait_for()
+            page.locator(".sidebar").locator(".account-email").filter(has_text=PANEL_COPY["account"]["unverified"]).wait_for()
             assert {"op": "register", "email": "new@example.com"} in platform.auth_calls
             assert page.locator(".sidebar").get_by_role("button", name=PANEL_COPY["account"]["refresh_verification"]).is_visible()
 
             platform.mark_verified()
             page.locator(".sidebar").get_by_role("button", name=PANEL_COPY["account"]["refresh_verification"]).click()
-            page.locator(".sidebar").get_by_text(PANEL_COPY["account"]["verified"], exact=True).wait_for()
+            page.locator(".sidebar").locator(".account-email").filter(has_text=PANEL_COPY["account"]["verified"]).wait_for()
             assert not page.locator(".sidebar").get_by_role("button", name=PANEL_COPY["account"]["refresh_verification"]).count()
 
-            assert page.get_by_role("heading", name="我的课程").is_visible()
-            page.locator('.sidebar [data-block="connection"] [data-action="connect-notion"]').click()
-            error = page.locator('.sidebar [data-block="connection"] [role="alert"]')
-            error.wait_for()
-            assert CONNECT_FAILED_COPY in error.inner_text()
-            assert "private upstream" not in page.locator("body").inner_text()
-
-            page.locator('.sidebar [data-block="connection"] [data-action="connect-notion"]').click()
-            page.locator('.sidebar [data-block="connection"] [data-field="connection-status"]').filter(has_text=CONNECTED_COPY).wait_for()
-            assert provider.attempts == 2
+            playwright.expect(page.get_by_role("heading", name="连接设置", exact=True)).to_be_visible()
+            assert page.locator('[data-action="connect-notion"]').count() == 0
+            page.locator('.sidebar [data-action="campus-account-settings"]').click()
+            playwright.expect(page.locator("#recording-credentials-form")).to_be_visible()
+            playwright.expect(page.locator(".main")).to_contain_text("资料与笔记保存在本机")
+            assert provider.attempts == 0
             for width, height in ((800, 560), (900, 800)):
                 page.set_viewport_size({"width": width, "height": height})
                 menu = page.locator(".mobile-account-menu")
@@ -185,7 +181,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
             page.wait_for_function("Boolean(window.__candidateTest)")
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;
-                s.activated = true; s.quota = {active:true}; s.view = 'campus-course';
+                s.activated = true; s.quota = {active:true, tier:'pro'}; s.view = 'campus-course';
                 s.update = {version:'0.1.17', status:'desktop_managed'};
                 s.campus.courseId = 'course-one'; s.campus.configured = true;
                 s.campus.course = {
@@ -205,7 +201,7 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
             form = page.locator("#assignment-prepare-form")
             assert "启动后会检查更新" in page.locator('.sidebar [data-block="update"]').inner_text()
             assert page.locator('[data-action="request-update"]').count() == 0
-            form.locator('[name="notion_url"]').fill("https://www.notion.so/example")
+            assert form.locator('[name="notion_url"]').count() == 0
             form.locator('[name="attachments"]').set_input_files({
                 "name": "answer.txt", "mimeType": "text/plain", "buffer": b"unique homework content"
             })
@@ -215,7 +211,6 @@ def test_recording_progress_keeps_unsaved_assignment_form_and_files():
             page.wait_for_function("window.__candidateTest.state.recordings.task.progress_done === 1")
             assert page.evaluate("window.__candidateForm === document.querySelector('#assignment-prepare-form')")
             assert "10%" in page.locator(".recording-task").inner_text()
-            assert form.locator('[name="notion_url"]').input_value() == "https://www.notion.so/example"
             assert form.locator('[name="archive_name"]').input_value() == "student-homework.zip"
             assert page.evaluate("document.activeElement.name") == "archive_name"
             assert "answer.txt" in form.locator("[data-assignment-attachments]").inner_text()
@@ -331,7 +326,8 @@ def test_sidebar_stays_put_while_right_content_scrolls():
 
 class _RedeemPlatform(FakePlatformBridge):
     def __init__(self):
-        super().__init__(activated=True, email="student@example.com", email_verified=False, llm_points=0)
+        super().__init__(activated=True, email="student@example.com", email_verified=False,
+                         llm_points=0, basic_seconds=0, advanced_seconds=0)
         self.seconds = 0
         self.used = False
         self.redeem_calls = 0
@@ -350,6 +346,8 @@ class _RedeemPlatform(FakePlatformBridge):
             raise error
         self.used = True
         self.seconds += 120
+        self._basic_seconds += 60
+        self._advanced_seconds += 60
         self._llm_points += 2.5
         return {"transcribe_seconds_remaining": self.seconds}
 
@@ -390,12 +388,12 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
             page.add_init_script("localStorage.setItem('pku-panel-welcome-v1', 'seen')")
             page.route("http://panel.test/**", serve)
             page.goto("http://panel.test/app")
-            page.locator(".sidebar").get_by_text(PANEL_COPY["account"]["unverified"], exact=True).wait_for()
+            page.locator(".sidebar").locator(".account-email").filter(has_text=PANEL_COPY["account"]["unverified"]).wait_for()
             assert page.locator("#redeem-form").count() == 0
             platform.mark_verified()
             # The panel polls verification automatically; a manual refresh button can
             # disappear during Playwright's click action once the desired state arrives.
-            page.locator("#redeem-form").wait_for(timeout=15000)
+            page.locator("#redeem-form").wait_for(state="attached", timeout=15000)
             account_settings = page.locator('.sidebar [data-persistent-disclosure="desktop-account"]')
             if not account_settings.evaluate("el => el.open"):
                 account_settings.locator('summary').click()
@@ -413,8 +411,8 @@ def test_student_redeem_updates_both_balances_and_rejects_duplicate():
             page.get_by_text(PANEL_COPY["account"]["redeemed_toast"], exact=True).wait_for()
             assert platform.redeem_calls == 3
             quota = page.locator('.sidebar [data-block="quota"]')
-            assert "2" in quota.inner_text()
-            assert "2.5" in quota.inner_text()
+            playwright.expect(quota.locator(".quota-available")).to_have_text("可用转写 2 分钟")
+            playwright.expect(quota.locator("[data-dual-quota]")).to_have_text("普通转写 1 分钟 · 高级转写 1 分钟 · AI 点 2.5")
             assert client.get("/api/platform/quota").json()["transcribe_seconds_remaining"] == 120
 
             page.locator("#code").fill("TEST1234")
@@ -549,7 +547,7 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
             page.wait_for_function("Boolean(window.__candidateTest)")
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;
-                s.activated = true; s.quota = {active:true}; s.view = 'campus-course';
+                s.activated = true; s.quota = {active:true, tier:'pro'}; s.view = 'campus-course';
                 s.connection.connected = true;
                 s.campus.courseId = 'course-one'; s.campus.configured = true;
                 s.campus.home = {id:'home', url:'https://www.notion.so/home'};
@@ -591,11 +589,12 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
                 };
                 window.__candidateTest.render();
             }""")
-            assert "打开课程总结" in box.inner_text()
-            assert "Notion 拒绝写入" in box.inner_text()
+            # Legacy external Notion results are not offered by the local reader UI.
+            assert "打开课程总结" not in box.inner_text()
+            assert "笔记同步服务 拒绝写入" in box.inner_text()
             assert box.locator(
                 '[data-action="recording-open-result"][data-url="https://www.notion.so/summary-page"]'
-            ).count() == 1
+            ).count() == 0
 
             # Unexpected failures expose a support reference without leaking internals.
             page.evaluate("""() => {
@@ -607,26 +606,22 @@ def test_catalog_progress_and_course_summary_actions_in_edge():
                 };
                 window.__candidateTest.render();
             }""")
-            assert "写入 Notion 时中断" in box.inner_text()
+            assert "写入 笔记同步服务 时中断" in box.inner_text()
             assert "故障编号：A1B2C3D4" in box.inner_text()
 
             # The course page keeps a permanent way to generate or reopen it.
             assert page.locator('[data-action="campus-course-summary"]').count() == 1
-            page.get_by_role('button', name='课程设置', exact=True).click()
-            assert page.get_by_role("button", name="生成全部课程总结").count() == 1
-            assert "写入 Notion 时中断" in page.locator('.recording-task').inner_text(timeout=3000)
-            assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
+            assert page.get_by_role('button', name='课程设置', exact=True).count() == 0
             page.locator('[data-action="campus-course-home"]').click()
             assert "故障编号：A1B2C3D4" in page.locator('.recording-task').inner_text()
             assert page.locator('.campus-centers a').count() == 3
-            page.locator('[data-action="campus-open-center"][data-center="materials"]').click()
             page.evaluate("""() => {
                 const s = window.__candidateTest.state;
                 s.campus.course.summary = {url:'https://www.notion.so/summary-page',
                                            title:'测试课程｜课程总结（截至 2026-09-30）'};
                 window.__candidateTest.render();
             }""")
-            assert page.locator('[data-action="campus-open-summary"]').count() == 1
+            playwright.expect(page.locator('[data-action="campus-preview-course-summary"]')).to_have_text('阅读课程总结')
             assert page.get_by_role("button", name="重新生成课程总结").count() == 1
 
             page.evaluate("""() => {

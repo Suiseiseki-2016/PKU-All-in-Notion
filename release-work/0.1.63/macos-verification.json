@@ -1,0 +1,26 @@
+{
+  "version": "0.1.63",
+  "source_files_equal": 93,
+  "bundle_files_checked": 8018,
+  "launches": [
+    {
+      "round": 1,
+      "startup_seconds": 6.121,
+      "port": 8791,
+      "native_quit": true,
+      "port_released": true,
+      "bundle_unchanged": true
+    },
+    {
+      "round": 2,
+      "startup_seconds": 3.098,
+      "port": 8791,
+      "native_quit": true,
+      "port_released": true,
+      "bundle_unchanged": true
+    }
+  ],
+  "signature": "ad-hoc, deep strict verification passed",
+  "notarized": false,
+  "full_product_e2e_passed": false
+}

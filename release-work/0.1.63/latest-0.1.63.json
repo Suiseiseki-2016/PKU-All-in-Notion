@@ -1,0 +1,18 @@
+{
+  "darwin-aarch64": {
+    "version": "0.1.63",
+    "installer": "PKU-All-in-One-0.1.63-Apple-Silicon.dmg",
+    "github_url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/download/v0.1.63/PKU-All-in-One-0.1.63-Apple-Silicon.dmg",
+    "sha256": "86a68adb816088dbe35db91908bee2694a16ac534bedaaa167867e4a39cb32d5",
+    "notes": "0.1.63：会员等级与转写额度体系；同学邀请码与网页直接注册绑定；礼包链接兑换与有效期顺延；全新精简登录与课程工作台体验。"
+  },
+  "windows-x86_64": {
+    "version": "0.1.63",
+    "installer": "PKU-All-in-One-Windows-0.1.63.exe",
+    "github_url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/download/v0.1.63/PKU-All-in-One-Windows-0.1.63.exe",
+    "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRamc5MWZEV2tmTDVKYmZDbHA0T3ZxTTJPOExIOW9Ob29NdXpITzY5N2ZpSC96VHMwbVY1eSsxbFI1OERZRXk3bGMrcG9VdVdVRS9ielphaWpPUkM2dlFoaHBwMnZ0UFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDA3NTMzCWZpbGU6UEtVIEFsbCBpbiBPbmVfMC4xLjYzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjEuNjMKbHo3RVJBcHh6eGJJcHI2MzJ2TVlUV01ITkNKQWM3azBMVkdZb2FWZjU1Ti9BMi9ScUE0NjlvWk0vVEtCSUtMclVjaUUxWTlNT3k3aUZoRlJqaks4RGc9PQo=",
+    "sha256": "f4621ca57a7d3ec795e3d48c04fc4c613fe96e8fd0b1366e0cf197a7c328d2ef",
+    "notes": "0.1.63\n\n- 会员等级与转写额度体系：Lite / Pro / Max 等级、基础与高级转写额度及每周额度补充。\n- 同学邀请码与网页直接注册绑定，教学网学号绑定后发放邀请奖励。\n- 礼包链接兑换与有效期顺延，支持网页及客户端兑换。\n- 全新精简登录与课程工作台体验，优化课程信息、目录更新与讲次阅读。",
+    "pub_date": "2026-10-19T11:00:32Z"
+  }
+}

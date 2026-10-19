@@ -1,6 +1,6 @@
 [package]
 name = "pku-desktop"
-version = "0.1.62"
+version = "0.1.63"
 description = "PKU All in One desktop shell"
 authors = ["PKU All in One"]
 edition = "2021"

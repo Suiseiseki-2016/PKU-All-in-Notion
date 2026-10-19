@@ -1947,6 +1947,11 @@ class RecordingWorkManager:
             if notes_strategy not in {"transcript", "topics"}:
                 raise ValueError("请选择保留讲述顺序或知识点图文笔记。")
             metered_settings.notes_strategy = notes_strategy
+        service = getattr(self, "platform_service", None)
+        if service is not None and (getattr(self.settings, "platform_token", "") or getattr(service, "_activated", False)):
+            tier = service.quota().get("tier")
+            if tier == "lite":
+                metered_settings.notes_strategy = "transcript"
         metered_settings.notes_model = resolve_notes_model(
             self.settings, getattr(metered_settings, "notes_strategy", "transcript"))
         source_id = recording_source_id(job.recording)
@@ -2271,6 +2276,17 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
     async def lecture_local_materials_upload(course_id: str, key: str, files: list[UploadFile] = File(...)):
         from ..lecture_source_download import save_local_lecture_materials, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES
         from .campus_catalog import campus_course
+        explicit_tier = str(getattr(manager.settings, "account_tier", "") or "").strip().lower()
+        service = getattr(app.state, "platform_service", None)
+        if service is not None:
+            try:
+                explicit_tier = str(service.quota().get("tier", "")).lower()
+            except Exception:
+                explicit_tier = ""
+        if explicit_tier != "max":
+            for file in files:
+                await file.close()
+            raise HTTPException(status_code=403, detail="自定义上传课件为 Max 专属功能；请升级到 Max 后上传本地课件。")
         job = visual_job(course_id, key)
         try:
             if len(files) > MAX_FILES:
@@ -2683,6 +2699,20 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                 if (current.get("state") == "running" or current.get("background_sync", {}).get("state") == "running"
                         or current.get("batch_organize", {}).get("state") == "running"):
                     raise HTTPException(status_code=409, detail="课程任务已开始，请等待任务结束后再保存账号。")
+                reward_granted = False
+                platform_svc = getattr(app.state, "platform_service", None)
+                if platform_svc is not None and hasattr(platform_svc, "bind_campus"):
+                    if getattr(manager.settings, "platform_token", "") or getattr(platform_svc, "_activated", False):
+                        try:
+                            bind_res = platform_svc.bind_campus(username)
+                        except Exception as exc:
+                            if getattr(exc, "status_code", None) == 409:
+                                raise HTTPException(status_code=409, detail=str(exc)) from None
+                            bind_res = None  # Offline reward binding can be retried later.
+                        if isinstance(bind_res, dict):
+                            if bind_res.get("status_code") == 409:
+                                raise HTTPException(status_code=409, detail=bind_res.get("detail") or "当前账号已绑定其他教学网学号，请使用原学号连接。")
+                            reward_granted = bool(bind_res.get("reward_granted"))
                 try:
                     write_env_values(env_file_path(manager.settings),
                                      {"PKU_USERNAME": username, "PKU_PASSWORD": body.password})
@@ -2690,7 +2720,10 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
                     raise HTTPException(status_code=503, detail="账号验证成功，但本机配置无法保存，请检查磁盘空间和写入权限后重试。") from None
                 manager.settings.pku_username = username
                 manager.settings.pku_password = body.password
-            return {"configured": True, "verified": True}
+            result = {"configured": True, "verified": True}
+            if reward_granted:
+                result["invite_reward_granted"] = True
+            return result
         finally:
             credentials_lock.release()
 
@@ -2751,8 +2784,16 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def require_course_summary_tier() -> None:
+        platform_svc = getattr(app.state, "platform_service", None)
+        if platform_svc is not None and (
+            getattr(manager.settings, "platform_token", "") or getattr(platform_svc, "_activated", False)
+        ) and platform_svc.quota().get("tier") == "lite":
+            raise HTTPException(status_code=403, detail="课程总结为 Pro / Max 会员功能，当前 Lite 等级仅支持课堂普通转写。")
+
     @app.post("/api/campus/notion/summaries")
     def notion_summaries() -> dict:
+        require_course_summary_tier()
         try:
             return manager.start_course_summaries()
         except ValueError as exc:
@@ -2760,6 +2801,7 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
 
     @app.post("/api/campus/courses/{course_id}/summary")
     def campus_course_summary(course_id: str) -> dict:
+        require_course_summary_tier()
         try:
             return manager.start_course_summaries(course_id)
         except ValueError as exc:

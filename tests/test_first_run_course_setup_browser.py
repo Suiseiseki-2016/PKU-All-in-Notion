@@ -11,7 +11,7 @@ playwright = pytest.importorskip('playwright.sync_api')
 
 @pytest.mark.parametrize('width', [390, 1280])
 @pytest.mark.parametrize('failed_catalog', ['empty', 'read_only'])
-def test_empty_account_can_sync_retry_and_use_local_courses_from_welcome(width, failed_catalog, tmp_path):
+def test_empty_account_can_sync_retry_and_use_local_courses(width, failed_catalog, tmp_path):
     configured, synced, home = False, False, None
     sync_attempts, writes = 0, []
     course = {'id': '_fixture_1', 'title': '测试课程', 'recordings': 0,
@@ -71,8 +71,8 @@ def test_empty_account_can_sync_retry_and_use_local_courses_from_welcome(width, 
             page = browser.new_page(viewport={'width': width, 'height': 900})
             page.route('http://panel.test/**', serve)
             page.goto('http://panel.test/app')
-            playwright.expect(page.locator('.welcome-screen')).to_be_visible()
-            page.locator('[data-action="welcome-start"]').click()
+            playwright.expect(page.locator('.campus-setup')).to_be_visible()
+            page.locator('.campus-setup [data-action="campus-account-settings"]').click()
             page.locator('#recording-username').fill('fixture-student')
             page.locator('#recording-password').fill('fixture-password')
             page.locator('[data-action="recording-save-credentials"]').click()
@@ -106,9 +106,9 @@ def test_empty_account_can_sync_retry_and_use_local_courses_from_welcome(width, 
             browser.close()
 
 
-@pytest.mark.parametrize('entry', ['welcome-loading', 'login', 'register'])
+@pytest.mark.parametrize('entry', ['session-loading', 'login', 'register'])
 def test_verified_new_user_goes_directly_to_campus_credentials(entry):
-    signed_in = entry == 'welcome-loading'
+    signed_in = entry == 'session-loading'
     verified = entry != 'register'
     held_quota = []
     posts = []
@@ -129,7 +129,7 @@ def test_verified_new_user_goes_directly_to_campus_credentials(entry):
             return
         body = {}
         if path == '/api/platform/quota':
-            if entry == 'welcome-loading':
+            if entry == 'session-loading':
                 held_quota.append(route)
                 return
             body = quota()
@@ -150,15 +150,14 @@ def test_verified_new_user_goes_directly_to_campus_credentials(entry):
             page = browser.new_page(viewport={'width': 1280, 'height': 900})
             page.route('http://panel.test/**', serve)
             page.goto('http://panel.test/app')
-            welcome_action = 'welcome-skip' if entry == 'login' else 'welcome-start'
-            page.locator(f'[data-action="{welcome_action}"]').click()
-            if entry == 'welcome-loading':
+            if entry == 'session-loading':
                 playwright.expect(page.locator('#auth-form')).to_be_visible()
                 assert len(held_quota) == 1
                 held_quota.pop().fulfill(body=json.dumps(quota()), content_type='application/json')
+                page.locator('.campus-setup [data-action="campus-account-settings"]').click()
             else:
                 if entry == 'register':
-                    page.locator('.auth-switches [data-action="auth-mode-register"]').click()
+                    page.locator('.auth-mode-tabs [data-action="auth-mode-register"]').click()
                 page.locator('#auth-email').fill('new@example.test')
                 page.locator('#auth-password').fill('fixture-password')
                 if entry == 'register':
@@ -174,7 +173,7 @@ def test_verified_new_user_goes_directly_to_campus_credentials(entry):
             playwright.expect(page.locator('#recording-username')).to_be_visible()
             playwright.expect(page.locator('#recording-password')).to_be_visible()
             playwright.expect(page.locator('.sidebar')).to_contain_text('AI 点 0')
-            # Consuming welcome intent must leave later navigation alone.
+            # Completing setup must leave later navigation alone.
             page.locator('.sidebar [data-action="open-dashboard"]').click()
             playwright.expect(page.get_by_role('heading', name='我的课程', exact=True)).to_be_visible()
         finally:

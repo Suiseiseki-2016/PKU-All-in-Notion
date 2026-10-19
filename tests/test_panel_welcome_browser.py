@@ -11,7 +11,7 @@ STATIC = Path(__file__).parents[1] / "pku_sync/panel/static"
 
 
 @pytest.mark.parametrize("width", [390, 1280])
-def test_welcome_persistence_reopen_and_released_navigation(width, tmp_path):
+def test_direct_login_and_released_navigation(width, tmp_path):
     script = (STATIC / "app.js").read_text("utf-8").rstrip()
     script = script[:-5] + "window.__uiTest = {state:state, render:render};})();"
     with playwright.sync_playwright() as driver:
@@ -36,17 +36,15 @@ def test_welcome_persistence_reopen_and_released_navigation(width, tmp_path):
                 page.add_script_tag(content=script)
 
             load()
-            playwright.expect(page.locator(".welcome-steps li")).to_have_count(3)
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-            page.screenshot(path=str(tmp_path / f"welcome-{width}.png"), full_page=True)
-            page.locator('[data-action="welcome-start"]').click()
             playwright.expect(page.locator("#auth-form")).to_be_visible()
+            playwright.expect(page.locator('.auth-switches button')).to_have_count(1)
+            playwright.expect(page.locator('.auth-switches')).to_contain_text('忘记密码')
+            playwright.expect(page.get_by_text('使用引导', exact=True)).to_have_count(0)
+            playwright.expect(page.locator('.welcome-screen')).to_have_count(0)
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            page.screenshot(path=str(tmp_path / f"login-{width}.png"), full_page=True)
             load()
             playwright.expect(page.locator("#auth-form")).to_be_visible()
-            playwright.expect(page.locator(".welcome-screen")).to_have_count(0)
-            page.locator('[data-action="open-welcome"]').click()
-            playwright.expect(page.locator("#welcome-heading")).to_be_focused()
-            page.locator('[data-action="welcome-skip"]').click()
             # Let initial failed reads finish before injecting a cached course.
             page.wait_for_function("window.__uiTest.state.quota === null")
             page.evaluate("""() => {

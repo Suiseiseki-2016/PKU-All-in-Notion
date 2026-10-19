@@ -210,7 +210,7 @@ def test_portal_first_layout_and_account_settings():
             assert page.locator(".campus-centers").evaluate(
                 "el => !!(el.compareDocumentPosition(document.querySelector('#course-lessons')) & Node.DOCUMENT_POSITION_FOLLOWING)")
             page.locator('[data-action="campus-open-lesson"][data-recording="sep29"]').click()
-            playwright.expect(page.get_by_role("button", name="收起本讲总结")).to_be_visible()
+            playwright.expect(page.get_by_role("button", name="收起本讲笔记")).to_be_visible()
             playwright.expect(page.locator('.study-markdown')).to_contain_text('第五讲总结')
             assert page.get_by_role("link", name="下载原始录像").get_attribute("href") == "/api/recordings/sep29/video"
             assert page.locator('.recording-row .course-meta').first.inner_text() == '第 1 节课'

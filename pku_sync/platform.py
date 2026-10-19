@@ -133,6 +133,48 @@ def _clear_session(settings) -> None:
     settings.platform_token = ""
 
 
+def _extract_code_from_input(raw: str) -> str:
+    """Extract a gift token, invite code, or redeem code from a full URL or raw string."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    # Match /gift/<token> or /invite/<code> anywhere in a pasted URL or path
+    match = re.search(r"/(?:gift|invite|redeem)/([A-Za-z0-9_-]+)", text)
+    if match:
+        return match.group(1)
+    # Match ?gift=... or ?invite=... or ?code=...
+    qmatch = re.search(r"[?&](?:gift|invite|code)=([A-Za-z0-9_-]+)", text)
+    if qmatch:
+        return qmatch.group(1)
+    return text
+
+
+_OPTIONAL_ACCOUNT_KEYS = (
+    "tier",
+    "tier_expires_at",
+    "basic_seconds_remaining",
+    "advanced_seconds_remaining",
+    "weekly_rollover_seconds",
+    "next_weekly_refill_at",
+    "invite_code",
+    "invite_url",
+    "invited_count",
+    "invited_by",
+    "campus_bound",
+    "campus_id_masked",
+    "invite_reward_pending",
+    "invite_pending_campus_reward",
+)
+
+
+def _copy_optional_account_fields(payload: dict, result: dict, settings=None) -> None:
+    for key in _OPTIONAL_ACCOUNT_KEYS:
+        if key in payload and payload.get(key) is not None:
+            result[key] = payload.get(key)
+    if settings is not None and result.get("invite_code") and not result.get("invite_url"):
+        result["invite_url"] = _endpoint(settings.cloud_transcribe_url, "/invite/" + result["invite_code"])
+
+
 def _auth_session_payload(payload: dict, settings) -> dict:
     token = payload.get("platform_token")
     email = payload.get("email")
@@ -144,11 +186,13 @@ def _auth_session_payload(payload: dict, settings) -> dict:
     if not isinstance(verified, bool):
         raise PlatformError("云端返回异常，请联系管理员")
     _persist_session(settings, token.strip())
-    return {
+    result = {
         "email": email.strip().lower(),
         "email_verified": verified,
         "active": True,
     }
+    _copy_optional_account_fields(payload, result, settings)
+    return result
 
 
 def _profile_headers(settings) -> dict[str, str] | None:
@@ -263,7 +307,7 @@ def activate(code: str, settings) -> dict:
     Legacy pilot path: the code creates an anonymous session. Product accounts
     should use ``redeem`` after email+password login instead.
     """
-    clean_code = code.strip()
+    clean_code = _extract_code_from_input(code)
     if not clean_code:
         raise PlatformError("请输入兑换码")
     url = _endpoint(settings.cloud_transcribe_url, "/v1/activate")
@@ -282,12 +326,16 @@ def activate(code: str, settings) -> dict:
     return {"transcribe_seconds_remaining": seconds}
 
 
-def register(email: str, password: str, settings) -> dict:
+def register(email: str, password: str, settings, *, invite_code: str = "") -> dict:
     """Create a product account; session token is stored locally like activate."""
     url = _endpoint(settings.cloud_transcribe_url, "/v1/auth/register")
+    body: dict[str, str] = {"email": email, "password": password}
+    clean_invite = _extract_code_from_input(invite_code)
+    if clean_invite:
+        body["invite_code"] = clean_invite
     try:
         response = _post(
-            url, json={"email": email, "password": password}, timeout=30
+            url, json=body, timeout=30
         )
     except httpx.HTTPError as exc:
         raise PlatformError("无法连接云端服务，请稍后重试") from exc
@@ -359,6 +407,7 @@ def auth_me(settings) -> dict:
         )
     if payload.get("llm_points_remaining") is not None:
         result["llm_points_remaining"] = payload.get("llm_points_remaining")
+    _copy_optional_account_fields(payload, result, settings)
     return result
 
 
@@ -387,8 +436,8 @@ def resend_verification(email: str, settings) -> dict:
 
 
 def redeem(code: str, settings) -> dict:
-    """Apply a recharge code to the logged-in product account (requires verify)."""
-    clean_code = code.strip()
+    """Apply a gift link, invite code, or recharge code to the logged-in product account."""
+    clean_code = _extract_code_from_input(code)
     if not clean_code:
         raise PlatformError("请输入兑换码")
     token = (settings.platform_token or "").strip()
@@ -408,6 +457,7 @@ def redeem(code: str, settings) -> dict:
             400: "兑换码无效或已使用",
             401: "登录已过期，请重新登录后兑换",
             403: "请先完成邮箱验证后再兑换额度",
+            409: "该邀请码或礼物链接已绑定过",
             429: "尝试次数过多，请稍后再试",
             502: "云端服务暂时不可用，请稍后重试",
             503: "云端服务暂时不可用，请稍后重试",
@@ -429,7 +479,92 @@ def redeem(code: str, settings) -> dict:
         },
     )
     settings.transcription_backend = "cloud"
-    return {"transcribe_seconds_remaining": seconds}
+    result = {"transcribe_seconds_remaining": seconds}
+    if payload.get("llm_points_remaining") is not None:
+        result["llm_points_remaining"] = payload.get("llm_points_remaining")
+    _copy_optional_account_fields(payload, result, settings)
+    for extra in ("kind", "reward_summary", "invite_bound"):
+        if extra in payload and payload.get(extra) is not None:
+            result[extra] = payload.get(extra)
+    return result
+
+
+def exchange_quota(hours: int, settings, *, target: str = "advanced") -> dict:
+    """Exchange AI points for transcription hours (10 AI points = 1 hour)."""
+    if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 100:
+        raise PlatformError("兑换小时数必须是正整数")
+    clean_target = (target or "advanced").strip().lower()
+    if clean_target not in {"basic", "advanced"}:
+        raise PlatformError("请选择兑换普通转写或高级转写时长")
+    token = (settings.platform_token or "").strip()
+    if not token:
+        raise PlatformError("请先登录后再兑换时长")
+    try:
+        response = _post(
+            _endpoint(settings.cloud_transcribe_url, "/v1/quota/exchange"),
+            headers={"Authorization": f"Bearer {token}"},
+            json={"hours": hours, "target": clean_target},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
+        raise PlatformError("无法连接云端服务，请稍后重试") from exc
+    if response.status_code != 200:
+        detail = _relay_detail(response, "")
+        messages = {
+            400: detail or "兑换参数无效",
+            401: "登录已过期，请重新登录后操作",
+            402: detail or "AI 点不足（10 AI 点可兑换 1 小时转写时长）",
+            403: "请先完成邮箱验证后再兑换额度",
+        }
+        error = PlatformError(messages.get(response.status_code, detail or "兑换没有成功，请稍后重试"))
+        error.status_code = response.status_code
+        raise error
+    payload = response.json()
+    seconds = payload.get("transcribe_seconds_remaining")
+    if not isinstance(seconds, int):
+        raise PlatformError("云端返回异常，请联系管理员")
+    result = {"transcribe_seconds_remaining": seconds}
+    if payload.get("llm_points_remaining") is not None:
+        result["llm_points_remaining"] = payload.get("llm_points_remaining")
+    _copy_optional_account_fields(payload, result, settings)
+    for extra in ("points_spent", "seconds_added", "target"):
+        if extra in payload and payload.get(extra) is not None:
+            result[extra] = payload.get(extra)
+    return result
+
+
+def bind_campus(student_id: str, settings) -> dict:
+    """Bind a verified PKU student ID to the current account to unlock invite rewards."""
+    clean_id = (student_id or "").strip()
+    if not clean_id:
+        raise PlatformError("请输入教学网账号（学号）")
+    token = (settings.platform_token or "").strip()
+    if not token:
+        return {"bound": False, "reason": "not_signed_in"}
+    try:
+        response = _post(
+            _endpoint(settings.cloud_transcribe_url, "/v1/auth/bind-campus"),
+            headers={"Authorization": f"Bearer {token}"},
+            json={"student_id": clean_id},
+            timeout=15,
+        )
+    except httpx.HTTPError:
+        return {"bound": False, "reason": "offline"}
+    if response.status_code != 200:
+        return {"bound": False, "status_code": response.status_code, "detail": _relay_detail(response, "")}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"bound": False, "reason": "invalid_response"}
+    if not isinstance(payload, dict):
+        return {"bound": False, "reason": "invalid_response"}
+    result = {"bound": bool(payload.get("campus_bound", False)), "reward_granted": bool(payload.get("reward_granted", False))}
+    if payload.get("transcribe_seconds_remaining") is not None:
+        result["transcribe_seconds_remaining"] = payload.get("transcribe_seconds_remaining")
+    if payload.get("llm_points_remaining") is not None:
+        result["llm_points_remaining"] = payload.get("llm_points_remaining")
+    _copy_optional_account_fields(payload, result, settings)
+    return result
 
 
 _DEFAULT_LLM_SYSTEM = "你是课程练习整理助手。只返回请求指定的 JSON。"
@@ -689,4 +824,5 @@ def quota(settings) -> dict:
         result["email_verified"] = bool(payload.get("email_verified"))
     if "legacy_activate" in payload:
         result["legacy_activate"] = bool(payload.get("legacy_activate"))
+    _copy_optional_account_fields(payload, result, settings)
     return result

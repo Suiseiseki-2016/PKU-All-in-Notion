@@ -15,38 +15,6 @@
   var settledQuotaRead = null;
   var POLL_INTERVAL_MS = 1500;
   var POLL_MAX_ATTEMPTS = 240;
-  var welcomeKey = "pku-panel-welcome-v1";
-  var welcomeOpen = true;
-  var welcomeStartPending = false;
-  try { welcomeOpen = window.localStorage.getItem(welcomeKey) !== "seen"; } catch (_) {}
-
-  function welcomeScreen() {
-    var copy = COPY.welcome;
-    return '<main class="welcome-screen" aria-labelledby="welcome-heading">' + brand(false) +
-      '<section class="welcome-intro"><p class="eyebrow">' + esc(copy.eyebrow) + '</p><h1 id="welcome-heading" tabindex="-1">' +
-      esc(copy.title) + '</h1><p>' + esc(copy.description) + '</p></section><ol class="welcome-steps">' +
-      copy.steps.map(function (step, index) {
-        return '<li><span class="welcome-number" aria-hidden="true">' + (index + 1) + '</span><h2>' +
-          esc(step.title) + '</h2><p>' + esc(step.body) + '</p></li>';
-      }).join('') + '</ol><footer class="welcome-footer"><p>' + esc(copy.note) + '</p><div>' +
-      button(copy.start, "welcome-start", { primary: true, icon: "arrow" }) +
-      button(copy.skip, "welcome-skip", { quiet: true }) + '</div></footer></main>';
-  }
-
-  function closeWelcome(start) {
-    welcomeOpen = false;
-    if (start) welcomeStartPending = true;
-    try { window.localStorage.setItem(welcomeKey, "seen"); } catch (_) {}
-    if (start && state.activated && state.campus.configured) state.view = "campus-account";
-    render();
-    var heading = document.querySelector('main h1, #auth-email');
-    if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
-    if (start && state.activated) {
-      var settings = document.querySelector('.campus-settings');
-      if (settings) settings.open = true;
-    }
-  }
-
   async function confirmAction(message) {
     // Tauri replaces window.confirm with a Promise. A Promise is truthy
     // before the user decides, so native actions must await a real choice.
@@ -371,7 +339,6 @@
   function openCampusSetupIfNeeded() {
     if (state.activated && accountVerified() && !state.campus.configured) {
       state.view = "campus-account";
-      welcomeStartPending = false;
     }
   }
 
@@ -426,6 +393,8 @@
         var old = (previousBackground.course_results || []).find(function (entry) { return entry.course_id === row.course_id; });
         return row.state === "done" && (!old || old.state !== "done");
       });
+      if (previous.state === 'running' && foreground.kind === 'sync' && foreground.state === 'done' ||
+          previousBackground.state === 'running' && state.recordings.background.state === 'done') showToast('课程目录已更新');
       // Terminal feedback must be visible before ancillary cache/quota reads.
       if (batchChanged || backgroundChanged || previous.state !== foreground.state) render();
       if (previous.state === "running" && foreground.state !== "running" || completedCourse ||
@@ -597,13 +566,14 @@
     ];
     var next = steps.find(function (step) { return !step[1]; });
     var nextAction = state.campus.demoConnection ? '' : !accountVerified() ? button("我已验证邮箱，刷新状态", "refresh-verification", { small: true }) :
-      !state.campus.configured ? button("设置教学网账号", "campus-account-settings", { small: true, primary: true }) :
+      !state.campus.configured ? (state.view === 'campus-account' ? '' : button("设置教学网账号", "campus-account-settings", { small: true, primary: true })) :
       !catalogReady ? (includeSyncAction === false ? '' : button(syncBusy ? "正在更新课程目录…" : "更新课程目录", "recording-sync", { small: true, primary: true, disabled: syncBusy })) :
       '';
     if (!next && state.view === 'campus-account') {
       nextAction = button('进入我的课程', 'open-dashboard', { small: true, primary: true });
     }
-    return '<section class="panel campus-setup"><h2>开始使用</h2><ul class="setup-steps">' +
+    return '<section class="panel campus-setup"><h2>开始使用</h2>' +
+      (!(state.view === 'campus-account' && (!state.campus.configured || state.recordings.editingCredentials)) ? pendingInviteRewardHint() : '') + '<ul class="setup-steps">' +
       steps.map(function (step) { return '<li><span class="setup-mark" aria-hidden="true">' + (step[1] ? '✓' : '○') + '</span><span>' + esc(step[0]) + '</span></li>'; }).join("") +
       '</ul><p>' + (state.campus.demoConnection ? '演示模式：此处不会创建真实页面。' :
         next ? '下一步：' + esc(next[0]) : '已就绪，可以从课程中选择录像按需整理。') + '</p>' + nextAction + '</section>';
@@ -643,7 +613,7 @@
 
   function openBatchOrganize(courseId) {
     var epoch = accountQuotaEpoch;
-    var panel = { open: true, loading: true, courseId: courseId || '', selected: {}, notesStrategy: 'topics', error: '' };
+    var panel = { open: true, loading: true, courseId: courseId || '', selected: {}, notesStrategy: isLiteTier() ? 'transcript' : 'topics', error: '' };
     state.batchOrganize = panel;
     render();
     refreshSettledQuota();
@@ -679,6 +649,8 @@
     if (panel.loading) return header + '<p role="status">正在读取录像与成本预估…</p></section>';
     if (!panel.preview) return header + '<p role="alert">' + esc(panel.error) + '</p>' +
       button('重新读取', 'batch-preview-retry', {small:true}) + '</section>';
+    var bundledQuota = state.quota || {};
+    var bundledNotes = Number(bundledQuota.transcribe_seconds_remaining) > 0 || Number(bundledQuota.tier_expires_at) * 1000 > Date.now();
     var useFlashForTranscript = panel.notesStrategy === 'transcript' && panel.preview.notes_model === 'qwen3.7-plus';
     var activeModel = useFlashForTranscript ? 'qwen3.5-flash' : panel.preview.notes_model;
     var items = selectedBatchItems();
@@ -686,8 +658,8 @@
     var minutes = 0, minPoints = 0, maxPoints = 0, reuse = 0, estimated = false;
     items.forEach(function (item) {
       var lesson = item.lesson;
-      var lessonMinPoints = useFlashForTranscript ? 1 : lesson.estimated_points_min;
-      var lessonMaxPoints = useFlashForTranscript ? 2 : lesson.estimated_points_max;
+      var lessonMinPoints = bundledNotes ? 0 : useFlashForTranscript ? 1 : lesson.estimated_points_min;
+      var lessonMaxPoints = bundledNotes ? 0 : useFlashForTranscript ? 2 : lesson.estimated_points_max;
       minutes += lesson.estimated_transcribe_minutes;
       minPoints += lessonMinPoints; maxPoints += lessonMaxPoints;
       if (lesson.transcript_available) reuse += 1;
@@ -721,8 +693,8 @@
         (course.read_only ? '<p class="form-note">' + esc(course.read_only_message) + '</p>' : '') +
         '<details class="batch-course-lessons" data-persistent-disclosure="batch-course-' + esc(course.course_id) + '"><summary>展开选择具体讲次</summary>' +
         course.lessons.map(function (lesson) {
-          var lessonMinPoints = useFlashForTranscript ? 1 : lesson.estimated_points_min;
-          var lessonMaxPoints = useFlashForTranscript ? 2 : lesson.estimated_points_max;
+          var lessonMinPoints = bundledNotes ? 0 : useFlashForTranscript ? 1 : lesson.estimated_points_min;
+          var lessonMaxPoints = bundledNotes ? 0 : useFlashForTranscript ? 2 : lesson.estimated_points_max;
           return '<label class="batch-lesson"><input type="checkbox" data-action="batch-toggle-lesson"' + attrs + ' data-recording="' + esc(lesson.id) + '"' +
             (panel.selected[batchLessonKey(course.course_id, lesson.id)] ? ' checked' : '') + (!lesson.eligible ? ' disabled' : '') +
             '><span><strong>' + esc(lesson.date) + ' ' + esc(lesson.title) + '</strong><small>' +
@@ -734,7 +706,7 @@
     var running = state.recordings.batch.state === 'running' || panel.starting;
     return header + '<div class="batch-selection-actions">' + button('全选待整理', 'batch-select-pending', {small:true, quiet:true}) +
       button('全选全部讲次', 'batch-select-all', {small:true, quiet:true}) + button('清空选择', 'batch-select-none', {small:true, quiet:true}) +
-      '<label>笔记样式 <select data-batch-note-style><option value="topics"' + (panel.notesStrategy === 'topics' ? ' selected' : '') +
+      '<label>笔记样式 <select data-batch-note-style><option value="topics"' + (panel.notesStrategy === 'topics' ? ' selected' : '') + (isLiteTier() ? ' disabled' : '') +
       '>知识点图文笔记</option><option value="transcript"' + (panel.notesStrategy === 'transcript' ? ' selected' : '') + '>保留讲述顺序</option></select></label></div>' +
       summary + '<div class="batch-course-list">' + (courses || '<p>当前没有可整理的录像。</p>') + '</div>' +
       (panel.error ? '<p role="alert">' + esc(panel.error) + '</p>' : '') +
@@ -791,6 +763,12 @@
       }).join('') + '</ul></details></section>';
   }
 
+  function lastCampusSync() {
+    var times = state.campus.courses.map(function (course) { return course.synced_at; }).filter(function (value) { return parseTime(value); });
+    times.sort(function (a, b) { return parseTime(b) - parseTime(a); });
+    return times.length ? (Date.now() - parseTime(times[0]).getTime() < 60000 ? '刚刚' : friendlyTime(times[0])) : '尚未更新';
+  }
+
   function campusDashboardScreen() {
     var query = state.campus.query.trim().toLowerCase();
     var visible = state.campus.courses.filter(function (course) { return !query || (course.title + " " + course.code + " " + course.term + " " + course.id).toLowerCase().includes(query); });
@@ -804,7 +782,7 @@
         '</span><div class="course-content"><span class="course-meta">' + esc(titleTerm ? titleTerm[1] : course.term || '本学期') + classLabel + '</span><h3>' + formatCourseTitleMarkup(course.title) +
         '</h3><p>' + esc(course.recordings) + ' 节课 · ' + esc(course.assignments || 0) + ' 项正式作业 · ' + esc(course.announcements || 0) + ' 则通知' +
         (course.calendar_items ? ' · ' + esc(course.calendar_items) + ' 项日历事项' : '') + '</p>' +
-        (course.read_only ? '<p class="course-readonly-note" role="status">' + esc(course.read_only_message || "教学网读取尚未完成；已有内容保留为只读，请更新这门课。") + '</p>' : '') + '</div><div class="course-card-footer"><details class="course-meta-details" data-persistent-disclosure="course-meta-' + esc(course.id) + '"><summary>课程信息</summary><p>' +
+        (course.read_only ? '<p class="course-readonly-note" role="status">' + cachedCourseNotice(course) + '</p>' : '') + '</div><div class="course-card-footer"><details class="course-meta-details" data-persistent-disclosure="course-meta-' + esc(course.id) + '"><summary>课程信息</summary><p>' +
         esc(course.code ? '课程号 ' + (course.code.length > 14 ? course.code.slice(0, 8) + '…' + course.code.slice(-4) : course.code) : '课程号未提供') + (course.term ? ' · ' + esc(course.term) : '') +
         (course.id ? ' · 教学班 …' + esc(course.id.slice(-6)) : '') + '</p><p>目录更新：' +
         esc(course.synced_at ? course.synced_at.slice(0, 10) : "尚未更新") + '</p></details>' +
@@ -824,7 +802,7 @@
       '<div class="empty-materials">还没有课程。连接教学网账号后，点击「更新课程目录」。</div>';
     return '<div class="topline"><div><h1 class="page-title">我的课程</h1><p class="page-desc">查看作业与资料，按需整理课堂笔记。</p></div></div>' +
       (!(state.campus.configured && state.campus.courses.length) ? campusSetupGuide(false) : '') +
-      '<section class="panel" aria-label="课程列表"><div class="course-list-toolbar"><span class="course-count">' + (query ? '找到 ' + visible.length : state.campus.courses.length) + ' 门课程</span>' +
+      '<section class="panel" aria-label="课程列表"><div class="course-list-toolbar"><div class="course-list-meta"><span class="course-count">' + (query ? '找到 ' + visible.length : state.campus.courses.length) + ' 门课程</span><span class="course-last-sync"> · 上次更新：' + esc(lastCampusSync()) + '</span></div><div class="course-list-actions">' +
       button("更新课程目录", "recording-sync", { small: true, primary: true,
         disabled: !state.campus.configured,
         attrs: { "aria-disabled": state.recordings.backgroundPending || state.recordings.syncPending || state.recordings.task.state === "running" || state.recordings.background.state === "running",
@@ -833,7 +811,7 @@
       (state.campus.courses.some(function (course) { return course.recordings > 0; }) ?
         button(state.batchOrganize && state.batchOrganize.open ? '收起一键整理' : '一键整理笔记', 'toggle-batch-organize',
           {small:true, quiet:Boolean(state.batchOrganize && state.batchOrganize.open)}) : '') +
-      '</div>' + recordingTaskStatus() + backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel() +
+      '</div></div>' + recordingTaskStatus() + backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel() +
        (state.campus.courses.some(function (course) { return !course.synced_at; }) ?
          '<p class="form-note hint">部分课程尚未更新，请先更新目录。</p>' : '') +
        (state.campus.courses.length ? '<label class="campus-search-label">查找课程<input class="text-input" type="search" data-campus-search placeholder="输入课程名或课程号" value="' + esc(state.campus.query) + '"></label>' : '') + (state.recordings.error ? '<p role="alert">' + esc(state.recordings.error) + '</p>' : '') +
@@ -1075,8 +1053,8 @@
         '<div class="empty-materials lecture-empty-materials"><p>本讲尚未关联课件</p><small>可从教学网选择课件、从电脑上传，或按视频关键帧匹配。</small></div>') +
       '<div class="lecture-materials-toolbar">' + button('从教学网选择课件', 'lecture-toggle-material-picker',
         {small:true, quiet:true, attrs:Object.assign({'aria-expanded':String(lectureMaterialPicker.recording === lesson.id)}, attrs)}) +
-      '<label class="btn btn-small btn-quiet lecture-upload-label">上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)<input type="file" data-lecture-local-upload="' +
-        esc(lesson.id) + '" accept=".pdf,.pptx,.docx,.md,.txt" multiple hidden' + (busy ? ' disabled' : '') + '></label></div>' + picker + '</section>';
+      '<label class="btn btn-small btn-quiet lecture-upload-label"' + ((state.quota || {}).tier !== 'max' ? ' role="button" tabindex="0" data-action="membership-upgrade" data-tier="Max" data-feature="上传补充材料"' : '') + '>Max · 上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)<input type="file" data-lecture-local-upload="' +
+        esc(lesson.id) + '" accept=".pdf,.pptx,.docx,.md,.txt" multiple hidden' + (busy || (state.quota || {}).tier !== 'max' ? ' disabled' : '') + '></label></div>' + picker + '</section>';
   }
 
   function updateLectureMaterials(url, options) {
@@ -1102,7 +1080,15 @@
       });
   }
 
+  var proCenterNotice = "当前为 Lite 等级（仅含课堂普通转写），升级 Pro / Max 可完整使用作业管理、DDL 与通知中心功能";
+
+  function proCenterBadge() {
+    return isLiteTier() ? ' <span class="status-badge tier-pro">Pro</span>' : '';
+  }
+
   function campusOfficialSections(course, section) {
+    var lite = isLiteTier();
+    var tierNotice = lite ? '<p class="tier-feature-notice" role="status">' + proCenterNotice + '</p>' : '';
     var updated = course.synced_at_label || "尚未更新";
     var noticeState = course.section_states && course.section_states.announcements;
     var noticeStatus = course.announcements_status === "unavailable" ? "教学网未开放通知功能，仍需查看教学网。" :
@@ -1119,7 +1105,7 @@
       noticeWarning = ["not_synced", "error", "cached"].indexOf(noticeState.state) >= 0;
       if (noticeWarning) noticeStatus = noticeState.message;
     }
-    var notices = '<section class="panel" id="course-notices"><h2>通知中心</h2>' +
+    var notices = '<section class="panel" id="course-notices"><h2>通知中心' + proCenterBadge() + '</h2>' + tierNotice +
       (noticeWarning ? '<p class="form-note hint">' + esc(noticeStatus) + '</p>' : '') +
       (noticeItems ? '<ul class="official-list">' + noticeItems + '</ul>' :
         (noticeWarning ? '' : '<p>' + esc(noticeStatus) + '</p>')) + '</section>';
@@ -1159,7 +1145,7 @@
           '') +
         (source ? button(status && status.loading ? '正在读取提交状态…' : '读取教学网提交状态', 'campus-assignment-status', {
           small: true, disabled: Boolean(status && status.loading), attrs: { 'data-assignment': item.content_id } }) : '') +
-        (item.content_id && item.source !== "calendar" ? button("准备作业文件", "campus-prepare-assignment", { small: true,
+        (item.content_id && item.source !== "calendar" ? button("准备作业文件", "campus-prepare-assignment", { small: true, disabled: lite,
           attrs: { "data-assignment": item.content_id } }) : '') + '</div>' +
         (status ? '<p role="status">' + esc(status.label || '教学网当前提交状态未确认') +
           (status.checked_at ? ' · 核对时间：' + esc(status.checked_at) : '') + '</p>' +
@@ -1219,7 +1205,7 @@
           if (suggestedName) {
             if (!/\.zip$/i.test(suggestedName)) suggestedName += '.zip';
             filenameSuggestion = button('套用命名规则', 'campus-apply-filename-rule', {
-              small: true, quiet: true, attrs: { 'data-filename-template': suggestedName }
+              small: true, quiet: true, disabled: lite, attrs: { 'data-filename-template': suggestedName }
             });
           }
         }
@@ -1238,7 +1224,7 @@
       preparation = '<div class="assignment-preparation"><h3>准备作业文件 · ' + esc(selectedItem.title) +
         '</h3><p>按老师要求选择本地答案文件。ZIP 模式会将所选文件打包；单文件模式保留原文件格式。在线作答或随堂考勤请使用教学网原入口。草稿只保存在本机，准备阶段不会提交。</p>' + rarHint +
         button(state.campus.submission.analysisBusy ? '正在识别要求…' : 'AI 识别作业要求', 'campus-analyze-requirements',
-          { small: true, disabled: !!state.campus.submission.analysisBusy }) + analysisView +
+          { small: true, disabled: lite || !!state.campus.submission.analysisBusy }) + analysisView +
         (draft ? '<div role="status"><p>正式提交目标：' + esc(course.title) + ' · ' + esc(draft.assignment_title) +
           '</p><p>截止：' + esc(draft.due_at_label || draft.due_at || '教学网未公布，请核对原要求') +
           '</p><p>本地草稿：' + esc(draft.archive_name) + '</p><ul>' +
@@ -1248,7 +1234,7 @@
           (state.campus.submission.saveStatus ? '<p role="status" class="assignment-download-status" data-native-save="' + esc(state.campus.submission.saveStatus.state) + '" data-saved-sha256="' + esc(state.campus.submission.saveStatus.sha256 || '') + '">' + esc(state.campus.submission.saveStatus.message) + '</p>' : '') +
           '<label class="assignment-check"><input type="checkbox" id="assignment-reviewed"> 我已对照老师要求核对提交目标、文件名、文件内容和截止时间</label>' +
           button("确认提交到教学网", "campus-submit-assignment", { primary: true, small: true,
-            disabled: draft.state === "submitted" }) + (draft.state === "submitted" ? '<p>已发送提交请求，请在教学网查看回执。</p>' : '') +
+            disabled: lite || draft.state === "submitted" }) + (draft.state === "submitted" ? '<p>已发送提交请求，请在教学网查看回执。</p>' : '') +
           (draft.receipt_download_url ? '<a href="' + esc(draft.receipt_download_url) + '" download>下载教学网正式回执</a>' : '') +
           '</div>' :
           '<form id="assignment-prepare-form"><label>提交文件形式<select name="submission_mode"><option value="zip"' + (formValues.submission_mode === "zip" ? ' selected' : '') + '>ZIP 压缩包</option><option value="single_file"' + (formValues.submission_mode === "single_file" ? ' selected' : '') + '>单个原文件（PDF、Word 等）</option></select></label>' +
@@ -1259,7 +1245,7 @@
           '<p data-assignment-attachments>' + (formValues.attachments.length ? '已选择：' + esc(formValues.attachments.map(function (file) { return file.name; }).join('、')) : '尚未选择文件') + '</p>' +
           (formValues.submission_mode === "zip" ? '<p class="form-note">请加入老师要求的全部答案文件，再生成压缩包检查。</p>' :
             '<p class="form-note">请选择老师要求格式的答案文件；此处不会转换格式或改变原文件名。</p>') +
-          button("生成本地草稿并预检", "campus-build-draft", { primary: true, small: true }) + '</form>') +
+          button("生成本地草稿并预检", "campus-build-draft", { primary: true, small: true, disabled: lite }) + '</form>') +
         (state.campus.submission.error ? '<p role="alert">' + esc(state.campus.submission.error) + '</p>' : '') +
         '</div>';
     }
@@ -1267,7 +1253,7 @@
       course.assignments_status === "not_synced";
     var assignmentState = course.section_states && course.section_states.assignments;
     if (assignmentState) assignmentWarning = ["not_synced", "error", "cached"].indexOf(assignmentState.state) >= 0;
-    var assignments = '<section class="panel" id="course-assignments"><h2>作业中心</h2>' +
+    var assignments = '<section class="panel" id="course-assignments"><h2>作业中心' + proCenterBadge() + '</h2>' + tierNotice +
       (assignmentWarning ? '<p class="form-note hint">' + esc(assignmentState && assignmentState.message || '作业目录尚未完整读取；请到教学网核对正式要求和截止时间。') + '</p>' : '') +
       (assignmentItems ? '<h3>教学网作业与日历事项</h3><ul class="official-list">' + assignmentItems + '</ul>' :
         (assignmentWarning ? '' : '<p>教学网正式作业索引当前为 0 项；课程手册、通知或课堂要求仍可能包含课业。</p>')) +
@@ -1278,16 +1264,17 @@
       '<ul>' + (state.campus.receipts || []).map(function (item) {
         return '<li>' + esc(item.assignment_title) + ' · ' + esc(item.archive_name) + ' · ' + esc(item.verified_at) +
           (item.state === 'receipt_verified' ? ' · 回执已保存在本机，账号记录待核验 ' +
-            button('恢复回执保存', 'campus-recover-submission', { small: true, attrs: { 'data-draft': item.draft_id } }) :
+            button('恢复回执保存', 'campus-recover-submission', { small: true, disabled: lite, attrs: { 'data-draft': item.draft_id } }) :
             (item.download_url ? ' <a href="' + esc(item.download_url) + '" download>下载教学网正式回执</a>' : '')) + '</li>';
       }).join('') + '</ul>' + (state.campus.pendingSubmissions || []).map(function (item) {
         return '<p>' + esc(item.assignment_title) + ' · ' + esc(item.archive_name) + ' · 提交结果待核验。 ' +
-          button('核对未完成记录', 'campus-recover-submission', { small: true, attrs: { 'data-draft': item.draft_id } }) + '</p>';
+          button('核对未完成记录', 'campus-recover-submission', { small: true, disabled: lite, attrs: { 'data-draft': item.draft_id } }) + '</p>';
       }).join('') + button('刷新回执记录', 'campus-load-receipts', { small: true }) + '</details></section>';
     return section === "notices" ? notices : section === "assignments" ? assignments : notices + assignments;
   }
 
   function selectCampusAssignment(contentId) {
+    if (isLiteTier()) return guideMembership("Pro / Max", "作业与通知中心");
     state.campus.submission = { selectedId: contentId, draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } };
     render();
     var panel = document.querySelector(".assignment-preparation");
@@ -1327,6 +1314,7 @@
   }
 
   function recoverCampusSubmission(draftId) {
+    if (isLiteTier()) return guideMembership("Pro / Max", "作业与通知中心");
     var courseId = state.campus.courseId;
     if (!draftId) return;
     return requestJson('/api/campus/submission-drafts/' + encodeURIComponent(draftId) + '/recover', { method: 'POST' }).then(function (result) {
@@ -1345,6 +1333,7 @@
   }
 
   function prepareCampusAssignment() {
+    if (isLiteTier()) return guideMembership("Pro / Max", "作业与通知中心");
     var form = document.querySelector("#assignment-prepare-form");
     var selected = state.campus.submission.selectedId;
     if (!form || !selected || !form.reportValidity()) return;
@@ -1381,6 +1370,7 @@
   }
 
   async function analyzeCampusAssignmentRequirements() {
+    if (isLiteTier()) return guideMembership("Pro / Max", "作业与通知中心");
     var selected = state.campus.submission.selectedId;
     var courseId = state.campus.courseId;
     if (!selected || state.campus.submission.analysisBusy) return;
@@ -1415,6 +1405,7 @@
   }
 
   async function submitCampusAssignment() {
+    if (isLiteTier()) return guideMembership("Pro / Max", "作业与通知中心");
     var draft = state.campus.submission.draft;
     var checked = document.querySelector("#assignment-reviewed");
     if (!draft || !checked || !checked.checked) {
@@ -1703,7 +1694,7 @@
     var query = (item.query || '').trim();
     var content = highlightStudyText(studyMarkdown(item.markdown || '本讲尚无笔记，整理完成后即可阅读。', item.visuals), query, item.hitIndex);
     return '<section class="lecture-note-reader" aria-label="' + (lecture ? '本讲课堂笔记' : '课程总结预览') + '">' +
-      '<div class="reader-toolbar">' + button('收起阅读', 'campus-toggle-preview', {small:true, quiet:true, attrs:{'data-preview':key}}) +
+      '<div class="reader-toolbar">' +
       (item.markdown ? button(lecture ? '复制笔记全文' : '复制 Markdown', 'campus-copy-markdown', {small:true, attrs:{'data-preview':key}}) +
         button('下载 .md', 'campus-download-markdown', {small:true, quiet:true, attrs:{'data-preview':key}}) +
         '<input type="search" class="reader-search-input" data-reader-search="' + esc(key) + '" aria-label="搜索笔记内容" placeholder="搜索笔记内容" value="' + esc(item.query || '') + '">' +
@@ -1790,7 +1781,7 @@
       var topicLine = topicLabel ? '<p class="lesson-topic-line">' + esc(topicLabel) + '</p>' : '';
       if (section !== "lecture") {
         return '<article class="campus-lesson-page" data-lesson-card="' + esc(lesson.id) + '"><div><small>第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课 · ' + esc(lesson.date || "日期未提供") + '</small>' +
-          '<h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) + '</h3>' + topicLine + '<div class="lesson-status">' + (lesson.notes_available ? '<span class="recording-published">已有课堂总结</span>' :
+          '<h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) + '</h3>' + topicLine + '<div class="lesson-status">' + (lesson.notes_available ? '<span class="recording-published">已有课堂笔记</span>' :
             lesson.transcript_available ? '<span class="status-badge indexed">已生成转写</span>' : '<span class="status-badge reading">待整理笔记</span>') +
           ((lesson.materials || []).length ? '<small class="lesson-material-count">已关联 ' + esc(lesson.materials.length) + ' 份课件</small>' : '') + '</div></div>' +
           button("进入讲次", "campus-open-lesson", { small: true, attrs: { "data-recording": lesson.id } }) + '</article>';
@@ -1803,7 +1794,8 @@
         ' 分钟' : '';
       if (publishSaved) details += ' · 本机已有笔记与课堂画面';
       else if (lesson.transcript_available && !lesson.notes_available) details += ' · 已生成转写';
-      if (lesson.video_size) details += ' · 本地视频 ' + formatTransfer(lesson.video_size);
+      if (lesson.video_available && Number(lesson.video_size) > 0) details += ' · 本地视频 ' + formatTransfer(lesson.video_size);
+      else if (!lesson.duration_seconds && !lesson.unavailable_reason) details += ' · 在线回放';
       var metaText = lesson.title && lesson.date && String(lesson.title).indexOf(lesson.date) === 0
         ? details.replace(/^ · /, '') : (lesson.date || "日期未记录") + details;
       if (lesson.unavailable_reason) metaText += (metaText ? ' · ' : '') + lesson.unavailable_reason;
@@ -1814,10 +1806,10 @@
       return '<article class="recording-row"><div><span class="course-meta">第 ' + esc(course.lessons.indexOf(lesson) + 1) + ' 节课</span><h3>' + formatLessonTitleMarkup(lesson.title, lesson.date) +
         '</h3>' + topicLine + (metaText ? '<p>' + esc(metaText) + '</p>' : '') +
         lectureMaterialsBox(course, lesson) + '</div><div class="recording-row-actions">' +
-        '<div class="recording-primary-bar">' + (lesson.notes_available ? button(lessonPreviewOpen ? '收起本讲总结' : '阅读本讲总结', 'campus-preview-lecture-note', {small:true, primary:!lessonPreviewOpen, quiet:lessonPreviewOpen, attrs:{'data-recording':lesson.id}}) : '') + (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
-        (canRegenerate ? '' : button(lesson.notes_available ? "重新整理笔记" : "整理这节录像", "campus-process", { small: true, primary: !lesson.notes_available,
+        '<div class="recording-primary-bar">' + (lesson.notes_available ? button(lessonPreviewOpen ? '收起本讲笔记' : '阅读本讲笔记', 'campus-preview-lecture-note', {small:true, primary:!lessonPreviewOpen, quiet:lessonPreviewOpen, attrs:{'data-recording':lesson.id}}) : '') + (!publishExisting || canRegenerate ? recordingNoteStyle(lesson.id, Boolean(blocked)) : "") +
+        (canRegenerate ? button("重新整理笔记", "campus-regenerate", { small: true, quiet: true, disabled: Boolean(blocked), attrs: { "data-recording": lesson.id } }) : button(lesson.notes_available ? "重新整理笔记" : "生成本讲笔记", "campus-process", { small: true, primary: !lesson.notes_available,
               disabled: Boolean(blocked),
-              attrs: { "data-recording": lesson.id } })) + (blocked ? '<small class="action-reason">' + esc(blocked === (course.read_only_message || '教学网尚未完整读取，旧目录只读。') ? '请先更新这门课' : blocked) + '</small>' : '') + '</div><div class="recording-secondary-bar">' +
+              attrs: { "data-recording": lesson.id } })) + (blocked ? '<small class="action-reason">' + esc(blocked === (course.read_only_message || '教学网尚未完整读取，旧目录只读。') ? '请先更新这门课' : blocked) + '</small>' : '') + '</div><details class="lecture-more-actions" data-persistent-disclosure="lecture-tools-' + esc(lesson.id) + '"><summary>更多工具</summary><div class="recording-secondary-bar">' +
         (lesson.video_available || lesson['keyframe' + 's_available'] ? button('按关键帧匹配课件', 'campus-match-slides-keyframe' + 's', {small:true, quiet:true, disabled:courseTaskBusy(course.id), attrs:{'data-recording':lesson.id}}) : '') +
         (!lesson.duration_seconds && state.campus.configured ? button('读取时长', 'campus-estimate-duration', { small: true, quiet: true, attrs: { 'data-recording': lesson.id } }) : '') +
         (lesson.video_available
@@ -1828,7 +1820,7 @@
         (lesson.transcript_available || lesson.notes_ready ? button("核对术语", "campus-review-term", {
           small: true, quiet: true, attrs: { "data-recording": lesson.id, "aria-expanded": review ? "true" : "false" }
         }) : "") +
-        (canRegenerate ? button("重新整理笔记", "campus-regenerate", { small: true, quiet: true, disabled: Boolean(blocked), attrs: { "data-recording": lesson.id } }) : '') + '</div>' +
+        '</div></details>' +
         (lesson.transcript_reviewed_pending ? '<small class="recording-published">转写已修正，请重新整理笔记。</small>' : "") +
         '</div>' + previewReader(course.id + ':' + lesson.id, true) + review + '</article>';
     }).join("");
@@ -1851,7 +1843,7 @@
     var summary = course.summary && course.summary.title ? course.summary : null;
     var summaryControl = '<div class="course-summary-control">' +
       (summary && summary.title ? '<small>' + esc(summary.title) + '</small>' : "") +
-      button(summary ? "重新生成课程总结" : "生成课程总结", "campus-course-summary", {
+      button(isLiteTier() ? "Pro · 生成课程总结" : summary ? "重新生成课程总结" : "生成课程总结", "campus-course-summary", {
         small: true, quiet: Boolean(summary),
         disabled: courseTaskBusy(course.id) || state.campus.demoConnection,
         attrs: { "data-course": course.id }
@@ -1866,14 +1858,19 @@
           "style": courseTaskBusy(course.id) ? "opacity:.55;cursor:not-allowed;transform:none" : "" }
       }) + (course.lessons.length > 1 ? button('批量整理本课', 'open-course-batch-organize',
         {small:true, quiet:true, attrs:{'data-course':course.id}}) : '') + '</div></section>';
-    var notice = course.read_only ? '<section class="panel" role="status">' + esc(course.read_only_message || "教学网尚未完整读取；旧目录保留为只读，请更新这门课或打开教学网核对。") + '</section>' : '';
+    var notice = course.read_only ? '<section class="panel" role="status">' + cachedCourseNotice(course) + '</section>' : '';
     if (state.campus.loading) notice += '<p role="status">正在读取本课最新缓存；已有内容可继续浏览。</p>';
     if (state.campus.error) notice += '<p role="alert">' + esc(state.campus.error) + '</p>';
     if (state.recordings.error && (!state.recordings.errorCourseId || state.recordings.errorCourseId === course.id))
       notice += '<p role="alert">' + esc(state.recordings.error) + '</p>';
     notice += backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel();
     if (section === "assignments" || section === "notices") return header + hero + notice + recordingTaskStatus() + campusOfficialSections(course, section);
-    var summaryPreviewOpen = Boolean(readingPreviews[course.id + ':summary'] && readingPreviews[course.id + ':summary'].open);
+    var cachedSummary = readingPreviews[course.id + ':summary'];
+    var hasSummary = Boolean(summary || course.has_summary || (cachedSummary && cachedSummary.markdown && !cachedSummary.error));
+    var summaryPreviewOpen = Boolean(cachedSummary && cachedSummary.open);
+    var summaryReadControl = hasSummary ? button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结',
+      'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen,
+        attrs:{'data-course':course.id}}) : '<small class="form-note hint">暂未生成课程总结</small>';
     if (section === "materials") {
       var materialCount = course.lessons.reduce(function (count, lesson) {
         return count + (lesson.materials || []).length;
@@ -1889,7 +1886,7 @@
       var emptyMaterials = materialQuery && !linkedMaterials && !infoItems.length && !slideItems.length ?
         '<div class="empty-materials">没有找到匹配的课程资料。</div>' : '';
       return header + hero + notice + recordingTaskStatus() + '<section class="panel materials-summary-panel"><div class="materials-summary-copy"><strong>课程总结</strong><span>汇总已关联课件、课堂笔记与作业要求</span></div>' + summaryControl +
-        button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结', 'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen, attrs:{'data-course':course.id}}) +
+        summaryReadControl +
         previewReader(course.id + ':summary', false) + '</section>' + materialFilter + linkedMaterials + infoSection + pending + emptyMaterials;
     }
 
@@ -1903,7 +1900,7 @@
       }).length : 0;
       if (urgentCount > 0) count += ' · ' + urgentCount + ' 项即将截止';
       return '<a href="#course-' + entry[0] + '" data-action="campus-open-center" data-center="' + entry[0] + '"' +
-        (urgentCount > 0 ? ' data-urgent-assignments="' + urgentCount + '"' : '') + '><span class="center-title">' + esc(entry[1]) + '</span><small class="center-count">' + esc(count) + '</small><span class="center-arrow" aria-hidden="true">↗</span></a>';
+        (urgentCount > 0 ? ' data-urgent-assignments="' + urgentCount + '"' : '') + '><span class="center-title">' + esc(entry[1]) + (entry[0] !== 'materials' ? proCenterBadge() : '') + '</span><small class="center-count">' + esc(count) + '</small><span class="center-arrow" aria-hidden="true">↗</span></a>';
     }).join('');
     var activeTaskNotice = state.recordings.task.state === "running" || state.recordings.task.state === "failed" ||
       ["done", "partial", "cancelled"].indexOf(state.recordings.task.state) >= 0 && ["sync", "summary"].indexOf(state.recordings.task.kind) >= 0
@@ -1920,7 +1917,7 @@
       '<p>这些讲次已不在教学网现行目录中，原页面和学习内容会保留。</p><div class="campus-lesson-pages">' + historical + '</div></section>' : '';
     var spotlight = '<section class="panel course-summary-spotlight" aria-label="课程总结"><div class="summary-spotlight-header"><h2>课程总结</h2><span class="summary-progress">已整理 ' +
       course.lessons.filter(function (lesson) {return lesson.notes_available;}).length + ' / ' + course.lessons.length + ' 讲课堂笔记</span></div><p>汇总各讲核心概念、重点脉络与口头提醒，方便复习串讲与随时查阅。</p>' + summaryControl +
-      button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结', 'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen, attrs:{'data-course':course.id}}) + previewReader(course.id + ':summary', false) + '</section>';
+      summaryReadControl + previewReader(course.id + ':summary', false) + '</section>';
     return header + hero + spotlight + notice + activeTaskNotice + '<nav class="campus-centers" aria-label="课程内容">' + centers + '</nav>' +
       '<section id="course-lessons" class="campus-lesson-directory"><div class="section-label"><h2>每节课</h2><small>' + esc(course.lessons.length) + ' 节课</small>' +
       (showLessonFilter ? '<input type="search" class="lesson-filter-input" data-campus-lesson-filter aria-label="筛选讲次" placeholder="搜索日期、主题或课件" value="' + esc(state.campus.dateQuery || "") + '">' : '') + '</div>' +
@@ -2073,6 +2070,7 @@
   }
 
   async function startCourseSummary(courseId) {
+    if (isLiteTier()) return guideMembership("Pro / Max", "课程总结");
     if (courseTaskBusy(courseId)) {
       return showToast("请等待当前任务完成后再生成课程总结。");
     }
@@ -2096,7 +2094,7 @@
     var canRegenerate = Boolean(lesson.transcript_available && lesson.notes_available);
     var reuseExisting = Boolean(lesson.publish_ready && !lesson.video_available && !canRegenerate && !regenerate);
     var directOss = Boolean(state.recordings.directOss !== false && !lesson.transcript_available && !regenerate && !reuseExisting);
-    var notesStrategy = state.recordings.noteStrategyByKey[recordingId] || "topics";
+    var notesStrategy = isLiteTier() ? "transcript" : (state.recordings.noteStrategyByKey[recordingId] || "topics");
     return requestJson("/api/campus/courses/" + encodeURIComponent(course.id) + "/recordings/" + encodeURIComponent(recordingId) + "/process",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ direct_oss: reuseExisting ? false : directOss, regenerate: Boolean(regenerate), reuse_existing: reuseExisting }, reuseExisting ? {} : { notes_strategy: notesStrategy })) }).then(function (result) {
         if (!result.ok || !result.body) return showToast((result.body && result.body.detail) || "整理没有开始。");
@@ -2134,32 +2132,36 @@
       state.authMode === "forgot"
         ? ""
         : '<label class="field-label" for="auth-password">' +
-          esc(copy.password_label) +
+          esc(state.authMode === "register" ? (copy.password_register_label || copy.password_label) : copy.password_label) +
           '</label><input id="auth-password" type="password" class="text-input" autocomplete="' +
           (state.authMode === "register" ? "new-password" : "current-password") +
-          '" placeholder="' +
+          '"' + (state.authMode === "register" ? ' minlength="8"' : '') + ' placeholder="' +
           esc(copy.password_placeholder) +
-          '" required>';
+          '" required>' +
+          (state.authMode === "register"
+            ? '<p class="form-note hint" data-password-hint>' + esc(copy.password_hint || "密码长度至少 8 位，建议包含字母与数字。") + "</p>"
+            : "");
     var confirmField = state.authMode === "register"
       ? '<label class="field-label" for="auth-password-confirm">' +
         esc(copy.confirm_password_label) +
-        '</label><input id="auth-password-confirm" type="password" class="text-input" autocomplete="new-password" placeholder="' +
+        '</label><input id="auth-password-confirm" type="password" class="text-input" autocomplete="new-password" minlength="8" placeholder="' +
         esc(copy.confirm_password_placeholder) +
         '" required>'
+      : "";
+    var inviteField = state.authMode === "register"
+      ? '<label class="field-label" for="auth-invite">' +
+        esc(copy.invite_label || "邀请码或邀请链接（选填）") +
+        '</label><input id="auth-invite" type="text" class="text-input" autocomplete="off" placeholder="' +
+        esc(copy.invite_placeholder || "填入同学分享的邀请码或链接，绑定新学号后双方各得 1 个月额度") +
+        '">'
       : "";
     var switches = "";
     if (state.authMode === "login") {
       switches =
         '<div class="auth-switches">' +
-        button(mode.switch_register, "auth-mode-register", { quiet: true, small: true }) +
         button(mode.switch_forgot, "auth-mode-forgot", { quiet: true, small: true }) +
         "</div>";
-    } else if (state.authMode === "register") {
-      switches =
-        '<div class="auth-switches">' +
-        button(mode.switch_login, "auth-mode-login", { quiet: true, small: true }) +
-        "</div>";
-    } else {
+    } else if (state.authMode !== "register") {
       switches =
         '<div class="auth-switches">' +
         button(mode.switch_login, "auth-mode-login", { quiet: true, small: true }) +
@@ -2167,11 +2169,11 @@
     }
     return (
       '<main class="onboarding">' +
-      '<section class="onboarding-aside" aria-labelledby="welcome-title">' +
+      '<section class="onboarding-aside" aria-labelledby="auth-aside-title">' +
       brand(false) +
       '<div class="aside-copy"><p class="eyebrow">' +
       esc(copy.aside.eyebrow) +
-      '</p><h1 id="welcome-title">' +
+      '</p><h1 id="auth-aside-title">' +
       esc(copy.aside.title_lines[0]) +
       "<br>" +
       esc(copy.aside.title_lines[1]) +
@@ -2203,12 +2205,13 @@
       '" required>' +
       passwordField +
       confirmField +
+      inviteField +
       '<div class="auth-actions">' +
       button(state.authPending ? mode.submitting : mode.submit, "auth-submit", { primary: true, type: "submit", disabled: state.authPending }) +
       "</div>" +
       '<p id="auth-help" role="' + (state.noticeKind === "error" ? "alert" : "status") + '" class="' + noteClass + '">' + esc(note) + "</p>" +
       "</form>" +
-      switches + button("使用引导", "open-welcome", { quiet: true, small: true }) +
+      switches +
       "</div></section></main>"
     );
   }
@@ -2274,6 +2277,42 @@
     );
   }
 
+  function isLiteTier() {
+    return ['pro', 'max'].indexOf(String((state.quota || {}).tier || 'free').toLowerCase()) < 0;
+  }
+
+  function membershipValidity(quota) {
+    var value = quota.tier_expires_at || quota.membership_expires_at || quota.subscription_expires_at || quota.expires_at || quota.active_until;
+    var numeric = Number(value);
+    var date = value ? new Date(Number.isFinite(numeric) ? (numeric < 1e12 ? numeric * 1000 : numeric) : value) : null;
+    if (!date || isNaN(date.getTime())) return Number(quota.weekly_rollover_seconds) > 0 ? '按周充能' : '长期有效';
+    var stamp = date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+    return (date.getTime() < Date.now() ? '会员已到期 ' : '有效期至 ') + stamp;
+  }
+
+  function guideMembership(tier, feature) {
+    var mobile = document.querySelector('.mobile-account-menu');
+    var mobileVisible = mobile && mobile.getClientRects().length > 0;
+    if (mobileVisible) mobile.open = true;
+    var drawer = document.querySelector('.sidebar .account-drawer');
+    if (!mobileVisible && drawer) drawer.open = true;
+    var field = document.getElementById(mobileVisible ? 'code-mobile' : 'code');
+    if (field) { field.scrollIntoView({block:'center'}); field.focus({preventScroll:true}); }
+    else {
+      var verify = document.querySelector((mobileVisible ? '.mobile-account-content' : '.sidebar') + ' [data-action="refresh-verification"]');
+      if (verify) { verify.scrollIntoView({block:'center'}); verify.focus({preventScroll:true}); }
+    }
+    showToast(feature + '需 ' + tier + ' 会员。' + (accountVerified() ?
+      '请在「会员续费 / 兑换码」输入续费码或礼包链接，即可升级。' : '请先验证邮箱，再在「会员续费 / 兑换码」兑换升级。'));
+  }
+
+  function cachedCourseNotice(course) {
+    if (!course.read_only) return '';
+    return '<span>' + esc(!state.campus.configured ? '当前展示本机已缓存的课程内容；如需同步最新课件与录像，请先连接教学网。' :
+      course.read_only_message || '当前展示本机已缓存的课程内容；如需同步最新课件与录像，请先连接教学网。') + '</span>' +
+      (!state.campus.configured ? button('连接教学网', 'open-campus-setup', {small:true, quiet:true}) : '');
+  }
+
   function quotaCard(location) {
     var suffix = location === "mobile" ? "-mobile" : "";
     var copy = COPY.account;
@@ -2289,33 +2328,45 @@
     }
     var email = accountEmail();
     var verified = accountVerified();
-    var statusLine = email
-      ? '<p class="account-email">' +
-        esc(email) +
-        "</p><p class=\"account-verify\">" +
-        esc(verified ? copy.verified : copy.unverified) +
-        "</p>"
-      : "<p>" + esc(copy.verified) + "</p>";
-    var balance =
-      quota.available === false
-        ? "<p>额度暂时无法读取</p>"
-        : "<p>转写 " +
-          esc(
-            Math.floor(
-              (quota.transcribe_seconds_remaining === undefined
-                ? 0
-                : quota.transcribe_seconds_remaining) / 60
-            )
-          ) +
-          " 分钟</p><p>AI 点 " +
-          esc(quota.llm_points_remaining === undefined ? 0 : quota.llm_points_remaining) +
-          "</p>";
+    var tierKey = String(quota.tier || "").toLowerCase();
+    var tierLabel = tierKey && copy.tier_labels && copy.tier_labels[tierKey]
+      ? copy.tier_labels[tierKey]
+      : tierKey ? tierKey.toUpperCase() : "";
+    var tierBadge = tierLabel
+      ? '<span class="tier-badge tier-' + esc(tierKey || "pro") + '" data-account-tier="' + esc(tierKey) + '">' + esc(tierLabel) + '</span>'
+      : "";
+    var statusLine = '<p class="account-email">' + esc(email ? email + ' · ' : '') +
+      esc(verified ? copy.verified : copy.unverified) + '</p>';
+    var aiPoints = Math.max(0, Number(quota.llm_points_remaining !== undefined ? quota.llm_points_remaining : quota.ai_credits) || 0);
+    var totalMins = Math.floor(Math.max(0, Number(quota.transcribe_seconds_remaining) || 0) / 60);
+    var hasBreakdown = quota.basic_seconds_remaining !== undefined || quota.advanced_seconds_remaining !== undefined;
+    var quotaDetails = quota.available === false ? '' :
+      '<p class="quota-dual-line" data-dual-quota>' +
+      (hasBreakdown ? esc(copy.basic_quota_label) + ' ' + Math.floor(Math.max(0, Number(quota.basic_seconds_remaining) || 0) / 60) +
+        ' 分钟 · ' + esc(copy.advanced_quota_label) + ' ' + Math.floor(Math.max(0, Number(quota.advanced_seconds_remaining) || 0) / 60) + ' 分钟 · ' : '') +
+      'AI 点 ' + esc(aiPoints) + '</p>' +
+      (hasBreakdown && (Number(quota.advanced_seconds_remaining) > 0 || !isLiteTier()) ?
+        '<p class="form-note hint">' + esc(copy.advanced_fallback_hint) + '</p>' : '') +
+      (Number(quota.weekly_rollover_seconds) > 0 ? '<p class="form-note hint">每周充能 25 小时自动滚存，有效期内未用完时长保留。</p>' : '');
+    var balance = (quota.available === false ? '<p>额度暂时无法读取</p>' :
+      '<p class="quota-available">可用转写 ' + esc(totalMins) + ' 分钟</p>') +
+      '<p class="form-note hint membership-validity" data-membership-expiry>' + esc(membershipValidity(quota)) + '</p>';
     if (state.quotaStale) {
       balance += '<p class="form-note hint" role="status">' + esc(copy.quota_stale) + '</p>';
     }
-    var redeemBlock = "";
+    var inviteBlock = quota.invite_code
+      ? '<div id="invite-box' + suffix + '" class="quota-invite-box" data-invite-box>' +
+        '<p class="field-label">' + esc(copy.invite_title || "邀请同学得 1 个月额度") +
+        (quota.invited_count ? ' · 已邀 ' + esc(quota.invited_count) + ' 人' : '') + '</p>' +
+        '<p class="account-invite-code">邀请码：<code id="account-invite-code' + suffix + '">' + esc(quota.invite_code) + '</code></p>' +
+        '<div class="invite-copy-actions">' +
+        button(copy.invite_copy_code || "复制邀请码", "copy-invite-code", { small: true, quiet: true, attrs: { id: "copy-invite-code-btn" + suffix } }) +
+        button(copy.invite_copy || "复制邀请链接", "copy-invite-link", { small: true, quiet: true, attrs: { id: "copy-invite-btn" + suffix } }) +
+        '</div><p class="form-note hint">' + esc(copy.invite_help) + '</p></div>'
+      : "";
+    var redeemBlock = inviteBlock;
     if (!verified && email) {
-      redeemBlock =
+      redeemBlock +=
         '<p class="form-note hint">' +
         esc(copy.unverified_help) +
         "</p>" +
@@ -2325,27 +2376,39 @@
         esc(copy.redeem_gated) +
         "</p>";
     } else {
+      var canExchange = aiPoints >= 10;
+      var exchangeBlock = isLiteTier() && aiPoints <= 0 ? '' :
+        '<div class="quota-exchange-box" data-quota-exchange>' +
+        button(copy.exchange_button || "10 AI 点兑换 1 小时转写时长", "exchange-quota", {
+          small: true,
+          quiet: true,
+          disabled: !canExchange
+        }) +
+        '<p class="form-note hint">' + esc(copy.exchange_help || "10 AI 点可兑换 1 小时高级转写时长（可 1:1 自动抵扣普通转写）。") + "</p></div>";
       redeemBlock =
+        inviteBlock +
+        exchangeBlock +
         '<form id="redeem-form' + suffix + '" class="redeem-form" data-redeem-form><label class="field-label" for="code' + suffix + '">' +
-        esc(copy.redeem_label) +
-        '</label><div class="input-row">' +
+        esc(copy.gift_redeem_label || copy.redeem_label) +
+        '</label><div class="input-row redeem-input-row">' +
         '<input id="code' + suffix + '" type="text" class="text-input" autocomplete="off" placeholder="' +
-        esc(copy.redeem_placeholder) +
+        esc(copy.gift_redeem_placeholder || copy.redeem_placeholder) +
         '" required>' +
         button(copy.redeem, "redeem", { primary: true, small: true, disabled: redeemPending }) +
         "</div><p class=\"form-note hint\">" +
-        esc(copy.redeem_help) +
+        esc(copy.gift_redeem_help || copy.redeem_help) +
         "</p></form>";
     }
     return (
       '<div class="account-card" data-block="quota"><div class="account-name">' +
       esc(copy.title) +
+      tierBadge +
       "</div>" +
       balance +
       (location === 'mobile'
-        ? statusLine + redeemBlock + button(copy.logout, "logout", { small: true, quiet: true })
-        : '<details class="account-actions" data-persistent-disclosure="desktop-account"' + (!verified && email ? ' open' : '') +
-          '><summary>账户与额度设置</summary>' + statusLine + redeemBlock + button(copy.logout, "logout", { small: true, quiet: true }) + '</details>') +
+        ? statusLine + quotaDetails + redeemBlock + button(copy.logout, "logout", { small: true, quiet: true })
+        : '<details class="account-actions account-drawer" data-persistent-disclosure="desktop-account"' + (!verified && email ? ' open' : '') +
+          '><summary>账户与额度设置</summary>' + statusLine + quotaDetails + redeemBlock + button(copy.logout, "logout", { small: true, quiet: true }) + '</details>') +
       "</div>"
     );
   }
@@ -2411,7 +2474,7 @@
       "</span>" +
       esc(COPY.nav.dashboard) +
       '</button><button type="button" class="btn btn-quiet' + (state.view === "mcp-hub" ? " active" : "") + '" data-action="open-mcp-hub"' + (state.view === "mcp-hub" ? ' aria-current="page"' : "") + '><span class="nav-icon" aria-hidden="true">✦</span>AI 接入 (MCP)</button>' +
-      '<button type="button" class="btn btn-quiet" data-action="open-welcome"><span class="nav-icon" aria-hidden="true">◎</span>使用引导</button></nav><div class="sidebar-spacer"></div>' +
+      '</nav><div class="sidebar-spacer"></div>' +
       '<div class="account-card campus-account"><div class="account-name">教学网账号</div><p>' + (state.campus.configured ? '已保存' : '尚未连接') + '</p>' + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + '</div>' +
 
       quotaCard() +
@@ -2429,7 +2492,7 @@
       brand(true) +
       '</div><div class="mobile-connection">' +
 
-      '</div><details class="mobile-account-menu" data-persistent-disclosure="mobile-account"><summary>账户与额度</summary><div class="mobile-account-content">' + button('使用引导', 'open-welcome', { small: true, quiet: true }) + button('AI 接入 (MCP)', 'open-mcp-hub', {small:true, quiet:true}) + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + quotaCard("mobile") + updateCard() + '</div></details></header>' +
+      '</div><details class="mobile-account-menu" data-persistent-disclosure="mobile-account"><summary>账户与额度</summary><div class="mobile-account-content">' + button('AI 接入 (MCP)', 'open-mcp-hub', {small:true, quiet:true}) + button("连接设置", "campus-account-settings", { small: true, quiet: true }) + quotaCard("mobile") + updateCard() + '</div></details></header>' +
       '<main class="main"><div class="main-inner">' +
       content +
       "</div></main></div>"
@@ -2468,7 +2531,8 @@
   }
 
   function formatTransfer(bytes) {
-    if (!bytes) return "0 KB";
+    if (!bytes) return "0 B";
+    if (bytes < 1024) return Math.round(bytes) + " B";
     if (bytes < 1048576) return (bytes / 1024).toFixed(bytes >= 102400 ? 0 : 1) + " KB";
     return (bytes / 1048576).toFixed(bytes >= 104857600 ? 0 : 1) + " MB";
   }
@@ -2597,6 +2661,7 @@
   function recordingTaskStatus() {
     var task = state.recordings.task;
     if (!task || task.state === "idle") return "";
+    if (task.kind === 'sync' && task.state === 'done' && !task.error && !(task.warnings || []).length) return '';
     var activeCourseId = state.campus.courseId;
     if (state.recordings.taskCourseId && state.recordings.taskCourseId !== activeCourseId && task.kind === "process") return "";
     if (state.recordings.taskCourseId && state.recordings.taskCourseId !== activeCourseId &&
@@ -2629,6 +2694,8 @@
   function backgroundSyncStatus() {
     var task = state.recordings.background;
     if (!task || task.state === "idle") return "";
+    if (task.state === 'done' && !task.error && !(task.warnings || []).length &&
+        !(task.course_results || []).some(function (row) { return row.error || (row.state && row.state !== 'done'); })) return '';
     var labels = { pending: "等待更新", running: "正在更新", done: "完成", confirmed: "已核对", not_read: "尚未读取", unconfirmed: "尚未核对", failed: "失败", partial: "部分完成", cancelled: "已取消", interrupted: "中断待恢复", unknown: "状态未确认" };
     var list = task.course_results || [];
     var doneCount = list.filter(function (r) { return r.state === "done"; }).length;
@@ -2732,11 +2799,6 @@
   }
 
   function render() {
-    if (welcomeOpen) {
-      if (!document.querySelector('.welcome-screen')) app.innerHTML = welcomeScreen();
-      return;
-    }
-    if (welcomeStartPending) openCampusSetupIfNeeded();
     var focusedLessonFilter = document.activeElement && document.activeElement.matches('[data-campus-lesson-filter]') ?
       { start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
         direction: document.activeElement.selectionDirection } : null;
@@ -2755,7 +2817,7 @@
       renderedAccountEmail === accountEmail();
     var authForm = document.getElementById("auth-form");
     var credentialDraft = (!state.activated && authForm && authForm.dataset.authMode === state.authMode)
-      ? captureCredentialFields(["auth-email", "auth-password", "auth-password-confirm"])
+      ? captureCredentialFields(["auth-email", "auth-password", "auth-password-confirm", "auth-invite"])
       : sameAccount ? captureCredentialFields(["recording-username", "recording-password"]) : null;
     var codeDrafts = {};
     var focusedCode = null;
@@ -2906,8 +2968,10 @@
     var emailInput = document.getElementById("auth-email");
     var passwordInput = document.getElementById("auth-password");
     var confirmInput = document.getElementById("auth-password-confirm");
+    var inviteInput = document.getElementById("auth-invite");
     var email = emailInput ? emailInput.value.trim() : "";
     var password = passwordInput ? passwordInput.value : "";
+    var inviteCode = inviteInput ? inviteInput.value.trim() : "";
     if (!email) {
       state.notice = COPY.auth.empty_email;
       state.noticeKind = "error";
@@ -2917,6 +2981,13 @@
     }
     if (state.authMode !== "forgot" && !password) {
       state.notice = COPY.auth.empty_password;
+      state.noticeKind = "error";
+      updateAuthControls();
+      if (passwordInput) passwordInput.focus();
+      return Promise.resolve();
+    }
+    if (state.authMode === "register" && password.length < 8) {
+      state.notice = COPY.auth.password_too_short || "密码至少需要 8 位字符，请补充后再注册。";
       state.noticeKind = "error";
       updateAuthControls();
       if (passwordInput) passwordInput.focus();
@@ -2943,7 +3014,9 @@
     var body =
       state.authMode === "forgot"
         ? { email: email }
-        : { email: email, password: password };
+        : state.authMode === "register" && inviteCode
+          ? { email: email, password: password, invite_code: inviteCode }
+          : { email: email, password: password };
     return requestJson(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2968,6 +3041,7 @@
       authenticated = true;
       if (passwordInput) passwordInput.value = "";
       if (confirmInput) confirmInput.value = "";
+      if (inviteInput) inviteInput.value = "";
       state.notice = "";
       state.noticeKind = "hint";
       var toast =
@@ -3046,6 +3120,44 @@
     });
   }
 
+  function exchangeQuota() {
+    if (!canRedeem()) {
+      showToast(COPY.account.redeem_gated);
+      return Promise.resolve();
+    }
+    var epoch = accountQuotaEpoch;
+    return requestJson("/api/platform/exchange", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hours: 1, target: "advanced" })
+    }).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok) {
+        showToast((result.body && result.body.detail) || COPY.account.exchange_failed || "AI 点不足，暂时无法兑换转写时长。");
+        return;
+      }
+      return loadQuota().then(function () {
+        if (epoch !== accountQuotaEpoch) return;
+        render();
+        showToast(COPY.account.exchanged_toast || "已用 10 AI 点兑换 1 小时转写时长。");
+      });
+    }).catch(function () {
+      if (epoch === accountQuotaEpoch) showToast(COPY.account.exchange_failed || "AI 点不足，暂时无法兑换转写时长。");
+    });
+  }
+
+  function copyInviteLink() {
+    var quota = state.quota || {};
+    var link = quota.invite_url || quota.invite_code || "";
+    if (!link) return;
+    copyStudyText(link, COPY.account.invite_copied_toast || "邀请链接已复制，发给同学绑定新教学网账号即可生效。");
+  }
+
+  function copyInviteCode() {
+    var code = (state.quota || {}).invite_code || "";
+    if (code) copyStudyText(code, "邀请码已复制，可发给同学注册或绑定邀请。");
+  }
+
   function redeem(form) {
     if (redeemPending) return Promise.resolve();
     form = form || document.getElementById("redeem-form");
@@ -3084,6 +3196,9 @@
       }
       var currentInput = currentForm() && currentForm().querySelector('input[type="text"]');
       if (currentInput && currentInput.value.trim() === code) currentInput.value = "";
+      var toastMsg = result.body && result.body.invite_bound
+        ? "邀请码已绑定！验证新教学网学号后双方各得 1 个月额度。"
+        : COPY.account.redeemed_toast;
       return requestJson("/api/platform/quota").then(function (quota) {
         if (!currentAccount()) return;
         if (quota.ok && quota.body) {
@@ -3091,9 +3206,9 @@
           state.quota = quota.body;
           render();
         }
-        showToast(COPY.account.redeemed_toast);
+        showToast(toastMsg);
       }, function () {
-        if (currentAccount()) showToast(COPY.account.redeemed_toast);
+        if (currentAccount()) showToast(toastMsg);
       });
     }).catch(function () {
       if (!currentAccount()) return;
@@ -3123,11 +3238,16 @@
     render();
   }
 
+  function pendingInviteRewardHint() {
+    return state.quota && state.quota.invite_pending_campus_reward
+      ? '<p class="invite-reward-hint" role="status">🎁 已绑定同学邀请：验证并保存新的北大教学网账号（学号）后，你与邀请人将立即各得 1 个月 Lite 普通转写额度（每周 25 小时自动滚存）。</p>' : '';
+  }
+
   function recordingCredentialsForm() {
     var copy = COPY.course.recordings;
     var pending = Boolean(state.recordings.credentialsPending);
     var readonly = pending ? " readonly" : "";
-    return '<form id="recording-credentials-form" class="recording-credentials" aria-busy="' + pending + '">' +
+    return '<form id="recording-credentials-form" class="recording-credentials" aria-busy="' + pending + '">' + pendingInviteRewardHint() +
       '<label for="recording-username">' + esc(copy.username) + '<input id="recording-username" autocomplete="username" placeholder="学号" required' + readonly + '></label>' +
       '<label for="recording-password">' + esc(copy.password) + '<input id="recording-password" type="password" autocomplete="current-password" placeholder="密码" required' + readonly + '></label>' +
       '<div class="credentials-actions">' + button(pending ? copy.saving : copy.save, "recording-save-credentials", {
@@ -3169,7 +3289,12 @@
       state.recordings.editingCredentials = false;
       state.recordings.error = "";
       password.value = "";
-      showToast(COPY.course.recordings.verified);
+      if (result.body.invite_reward_granted) {
+        showToast(COPY.account.campus_reward_toast || COPY.course.recordings.verified);
+        return refreshSettledQuota();
+      } else {
+        showToast(COPY.course.recordings.verified);
+      }
     }).catch(function () {
       if (epoch === accountQuotaEpoch) state.recordings.credentialsError = "验证连接中断，请检查网络后重试。";
     }).finally(function () {
@@ -3201,6 +3326,14 @@
         state.recordings.taskCourseId = taskCourseId;
       }
       state.recordings.error = "";
+      if (result.body.state === 'done') {
+        showToast('课程目录已更新');
+        return loadCampusCourses().then(function () {
+          if (epoch !== accountQuotaEpoch) return;
+          if (state.view === 'campus-course') return loadCampusCourse(state.campus.courseId);
+          render();
+        });
+      }
       render();
     }).catch(function () {
       if (epoch !== accountQuotaEpoch) return;
@@ -3218,10 +3351,11 @@
   }
 
   function recordingNoteStyle(recordingId, disabled) {
-    var selected = state.recordings.noteStrategyByKey[recordingId] || "topics";
+    var lite = isLiteTier();
+    var selected = lite ? "transcript" : (state.recordings.noteStrategyByKey[recordingId] || "topics");
     return '<label class="recording-note-style">笔记方式<select data-recording-note-strategy="' + esc(recordingId) + '" aria-label="笔记方式"' + (disabled ? ' disabled' : '') + '>' +
-      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + '>按知识点图文整理（Plus · 约 2–4 点）</option>' +
-      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理（Flash · 约 1–2 点）</option></select></label>';
+      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + (lite ? ' disabled' : '') + '>按知识点图文整理（高级转写 · 笔记不扣 AI 点）</option>' +
+      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理（普通转写 · 笔记不扣 AI 点）</option></select>' + (lite ? '<small class="recording-note-tier-hint">当前为 Lite 等级，默认使用普通转写；升级 Pro / Max 可解锁按知识点图文整理。</small>' : '') + '</label>';
   }
 
   function openNotionPreview(url, onFailure) {
@@ -3404,14 +3538,8 @@
     if (!target || target.disabled) return;
     var action = target.dataset.action;
     var mobileMenu = target.closest('.mobile-account-menu');
-    if (mobileMenu && ["open-dashboard", "campus-account-settings", "open-welcome"].indexOf(action) >= 0) {
+    if (mobileMenu && ["open-dashboard", "campus-account-settings", "open-campus-setup"].indexOf(action) >= 0) {
       mobileMenu.open = false;
-    }
-    if (action === "open-welcome") {
-      welcomeOpen = true; render(); document.getElementById('welcome-heading').focus(); return;
-    }
-    if (action === "welcome-start" || action === "welcome-skip") {
-      closeWelcome(action === "welcome-start"); return;
     }
     if (action === 'campus-download-draft') { event.preventDefault(); downloadAssignmentDraft(); return; }
     if (action === "auth-submit" || action === "recording-save-credentials") return;
@@ -3422,9 +3550,13 @@
     else if (action === "resend-verification") resendVerification();
     else if (action === "refresh-verification") refreshAccount();
     else if (action === "redeem") redeem(target.closest("[data-redeem-form]"));
+    else if (action === "exchange-quota") exchangeQuota();
+    else if (action === "copy-invite-link") copyInviteLink();
+    else if (action === "copy-invite-code") copyInviteCode();
     else if (action === "request-update") requestUpdate(target.dataset.version);
     else if (action === "revoke-notion") disconnectNotion();
     else if (action === "connect-notion") connectNotion();
+    else if (action === "membership-upgrade") { event.preventDefault(); guideMembership(target.dataset.tier, target.dataset.feature); }
     else if (action === "open-dashboard") openDashboard();
     else if (action === 'toggle-batch-organize') {
       if (state.batchOrganize && state.batchOrganize.open) { state.batchOrganize.open = false; render(); }
@@ -3444,7 +3576,7 @@
           openCampusLesson(target.dataset.recording);
       });
     }
-    else if (action === "campus-account-settings") {
+    else if (action === "campus-account-settings" || action === "open-campus-setup") {
       state.view = "campus-account";
       render();
       var settingsPanel = document.querySelector(state.campus.configured ? ".home-setup" : "#recording-credentials-form");
@@ -3460,6 +3592,7 @@
     else if (action === "campus-open-center") {
       event.preventDefault();
       if (["assignments", "notices", "materials"].indexOf(target.dataset.center) < 0) return;
+      if (isLiteTier() && target.dataset.center !== 'materials') return guideMembership('Pro / Max', target.dataset.center === 'assignments' ? '作业中心' : '通知中心');
       state.campus.section = target.dataset.center; render();
     }
     else if (action === "campus-open-lesson") { openCampusLesson(target.dataset.recording); }
@@ -3607,6 +3740,8 @@
   });
 
   document.addEventListener("keydown", function (event) {
+    var upgrade = event.target.closest('[data-action="membership-upgrade"]');
+    if (upgrade && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); upgrade.click(); return; }
     if (event.target && event.target.matches && event.target.matches('[data-reader-search]')) {
       var key = event.target.dataset.readerSearch;
       var preview = readingPreviews[key];

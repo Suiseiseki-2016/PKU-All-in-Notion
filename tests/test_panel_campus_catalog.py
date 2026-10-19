@@ -268,3 +268,13 @@ def test_campus_utc_timestamp_is_labeled_as_beijing_time():
     assert display_campus_time("2026-10-01T15:30:00.000Z") == "2026-10-01 23:30 北京时间"
     assert display_campus_time("2026-10-01 23:30") == "2026-10-01 23:30"
     assert display_campus_time("") == ""
+
+
+def test_course_summary_exists_only_with_saved_summary(tmp_path):
+    folder = _campus(tmp_path)
+    assert campus_course(tmp_path, "campus-1")["has_summary"] is False
+    (folder / "course-summary.md").write_text("# 课程总结\n已整理的内容", "utf-8")
+    assert campus_course(tmp_path, "campus-1")["has_summary"] is True
+    (folder / "course-summary.md").unlink()
+    (folder / "summary.json").write_text(json.dumps({"title": "已发布课程总结", "url": "https://notion.example/summary"}), "utf-8")
+    assert campus_course(tmp_path, "campus-1")["has_summary"] is True

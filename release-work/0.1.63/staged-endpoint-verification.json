@@ -1,0 +1,8 @@
+{
+  "version": "0.1.63",
+  "installer_redirects": "passed",
+  "windows_update_manifest": "passed",
+  "current_version_no_update": 204,
+  "macos_dmg_manual_install_only": true,
+  "production_changed": false
+}

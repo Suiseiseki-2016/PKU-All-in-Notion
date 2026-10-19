@@ -151,7 +151,7 @@ def _courses(root: Path):
             if reason == 'account_unconfirmed' else
             '教学网录像目录读取失败；已有讲次保留，请检查教学网连接后更新这门课。'
             if reason == 'recordings_unavailable' else
-            '教学网读取尚未完成；保留已有内容，请检查教学网连接后更新这门课。')
+            '当前展示本机已缓存的课程内容；如需同步最新课件与录像，请先连接教学网。')
         if isinstance(course_id, str) and course_id and isinstance(title, str) and title:
             yield path.parent, course_id, title, metadata
 
@@ -426,6 +426,7 @@ def campus_course(root: Path, course_id: str) -> dict:
             'source_url': official_content_source_url(course_id, item),
             'submission_state': 'unknown', 'due_at': '', 'due_at_label': '',
             'status_label': '请在教学网核对测验截止时间、作答与提交状态。'})
+    summary = _summary_marker(folder)
     result = {
         "id": course_id,
         "title": title,
@@ -449,7 +450,8 @@ def campus_course(root: Path, course_id: str) -> dict:
         "section_states": _section_states(root, folder, course_id, metadata),
         "synced_at_label": display_campus_time(metadata.get("synced_at")),
         "existing_notion_url": str(metadata.get("existing_notion_url") or ""),
-        "summary": _summary_marker(folder),
+        "summary": summary,
+        "has_summary": bool(summary.get("title")),
         "source_priority": ["recordings", "materials"],
     }
     historical = _historical_lessons(root, course_id, metadata)

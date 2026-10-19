@@ -50,10 +50,11 @@ def panel():
                 "text/css" if path.endswith("css") else "application/javascript"))
             return
         body = {}
+        # Pro is required for the assignment/notice navigation exercised below.
         if path == "/api/platform/quota":
-            body = dict(active=True, available=True, email="stress@example.com", email_verified=True)
+            body = dict(active=True, available=True, email="stress@example.com", email_verified=True, tier="pro")
         elif path == "/api/auth/me":
-            body = dict(available=True, email="stress@example.com", email_verified=True)
+            body = dict(available=True, email="stress@example.com", email_verified=True, tier="pro")
         elif path == "/api/update":
             body = dict(version="0.1.17", status="desktop_managed")
         elif path == "/api/connection":
@@ -158,11 +159,14 @@ def test_multi_viewport_zero_horizontal_overflow_and_button_hierarchy(panel, tmp
         page.locator(".campus-lesson-page h3").first.click()
         pw.expect(page.locator(".recording-row")).to_have_count(1)
         no_overflow()
-        pw.expect(page.locator('[data-action="campus-preview-lecture-note"]')).to_have_text("收起本讲总结")
+        pw.expect(page.locator('[data-action="campus-preview-lecture-note"]')).to_have_text("收起本讲笔记")
         assert page.locator(".recording-primary-bar .btn-primary").count() == 0
         if width in (1440, 320):
             page.screenshot(path=str(tmp_path / f"lecture-{width}.png"), full_page=True)
-        pw.expect(page.locator(".recording-secondary-bar [data-action=campus-estimate-duration]")).to_be_visible()
+        tools = page.locator('details.lecture-more-actions')
+        pw.expect(tools).not_to_have_attribute("open", "")
+        tools.locator("summary").click()
+        pw.expect(tools.locator("[data-action=campus-estimate-duration]")).to_be_visible()
         for name in ("assignments", "materials"):
             center(page, name)
             no_overflow()
