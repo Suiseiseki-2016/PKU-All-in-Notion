@@ -22,10 +22,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 
 import httpx
 
 from .models import Recording
+
+_RESOLVE_RETRY_DELAY = 1.0
 
 STREAM_BASE = "/webapps/bb-streammedia-hqy-BBLEARN"
 VIDEO_LIST = f"{STREAM_BASE}/videoList.action"
@@ -120,17 +123,20 @@ def resolve_media(client: httpx.Client, recording: Recording) -> Recording:
     Returns the same object so callers can use it inline. Fields stay empty when
     the platform has not finished publishing the session.
     """
-    # CAS addresses are single-use. A timed-out exchange must restart at the
-    # Blackboard player page to obtain a fresh address, rather than replay the
-    # same signed request. Only read timeouts receive one additional attempt;
-    # rejected credentials, HTTP errors and a second timeout remain failures.
-    try:
-        return _resolve_media_once(client, recording)
-    except httpx.ReadTimeout:
-        logging.getLogger(__name__).warning(
-            "recording metadata read timeout; renewing player chain once course_id=%s",
-            recording.course_id)
-        return _resolve_media_once(client, recording)
+    # Every retry starts at Blackboard: the CAS URL cannot be reused.
+    for attempt in range(3):
+        try:
+            result = _resolve_media_once(client, recording)
+            # Retry exchanges that landed without a usable player session.
+            if result.unavailable_reason != "player did not expose course_id/sub_id" or attempt == 2:
+                return result
+        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError):
+            if attempt == 2:
+                raise
+            logging.getLogger(__name__).warning(
+                "recording metadata request failed; renewing player chain course_id=%s attempt=%s",
+                recording.course_id, attempt + 1)
+        time.sleep(_RESOLVE_RETRY_DELAY * (attempt + 1))
 
 
 def _resolve_media_once(client: httpx.Client, recording: Recording) -> Recording:
@@ -181,6 +187,7 @@ def _resolve_media_once(client: httpx.Client, recording: Recording) -> Recording
         return recording
 
     _apply_subject_info(recording, payload.get("data") or {})
+    recording.unavailable_reason = ""
     if not recording.media_url:
         recording.unavailable_reason = "no playback URL in session metadata"
     return recording

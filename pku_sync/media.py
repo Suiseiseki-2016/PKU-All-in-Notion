@@ -153,51 +153,81 @@ def _probe_mp4(client: httpx.Client, url: str, headers: dict) -> tuple[int, bool
 def _download_mp4_ranges(client: httpx.Client, url: str, target: Path,
                          headers: dict, total: int,
                          progress: DownloadProgress | None) -> DownloadResult:
-    """Use bounded concurrent byte ranges, then assemble atomically."""
+    """Resume persistent concurrent byte ranges, then assemble atomically."""
     size = (total + MP4_WORKERS - 1) // MP4_WORKERS
     ranges = [(start, min(total - 1, start + size - 1))
               for start in range(0, total, size)]
-    downloaded = 0
+    parts_dir = target.parent / f".{target.stem}.mp4-parts-{total}"
+    received_sizes = [0] * len(ranges)
     lock = threading.Lock()
-    if progress:
-        progress(0, total, "bytes", 0)
+
+    def report(index: int, have: int) -> None:
+        with lock:
+            received_sizes[index] = have
+            if progress:
+                downloaded = sum(received_sizes)
+                progress(downloaded, total, "bytes", downloaded)
+
     try:
-        with tempfile.TemporaryDirectory(prefix="pku-video-", dir=target.parent) as temporary:
-            root = Path(temporary)
-            def fetch(index: int, start: int, end: int) -> Path:
-                nonlocal downloaded
-                part = root / f"{index:03d}.part"
-                with client.stream("GET", url,
-                                   headers={**headers, "Range": f"bytes={start}-{end}"},
-                                   follow_redirects=True) as resp:
-                    received = resp.headers.get("content-range", "")
-                    resp.raise_for_status()
-                    if resp.status_code != 206 or not received.startswith(f"bytes {start}-{end}/"):
-                        raise ValueError("media server does not support byte ranges")
-                    with part.open("wb") as handle:
-                        for chunk in resp.iter_bytes(CHUNK):
-                            handle.write(chunk)
-                            with lock:
-                                downloaded += len(chunk)
-                                if progress:
-                                    progress(downloaded, total, "bytes", downloaded)
-                if part.stat().st_size != end - start + 1:
-                    raise ValueError("incomplete ranged media response")
-                return part
-            with concurrent.futures.ThreadPoolExecutor(max_workers=MP4_WORKERS) as pool:
-                parts = list(pool.map(lambda item: fetch(*item),
-                                      [(i, start, end) for i, (start, end) in enumerate(ranges)]))
-            staged = root / "complete.mp4"
-            with staged.open("wb") as output:
-                for part in parts:
-                    with part.open("rb") as source:
-                        shutil.copyfileobj(source, output, CHUNK)
-            if staged.stat().st_size != total:
-                raise ValueError("incomplete assembled media file")
-            staged.replace(target)
+        parts_dir.mkdir(parents=True, exist_ok=True)
+
+        def fetch_part(index: int, start: int, end: int) -> Path:
+            part_path = parts_dir / f"{index:03d}.part"
+            expected = end - start + 1
+            for attempt in range(3):
+                try:
+                    have = part_path.stat().st_size if part_path.exists() else 0
+                    if have > expected:
+                        part_path.unlink()
+                        have = 0
+                    report(index, have)
+                    if have == expected:
+                        return part_path
+                    offset = start + have
+                    with client.stream("GET", url,
+                                       headers={**headers, "Range": f"bytes={offset}-{end}"},
+                                       follow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        content_range = resp.headers.get("content-range", "")
+                        if resp.status_code != 206:
+                            raise RuntimeError("media server does not support byte ranges")
+                        if content_range == f"bytes {start}-{end}/{total}":
+                            # Some servers return the whole original part on resume.
+                            have = 0
+                            report(index, have)
+                        elif content_range != f"bytes {offset}-{end}/{total}":
+                            raise RuntimeError("media server returned an invalid byte range")
+                        with part_path.open("ab" if have else "wb") as handle:
+                            for chunk in resp.iter_bytes(CHUNK):
+                                if have + len(chunk) > expected:
+                                    raise RuntimeError("oversized ranged media response")
+                                handle.write(chunk)
+                                have += len(chunk)
+                                report(index, have)
+                    if part_path.stat().st_size != expected:
+                        raise RuntimeError("incomplete ranged media response")
+                    return part_path
+                except (httpx.HTTPError, OSError, RuntimeError):
+                    if attempt == 2:
+                        raise
+            raise AssertionError("unreachable")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MP4_WORKERS) as pool:
+            futures = [pool.submit(fetch_part, i, start, end)
+                       for i, (start, end) in enumerate(ranges)]
+            parts = [future.result() for future in futures]
+        temp_path = parts_dir / "complete.mp4"
+        with temp_path.open("wb") as output:
+            for part in parts:
+                with part.open("rb") as source:
+                    shutil.copyfileobj(source, output, CHUNK)
+        if temp_path.stat().st_size != total:
+            raise RuntimeError("incomplete assembled media file")
+        temp_path.replace(target)
+        shutil.rmtree(parts_dir, ignore_errors=True)
     except httpx.HTTPStatusError as exc:
         return _http_failure(exc)
-    except (httpx.HTTPError, OSError, ValueError) as exc:
+    except (httpx.HTTPError, OSError, RuntimeError) as exc:
         return DownloadResult(path=None, error=str(exc))
     return DownloadResult(path=target, downloaded_bytes=total)
 
@@ -217,40 +247,65 @@ def _download_mp4(client: httpx.Client, url: str, target: Path,
     if have > (total or 0) > 0:
         have = 0
 
-    if not have and ranges_supported and total >= MP4_PARALLEL_MIN:
+    temp_path = target.with_name(target.name + ".part")
+    if (not have and not temp_path.exists()
+            and ranges_supported and total >= MP4_PARALLEL_MIN):
         result = _download_mp4_ranges(client, url, target, headers, total, progress)
-        if result.path is not None:
+        if result.path is not None or result.error == "cancelled":
             return result
-        # A server may advertise ranges yet ignore them on concurrent requests.
-        # In that case the existing streaming path remains a safe fallback.
-        if "does not support byte ranges" not in result.error:
-            return result
+        # A range worker failure must not discard the single-stream fallback.
 
-    request_headers = dict(headers)
-    if have:
-        request_headers["Range"] = f"bytes={have}-"
-    if progress:
-        progress(have, total, "bytes", have)
+    resumed = False
+    written = 0
     try:
-        with client.stream("GET", url, headers=request_headers, follow_redirects=True) as resp:
-            if have and resp.status_code == 200:
-                have = 0
-            elif resp.status_code not in (200, 206):
-                return DownloadResult(path=None, error=f"HTTP {resp.status_code}",
-                                      http_status=resp.status_code)
-            written = 0
-            mode = "ab" if have else "wb"
-            with target.open(mode) as handle:
-                for chunk in resp.iter_bytes(CHUNK):
-                    handle.write(chunk)
-                    written += len(chunk)
-                    if progress:
-                        progress(have + written, total, "bytes", have + written)
-    except httpx.HTTPError as exc:
-        return DownloadResult(path=None, downloaded_bytes=0, error=str(exc))
-    if total and target.stat().st_size != total:
-        return DownloadResult(path=None, downloaded_bytes=written, error="incomplete media response")
-    return DownloadResult(path=target, downloaded_bytes=written, resumed=bool(have))
+        # Preserve existing videos until replacement succeeds; also accept partial
+        # files left at target by older versions of the downloader.
+        if have and not temp_path.exists():
+            shutil.copyfile(target, temp_path)
+        for attempt in range(3):
+            existing = temp_path.stat().st_size if temp_path.exists() else 0
+            if total and existing > total:
+                temp_path.unlink()
+                existing = 0
+            if total and existing == total:
+                break
+            request_headers = dict(headers)
+            if existing:
+                request_headers["Range"] = f"bytes={existing}-"
+            if progress:
+                progress(existing, total, "bytes", existing)
+            try:
+                with client.stream("GET", url, headers=request_headers, follow_redirects=True) as resp:
+                    if resp.status_code not in (200, 206):
+                        return DownloadResult(path=None, error=f"HTTP {resp.status_code}",
+                                              http_status=resp.status_code)
+                    if resp.status_code == 200:
+                        existing = 0
+                    else:
+                        received = resp.headers.get("content-range", "")
+                        if not received.startswith(f"bytes {existing}-"):
+                            raise RuntimeError("media server returned an invalid byte range")
+                    resumed = resumed or bool(existing)
+                    with temp_path.open("ab" if existing else "wb") as handle:
+                        for chunk in resp.iter_bytes(CHUNK):
+                            if total and existing + len(chunk) > total:
+                                raise RuntimeError("oversized media response")
+                            handle.write(chunk)
+                            existing += len(chunk)
+                            written += len(chunk)
+                            if progress:
+                                progress(existing, total, "bytes", existing)
+                if total and temp_path.stat().st_size != total:
+                    raise RuntimeError("incomplete media response")
+                break
+            except (httpx.HTTPError, OSError, RuntimeError):
+                if attempt == 2:
+                    raise
+        temp_path.replace(target)
+        shutil.rmtree(target.parent / f".{target.stem}.mp4-parts-{total}", ignore_errors=True)
+    except (httpx.HTTPError, OSError, RuntimeError) as exc:
+        return DownloadResult(path=None, downloaded_bytes=written, resumed=resumed, error=str(exc))
+    return DownloadResult(path=target, downloaded_bytes=written, resumed=resumed)
 
 
 def _remote_size(client: httpx.Client, url: str, headers: dict) -> int:

@@ -205,7 +205,7 @@ def test_upload_retries_once_on_transport_error(tmp_path, monkeypatch):
 
 
 def test_upload_never_retries_http_answers(tmp_path, monkeypatch):
-    """401/402/503 are real answers (auth/quota/vendor); retrying helps nobody."""
+    """Quota rejections remain terminal even when transport retries are enabled."""
     import httpx
 
     calls = {"n": 0}

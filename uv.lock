@@ -1750,7 +1750,7 @@ wheels = [
 
 [[package]]
 name = "pku-course-sync"
-version = "0.1.64"
+version = "0.1.65"
 source = { editable = "." }
 dependencies = [
     { name = "av" },

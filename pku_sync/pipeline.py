@@ -21,7 +21,7 @@ from .media import (DownloadResult, EXPIRED_MEDIA_STATUSES, download_recording,
                     extract_keyframes, write_notes)
 from .models import Recording
 from .note_sources import collect_note_sources
-from .recordings import resolve_media
+from .recordings import list_recordings, resolve_media
 from .store import safe_name
 from .transcription import transcribe
 
@@ -177,9 +177,32 @@ def download_job(client: httpx.Client, job: RecordingJob, progress=None) -> Down
     an earlier `sync` is usually stale by the time a download starts.
     """
     try:
-        resolve_media(client, job.recording)
+        try:
+            resolve_media(client, job.recording)
+            needs_refresh = not job.recording.media_url
+        except Exception:
+            needs_refresh = True
+        if needs_refresh:
+            candidates = list_recordings(client, job.recording.course_id)
+            refreshed = next((rec for rec in candidates if job.recording.subject_id
+                              and rec.subject_id == job.recording.subject_id), None)
+            if refreshed is None:
+                # Blackboard's listing normally has no streaming subject ids.
+                # Fall back to its title/date identity only for unlabelled rows;
+                # an explicitly different subject must never be selected.
+                refreshed = next((rec for rec in candidates
+                                  if (not job.recording.subject_id or not rec.subject_id)
+                                  and rec.title == job.recording.title
+                                  and rec.date == job.recording.date), None)
+            if refreshed is None:
+                return DownloadResult(path=None, error="resolve failed: recording missing from refreshed catalog")
+            job.recording.play_url = refreshed.play_url
+            job.recording.mp4_url = ""
+            job.recording.m3u8_url = ""
+            job.recording.unavailable_reason = ""
+            resolve_media(client, job.recording)
     except Exception as exc:
-        return DownloadResult(path=None, error=f"resolve failed: {exc}")
+        return DownloadResult(path=None, error=f"resolve failed: {type(exc).__name__}")
 
     result = download_recording(client, job.recording, job.directory, progress=progress)
     if result.path is None and result.http_status in EXPIRED_MEDIA_STATUSES:

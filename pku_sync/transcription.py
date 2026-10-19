@@ -280,9 +280,8 @@ def _transcribe_headers(key: str, audio: Path, *, source_id: str | None = None, 
 def _upload(url: str, key: str, audio: Path, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict:
     """POST the audio to the relay; the relay answers with the transcript.
 
-    One transport-level retry: a failover between relay hosts kills the
-    in-flight request once, and that failure is absorbed here. HTTP status
-    answers are real answers (quota, auth) -- never retried.
+    Retry one transport failure or transient upstream 502/503/504 response.
+    Authentication, quota and rate-limit responses remain terminal.
     """
     import httpx
 
@@ -297,6 +296,9 @@ def _upload(url: str, key: str, audio: Path, *, source_id: str | None = None, tr
                     headers=req_headers,
                     files={"audio": (audio.name, source, "audio/mp4")},
                 )
+            if response.status_code in (502, 503, 504) and attempt == 1:
+                time.sleep(_RETRY_DELAY)
+                continue
             break
         except httpx.TransportError as exc:
             if attempt == 2:
@@ -340,49 +342,52 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcrib
         raise RuntimeError("云端直传地址配置不正确。")
     base = url.rstrip("/")[:-len(suffix)]
     headers = _transcribe_headers(key, audio, source_id=source_id, transcribe_mode=transcribe_mode)
-    try:
-        with httpx.Client(trust_env=not dead_loopback_proxy()) as client:
-            body = {'size_bytes': audio.stat().st_size}
-            if source_id is not None:
-                body['source_id'] = source_id
-                body['part_index'] = _part_index_from_audio(audio)
-            if transcribe_mode is not None:
-                body['transcribe_mode'] = transcribe_mode
-            issued = client.post(base + suffix + "/direct/init", headers=headers,
-                                 json=body, timeout=30)
-            if issued.status_code != 200:
-                raise RuntimeError(f"音频直传授权失败（HTTP {issued.status_code}）；请检查登录与额度。")
-            info = issued.json()
-            put_url = info.get("upload_url", "")
-            host = urlsplit(put_url).hostname or ""
-            if urlsplit(put_url).scheme != "https" or not host.endswith(".aliyuncs.com"):
-                raise RuntimeError("云端返回的音频上传地址无效。")
-            upload_id = info.get("upload_id", "")
-            if not isinstance(upload_id, str) or len(upload_id) != 32:
-                raise RuntimeError("云端返回的上传授权无效。")
-            with audio.open("rb") as source:
-                uploaded = client.put(put_url, content=source,
-                                      headers={"Content-Type": "audio/mp4", "Content-Length": str(audio.stat().st_size)},
-                                      timeout=600)
-            if uploaded.status_code not in (200, 201):
-                raise RuntimeError(f"音频直传到 OSS 失败（HTTP {uploaded.status_code}）；请检查网络后重试。")
-            for attempt in (1, 2):
-                try:
-                    completed = client.post(base + suffix + "/direct/complete", headers=headers,
-                                            json={"upload_id": upload_id}, timeout=1900)
-                    break
-                except httpx.TransportError:
-                    if attempt == 2:
-                        raise
+    for cycle in (1, 2):
+        try:
+            with httpx.Client(trust_env=not dead_loopback_proxy()) as client:
+                body = {'size_bytes': audio.stat().st_size}
+                if source_id is not None:
+                    body['source_id'] = source_id
+                    body['part_index'] = _part_index_from_audio(audio)
+                if transcribe_mode is not None:
+                    body['transcribe_mode'] = transcribe_mode
+                issued = client.post(base + suffix + "/direct/init", headers=headers,
+                                     json=body, timeout=30)
+                if issued.status_code != 200:
+                    raise RuntimeError(f"音频直传授权失败（HTTP {issued.status_code}）；请检查登录与额度。")
+                info = issued.json()
+                put_url = info.get("upload_url", "")
+                host = urlsplit(put_url).hostname or ""
+                if urlsplit(put_url).scheme != "https" or not host.endswith(".aliyuncs.com"):
+                    raise RuntimeError("云端返回的音频上传地址无效。")
+                upload_id = info.get("upload_id", "")
+                if not isinstance(upload_id, str) or len(upload_id) != 32:
+                    raise RuntimeError("云端返回的上传授权无效。")
+                with audio.open("rb") as source:
+                    uploaded = client.put(put_url, content=source,
+                                          headers={"Content-Type": "audio/mp4", "Content-Length": str(audio.stat().st_size)},
+                                          timeout=600)
+                if uploaded.status_code >= 500 and cycle == 1:
                     time.sleep(_RETRY_DELAY)
-            if completed.status_code != 200:
-                raise RuntimeError(f"云端直传转写失败（HTTP {completed.status_code}）；已完成片段会在重试时复用。")
-            payload = completed.json()
-            if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
-                raise RuntimeError("云端直传返回的转写内容无效。")
-            return payload
-    except httpx.HTTPError as exc:
-        raise RuntimeError("音频直传连接中断；请检查网络后重试。") from exc
+                    continue
+                if uploaded.status_code not in (200, 201):
+                    raise RuntimeError(f"音频直传到 OSS 失败（HTTP {uploaded.status_code}）；请检查网络后重试。")
+                completed = client.post(base + suffix + "/direct/complete", headers=headers,
+                                        json={"upload_id": upload_id}, timeout=1900)
+                if completed.status_code in (429, 500, 502, 503, 504) and cycle == 1:
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                if completed.status_code != 200:
+                    raise RuntimeError(f"云端直传转写失败（HTTP {completed.status_code}）；已完成片段会在重试时复用。")
+                payload = completed.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
+                    raise RuntimeError("云端直传返回的转写内容无效。")
+                return payload
+        except httpx.HTTPError as exc:
+            if cycle == 1:
+                time.sleep(_RETRY_DELAY)
+                continue
+            raise RuntimeError("音频直传连接中断；请检查网络后重试。") from exc
 
 
 def transcribe_cloud(video: Path, target: Path, settings: "Settings", progress=None, direct_oss: bool = False) -> dict:
@@ -493,7 +498,11 @@ def _transcribe_parts(
                 failures.append((index, exc))
     if failures:
         index, error = min(failures, key=lambda item: item[0])
-        raise RuntimeError(f"第 {index + 1}/{len(parts)} 段转写失败；已完成片段会在重试时复用：{error}") from error
+        clean_error = str(error).rstrip().rstrip("。")
+        suffix = "；已完成片段会在重试时复用"
+        while clean_error.endswith(suffix):
+            clean_error = clean_error[:-len(suffix)].rstrip("。")
+        raise RuntimeError(f"第 {index + 1}/{len(parts)} 段转写失败；已完成片段会在重试时复用：{clean_error}") from error
     segments = []
     for reply, (_, offset) in zip(replies, parts):
         for segment in reply["segments"]:

@@ -94,3 +94,39 @@ def test_bailian_asr_deletes_audio_when_vendor_fails():
     with pytest.raises(AsrError, match="submission failed"):
         asr(BytesIO(b"audio"), "lecture.m4a")
     assert bucket.deleted == [next(iter(bucket.objects))]
+
+
+@pytest.mark.parametrize("transcripts", [[], [{"channel_id": 0, "text": "", "sentences": []}]])
+def test_silent_audio_is_a_valid_empty_transcript(transcripts):
+    assert BailianFileAsr._to_payload({"properties": {"language": "zh"}, "transcripts": transcripts}) == {
+        "language": "zh", "duration_seconds": 0, "segments": [],
+    }
+
+
+@pytest.mark.parametrize("result", [{}, None, [], {"transcripts": None}, {"transcripts": {}}])
+def test_missing_or_malformed_transcripts_remain_errors(result):
+    with pytest.raises(AsrError, match="^DashScope returned no transcript sentences$"):
+        BailianFileAsr._to_payload(result)
+
+
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_completed_asr_retries_result_download_only(monkeypatch, failures):
+    from urllib.error import URLError
+
+    calls, sleeps = [], []
+    monkeypatch.setattr("server.asr.time.sleep", sleeps.append)
+
+    def download(url):
+        calls.append(url)
+        if len(calls) <= failures:
+            raise URLError("connection reset")
+        return {"transcripts": []}
+
+    asr = BailianFileAsr(OssTempStore(FakeBucket()), "key", FakeTranscription, download)
+    if failures == 3:
+        with pytest.raises(URLError):
+            asr.transcribe_uploaded("pku-temp/audio")
+    else:
+        assert asr.transcribe_uploaded("pku-temp/audio")["segments"] == []
+    assert len(calls) == min(failures + 1, 3)
+    assert sleeps == [1.0] * min(failures, 2)

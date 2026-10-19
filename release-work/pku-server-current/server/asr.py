@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import PurePath
 from typing import Any, BinaryIO, Callable
 from urllib.request import urlopen
@@ -190,10 +191,20 @@ class BailianFileAsr:
         results = completed.output.get("results", [])
         if not results or not results[0].get("transcription_url"):
             raise AsrError("DashScope returned no transcription result")
-        return self._to_payload(self.download_json(results[0]["transcription_url"]))
+        for attempt in range(3):
+            try:
+                result = self.download_json(results[0]["transcription_url"])
+                break
+            except (OSError, HTTPException):
+                if attempt == 2:
+                    raise
+                time.sleep(1.0)
+        return self._to_payload(result)
 
     @staticmethod
     def _to_payload(result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(result, dict) or not isinstance(result.get("transcripts"), list):
+            raise AsrError("DashScope returned no transcript sentences")
         segments: list[dict[str, Any]] = []
         duration_ms = 0
         for transcript in result.get("transcripts", []):
@@ -208,8 +219,6 @@ class BailianFileAsr:
                         "text": sentence.get("text", ""),
                     }
                 )
-        if not segments:
-            raise AsrError("DashScope returned no transcript sentences")
         return {
             "language": result.get("properties", {}).get("language", "zh"),
             "duration_seconds": math.ceil(duration_ms / 1000),

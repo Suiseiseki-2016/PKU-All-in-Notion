@@ -417,6 +417,8 @@ fn kill_panel(child: &mut Child) {
         }
     }
     let _ = child.wait();
+    #[cfg(windows)]
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 fn stop_panel(app: &AppHandle) {
@@ -629,6 +631,9 @@ fn start_panel(app: AppHandle) {
         Some(window) => {
             if let Err(err) = window.navigate(url) {
                 emit_error(&app, &format!("打开学生界面失败：{err}"));
+            } else {
+                #[cfg(not(debug_assertions))]
+                check_for_updates(app.clone());
             }
         }
         None => emit_error(&app, "内部错误：找不到主窗口。"),
@@ -664,11 +669,20 @@ fn desktop_updater(app: &AppHandle, direct: bool) -> tauri_plugin_updater::Resul
 
 #[cfg(not(debug_assertions))]
 fn check_for_updates(app: AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    static UPDATE_CHECK_STARTED: AtomicBool = AtomicBool::new(false);
+    if UPDATE_CHECK_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
 
     std::thread::spawn(move || {
         // Let the local panel appear before making the update request or showing a prompt.
-        std::thread::sleep(Duration::from_secs(8));
+        std::thread::sleep(Duration::from_secs(3));
+        if let Ok(dir) = app_dir() {
+            append_log(&dir.join("panel.log"), "[updater] checking for updates...");
+        }
         let update = match tauri::async_runtime::block_on(async {
             match desktop_updater(&app, false)?.check().await {
                 Ok(update) => Ok(update),
@@ -691,11 +705,26 @@ fn check_for_updates(app: AppHandle) {
                 return;
             }
         };
-        let accepted = app.dialog()
+        if let Ok(dir) = app_dir() {
+            append_log(&dir.join("panel.log"), &format!("[updater] update available: {}", update.version));
+        }
+        let main_window = app.get_webview_window("main");
+        if let Some(window) = &main_window {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        let mut dialog = app.dialog()
             .message(format!("发现新版本 {}。现在下载并安装吗？安装会中断正在进行的转写或同步，关闭窗口后自动重新打开；请先保存正在编辑的内容。已保存的用户数据会保留。", update.version))
             .title("PKU All in One 更新")
-            .buttons(MessageDialogButtons::YesNo)
-            .blocking_show();
+            .buttons(MessageDialogButtons::YesNo);
+        if let Some(window) = &main_window {
+            dialog = dialog.parent(window);
+        }
+        let accepted = dialog.blocking_show();
+        if let Ok(dir) = app_dir() {
+            let decision = if accepted { "accepted" } else { "declined" };
+            append_log(&dir.join("panel.log"), &format!("[updater] user {decision} update {}", update.version));
+        }
         if !accepted {
             return;
         }
@@ -705,7 +734,7 @@ fn check_for_updates(app: AppHandle) {
         }
         let mut downloaded = 0_u64;
         let mut last_percent = None;
-        let outcome = tauri::async_runtime::block_on(update.download_and_install(
+        let mut outcome = tauri::async_runtime::block_on(update.download_and_install(
             |chunk, total| {
                 downloaded = downloaded.saturating_add(chunk as u64);
                 if let (Some(total), Some(window)) = (total.filter(|n| *n > 0), &progress_window) {
@@ -722,6 +751,35 @@ fn check_for_updates(app: AppHandle) {
                 }
             },
         ));
+        if let Err(first_install_err) = outcome {
+            if let Ok(dir) = app_dir() {
+                append_log(&dir.join("panel.log"), &format!("[updater] download_and_install failed ({first_install_err}); retrying direct"));
+            }
+            downloaded = 0;
+            last_percent = None;
+            outcome = tauri::async_runtime::block_on(async {
+                match desktop_updater(&app, true)?.check().await? {
+                    Some(direct_update) => direct_update.download_and_install(
+                        |chunk, total| {
+                            downloaded = downloaded.saturating_add(chunk as u64);
+                            if let (Some(total), Some(window)) = (total.filter(|n| *n > 0), &progress_window) {
+                                let percent = (downloaded.saturating_mul(100) / total).min(100);
+                                if last_percent != Some(percent) {
+                                    let _ = window.set_title(&format!("PKU All in One · 下载更新 {percent}%"));
+                                    last_percent = Some(percent);
+                                }
+                            }
+                        },
+                        || {
+                            if let Some(window) = &progress_window {
+                                let _ = window.set_title("PKU All in One · 正在验证并安装更新…");
+                            }
+                        },
+                    ).await,
+                    None => Err(first_install_err),
+                }
+            });
+        }
         if let Err(err) = outcome {
             if let Some(window) = &progress_window {
                 let _ = window.set_title("PKU All in One");
@@ -739,11 +797,19 @@ fn check_for_updates(app: AppHandle) {
             if let Ok(dir) = app_dir() {
                 append_log(&dir.join("panel.log"), &format!("[updater] install failed: {err}"));
             }
-            let _ = app.dialog()
+            let main_window = app.get_webview_window("main");
+            if let Some(window) = &main_window {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let mut dialog = app.dialog()
                 .message("更新没有完成。请稍后重试，或从官网下载安装包。")
                 .title("PKU All in One 更新")
-                .kind(MessageDialogKind::Error)
-                .blocking_show();
+                .kind(MessageDialogKind::Error);
+            if let Some(window) = &main_window {
+                dialog = dialog.parent(window);
+            }
+            let _ = dialog.blocking_show();
             return;
         }
         #[cfg(not(windows))]
@@ -770,8 +836,6 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || start_panel(handle));
-            #[cfg(not(debug_assertions))]
-            check_for_updates(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

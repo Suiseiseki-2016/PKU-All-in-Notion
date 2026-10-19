@@ -19,6 +19,70 @@ def job_at(root):
     return job
 
 
+@pytest.mark.parametrize('initial_failure', ['exception', 'no_media'])
+@pytest.mark.parametrize('subject_id,catalog_subject_id', [('', ''), ('42', '42'), ('42', '')])
+def test_failed_resolution_refreshes_catalog_and_player_once(tmp_path, monkeypatch, initial_failure, subject_id, catalog_subject_id):
+    job = job_at(tmp_path)
+    job.recording.subject_id = subject_id
+    calls, catalogs = [], []
+    fresh = job.recording.model_copy(update={'play_url': 'fresh-player', 'subject_id': catalog_subject_id})
+    wrong = fresh.model_copy(update={'subject_id': 'wrong', 'title': 'wrong recording'})
+    def resolve(client, recording):
+        calls.append(recording.play_url)
+        if len(calls) == 1:
+            if initial_failure == 'exception':
+                raise httpx.ReadTimeout('CAS failed')
+            recording.mp4_url = ''
+        else:
+            recording.mp4_url = 'https://media.example/fresh.mp4'
+    def catalog(client, course_id):
+        catalogs.append(course_id)
+        return [wrong, fresh]
+    monkeypatch.setattr(pipeline, 'resolve_media', resolve)
+    monkeypatch.setattr(pipeline, 'list_recordings', catalog)
+    with httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(200, content=b'video'))) as client:
+        result = pipeline.download_job(client, job)
+    assert result.path == job.video and job.video.read_bytes() == b'video'
+    assert calls == ['player', 'fresh-player']
+    assert catalogs == ['_123_1']
+    assert job.recording.play_url == 'fresh-player'
+
+
+def test_catalog_refresh_failure_is_bounded_and_never_downloads_stale_media(tmp_path, monkeypatch):
+    job = job_at(tmp_path)
+    calls = []
+    def fail(client, recording):
+        calls.append(True)
+        raise httpx.ReadTimeout('CAS failed')
+    monkeypatch.setattr(pipeline, 'resolve_media', fail)
+    monkeypatch.setattr(pipeline, 'list_recordings', lambda *args: [])
+    monkeypatch.setattr(pipeline, 'download_recording', lambda *args, **kw: pytest.fail('stale download'))
+    result = pipeline.download_job(None, job)
+    assert result.path is None and 'refreshed catalog' in result.error
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('mismatched_subject', [False, True])
+def test_refresh_never_repeats_or_selects_an_explicitly_different_subject(tmp_path, monkeypatch, mismatched_subject):
+    job = job_at(tmp_path)
+    job.recording.subject_id = '42'
+    calls, catalogs = [], []
+    def fail(client, recording):
+        calls.append(recording.play_url)
+        raise httpx.ReadTimeout('CAS failed')
+    def catalog(*args):
+        catalogs.append(True)
+        return [job.recording.model_copy(update={
+            'play_url': 'fresh-player', 'subject_id': '43' if mismatched_subject else '42'})]
+    monkeypatch.setattr(pipeline, 'resolve_media', fail)
+    monkeypatch.setattr(pipeline, 'list_recordings', catalog)
+    monkeypatch.setattr(pipeline, 'download_recording', lambda *args, **kw: pytest.fail('stale download'))
+    result = pipeline.download_job(None, job)
+    assert result.path is None
+    assert len(catalogs) == 1
+    assert calls == (['player'] if mismatched_subject else ['player', 'fresh-player'])
+
+
 @pytest.mark.parametrize('status', [401, 403, 410])
 def test_expired_media_renews_metadata_once_and_keeps_student_content(tmp_path, monkeypatch, status):
     job = job_at(tmp_path)
@@ -111,7 +175,7 @@ def test_parallel_expiry_is_not_hidden_as_missing_range_support(tmp_path, monkey
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         result = media._download_mp4(client, 'https://media.example/expired', tmp_path / 'video.mp4')
     assert result.path is None and getattr(result, 'http_status', None) == 403
-    assert None not in calls and not (tmp_path / 'video.mp4').exists()
+    assert calls[-1] is None and not (tmp_path / 'video.mp4').exists()
 
 
 @pytest.mark.parametrize('stage', ['playlist', 'segment', 'key'])

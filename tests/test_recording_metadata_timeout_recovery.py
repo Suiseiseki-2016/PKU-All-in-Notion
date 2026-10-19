@@ -1,9 +1,15 @@
-"""Renew one-use player credentials after a read timeout; never mask failure."""
+"""Renew single-use player credentials after bounded metadata failures."""
 import httpx
 import pytest
 
 from pku_sync.models import Recording
+from pku_sync import recordings
 from pku_sync.recordings import resolve_media
+
+
+@pytest.fixture(autouse=True)
+def fast_retries(monkeypatch):
+    monkeypatch.setattr(recordings, "_RESOLVE_RETRY_DELAY", 0)
 
 
 def player_client(*, persistent_timeout=False, status=None):
@@ -60,13 +66,43 @@ def test_persistent_player_timeout_is_bounded_and_remains_failure():
     assert seen == [("GET", "/webapps/bb-streammedia-hqy-BBLEARN/playVideo.action"),
                     ("GET", "/cas/1"),
                     ("GET", "/webapps/bb-streammedia-hqy-BBLEARN/playVideo.action"),
-                    ("GET", "/cas/2")]
+                    ("GET", "/cas/2"),
+                    ("GET", "/webapps/bb-streammedia-hqy-BBLEARN/playVideo.action"),
+                    ("GET", "/cas/3")]
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 500])
-def test_player_http_rejection_is_not_retried_as_read_timeout(status):
+def test_player_http_rejection_is_bounded_to_three_fresh_chains(status):
     client, seen = player_client(status=status)
     with client, pytest.raises(httpx.HTTPStatusError) as captured:
         resolve_media(client, recording())
     assert captured.value.response.status_code == status
-    assert seen == [("GET", "/webapps/bb-streammedia-hqy-BBLEARN/playVideo.action"), ("GET", "/cas/1")]
+    assert len(seen) == 6
+    assert [path for _, path in seen if path.startswith("/cas/")] == ["/cas/1", "/cas/2", "/cas/3"]
+
+
+@pytest.mark.parametrize("failure", [400, 502, "connect", "missing_session"])
+def test_cas_failure_mints_a_fresh_single_use_url(failure):
+    seen = []
+    def handle(request):
+        seen.append(request.url.path)
+        if request.url.path.endswith("playVideo.action"):
+            attempt = sum(path.endswith("playVideo.action") for path in seen)
+            return httpx.Response(200, text=f'<iframe src="https://yjapise.pku.edu.cn/cas/{attempt}"></iframe>')
+        if request.url.path == "/cas/1":
+            if failure == "connect":
+                raise httpx.ConnectError("reset", request=request)
+            if failure == "missing_session":
+                return httpx.Response(200)
+            return httpx.Response(failure)
+        if request.url.path == "/cas/2":
+            return httpx.Response(302, headers={"location": "https://onlineroomse.pku.edu.cn/player?course_id=23&sub_id=42"})
+        if request.url.path == "/player":
+            return httpx.Response(200)
+        return httpx.Response(200, json={"code": 0, "data": {"content": {
+            "playback": {"url": "https://media.example/video.mp4"}}}})
+    with httpx.Client(transport=httpx.MockTransport(handle), follow_redirects=True) as client:
+        result = resolve_media(client, recording())
+    assert result.mp4_url == "https://media.example/video.mp4"
+    assert result.unavailable_reason == ""
+    assert seen.count("/cas/1") == seen.count("/cas/2") == 1

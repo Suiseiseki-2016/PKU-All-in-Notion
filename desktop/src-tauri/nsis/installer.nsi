@@ -647,9 +647,20 @@ Section Install
   ; Tauri updater installs over the existing directory. Remove the previous
   ; private Python tree so old package metadata cannot shadow the new wheel.
   ; User data is stored under %USERPROFILE% and is outside $INSTDIR.
-  RMDir /r "$INSTDIR\resources\runtime"
-  IfFileExists "$INSTDIR\resources\runtime\python.exe" 0 +2
+  StrCpy $R0 0
+  install_runtime_retry:
+    RMDir /r "$INSTDIR\resources\runtime"
+    IfFileExists "$INSTDIR\resources\runtime\python.exe" 0 install_runtime_removed
+    IntOp $R0 $R0 + 1
+    IntCmp $R0 10 install_runtime_locked
+    nsExec::ExecToStack 'taskkill /F /T /IM pku-sync.exe'
+    Pop $R1
+    Pop $R2
+    Sleep 500
+    Goto install_runtime_retry
+  install_runtime_locked:
     Abort "Unable to replace the bundled Python runtime. Close the application and retry."
+  install_runtime_removed:
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -791,9 +802,20 @@ Section Uninstall
   ; Tauri updater installs over the existing directory. Remove the previous
   ; private Python tree so old package metadata cannot shadow the new wheel.
   ; User data is stored under %USERPROFILE% and is outside $INSTDIR.
-  RMDir /r "$INSTDIR\resources\runtime"
-  IfFileExists "$INSTDIR\resources\runtime\python.exe" 0 +2
+  StrCpy $R0 0
+  uninstall_runtime_retry:
+    RMDir /r "$INSTDIR\resources\runtime"
+    IfFileExists "$INSTDIR\resources\runtime\python.exe" 0 uninstall_runtime_removed
+    IntOp $R0 $R0 + 1
+    IntCmp $R0 10 uninstall_runtime_locked
+    nsExec::ExecToStack 'taskkill /F /T /IM pku-sync.exe'
+    Pop $R1
+    Pop $R2
+    Sleep 500
+    Goto uninstall_runtime_retry
+  uninstall_runtime_locked:
     Abort "Unable to replace the bundled Python runtime. Close the application and retry."
+  uninstall_runtime_removed:
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
