@@ -1,0 +1,253 @@
+{
+  "policy": "faithful-transcript-notes-v4",
+  "status": "organized",
+  "model": "qwen3.7-plus",
+  "title": "心理咨询与治疗引论(26-27学年第1学期本研合上) · 2026-10-12第10-11节",
+  "identity": "7d57887544e56df0f28db8c76f202c735aeeacfd873b42aac22107ae4745f502",
+  "window_seconds": 480,
+  "transcript_chars": 1200,
+  "transcript_sha256": "ba5af2a44fd3390aed877f3d0a2c5544eae5d5d1fccc0a0bc7dd2c6f8dfa29f1",
+  "sources_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "references_role": "preserved-for-separate-term-review",
+  "note_sha256": "34dbca6e5ffbe57674c86ee95c34ff45c9c7a7e6ffd37486aa6f1778187601d9",
+  "requests": [
+    "6a61882a37d206690ba2968421ff731e0cf279979634c422035fda097910d833",
+    "de5a8f0045431eb73e26e935bae66be7adfa3cd6850660369d153094ca5f8087",
+    "80b397117c8ab59dad4ed0da91fa8fdb03dbf8607e3b57039963a42ad0dc621d",
+    "8ec22539cb166a12221900f865a0531cf2ee7a02a73fafdd753649c5b6bd322e",
+    "bb4ac68dd426cc49008a31c85f767077778b5a40d13f5aa04d7f4ca185fc2628",
+    "b237f3e1a884723c576bd5f8fe4adefaf155b1a57120e67514cb8692c8aff137",
+    "d33195580e599155bf3bb5066385d28c6770aa309af4b7a073bed84e75c7626b",
+    "95553b805416690a51698d59281e08baffcdf460e75769bb92a7880daa45f845",
+    "531ecb29ab105b01a7a5e520a5d85a3d939636704d4841b141d74c6f354befbb",
+    "0d65c278911c4fc3be29ad50c778603d4882b856c4054836423df36cd2922438",
+    "10c2910bf506012015a196f31530938b0ba93cfe3b549c23cb6c17dcaeb02cdc",
+    "99013492a513f7d388c0478807cf72d6e51f671235d30657527f9d82bc15f504",
+    "27a2181d64f820723e8e3c5b2eb3add9162ec639bb9927e504d0e340b918a9b1",
+    "6c4594bc425e7d6c81bff8cdc1f55386b8140cd2fe75cac5475641b4a6700246",
+    "e386a67e600648f67a83c291c90c10aa6c8019d92af6fdddb7f42aefeb33fa72",
+    "1f26722cbecf3f2bd2e476f303e5ef962be8bea5acf3998194b80e985eaa61fd",
+    "c766c500f84cba8647056d51407243826e5d93ab60e1f1fd7176dd45ab6cf768",
+    "a4450d602b0f18073bad4c055afac0ccc70cf0cda338186e374f5c8a8e362aa0",
+    "b63e8ff7d675e7a45d93cef01e946a77e74800ee52554e97a05d71df9f453ff5"
+  ],
+  "content_complete": null,
+  "uncertainties": [],
+  "assessment": "organization-not-content-certification",
+  "relay_evidence": {
+    "relay_endpoint": "https://pku.aeoluswu.info/v1/llm/jobs",
+    "account_id": 12,
+    "calls": [
+      {
+        "part": 1,
+        "parts": 19,
+        "points_charged": 0.11,
+        "seconds": 12.71
+      },
+      {
+        "part": 2,
+        "parts": 19,
+        "points_charged": 0.136,
+        "seconds": 14.65
+      },
+      {
+        "part": 3,
+        "parts": 19,
+        "points_charged": 0.142,
+        "seconds": 14.18
+      },
+      {
+        "part": 4,
+        "parts": 19,
+        "points_charged": 0.143,
+        "seconds": 11.29
+      },
+      {
+        "part": 5,
+        "parts": 19,
+        "points_charged": 0.16,
+        "seconds": 13.95
+      },
+      {
+        "part": 6,
+        "parts": 19,
+        "points_charged": 0.146,
+        "seconds": 11.82
+      },
+      {
+        "part": 7,
+        "parts": 19,
+        "points_charged": 0.157,
+        "seconds": 14.19
+      },
+      {
+        "part": 8,
+        "parts": 19,
+        "points_charged": 0.152,
+        "seconds": 14.56
+      },
+      {
+        "part": 9,
+        "parts": 19,
+        "points_charged": 0.15,
+        "seconds": 12.25
+      },
+      {
+        "part": 10,
+        "parts": 19,
+        "points_charged": 0.166,
+        "seconds": 15.26
+      },
+      {
+        "part": 11,
+        "parts": 19,
+        "points_charged": 0.137,
+        "seconds": 12.45
+      },
+      {
+        "part": 12,
+        "parts": 19,
+        "points_charged": 0.063,
+        "seconds": 3.11
+      },
+      {
+        "part": 13,
+        "parts": 19,
+        "points_charged": 0.037,
+        "seconds": 3.53
+      },
+      {
+        "part": 14,
+        "parts": 19,
+        "points_charged": 0.037,
+        "seconds": 3.16
+      },
+      {
+        "part": 15,
+        "parts": 19,
+        "points_charged": 0.046,
+        "seconds": 6.45
+      },
+      {
+        "part": 16,
+        "parts": 19,
+        "points_charged": 0.162,
+        "seconds": 16.67
+      },
+      {
+        "part": 17,
+        "parts": 19,
+        "points_charged": 0.143,
+        "seconds": 12.48
+      },
+      {
+        "part": 18,
+        "parts": 19,
+        "points_charged": 0.123,
+        "seconds": 14.21
+      },
+      {
+        "part": 19,
+        "parts": 19,
+        "points_charged": 0.044,
+        "seconds": 6.05
+      },
+      {
+        "part": 2,
+        "parts": 19,
+        "points_charged": 0.137,
+        "seconds": 12.9
+      },
+      {
+        "part": 3,
+        "parts": 19,
+        "points_charged": 0.14,
+        "seconds": 14.38
+      },
+      {
+        "part": 1,
+        "parts": 19,
+        "points_charged": 0.103,
+        "seconds": 13.76
+      },
+      {
+        "part": 16,
+        "parts": 19,
+        "points_charged": 0.154,
+        "seconds": 16.33
+      },
+      {
+        "part": 5,
+        "parts": 19,
+        "points_charged": 0.16,
+        "seconds": 16.58
+      },
+      {
+        "part": 17,
+        "parts": 19,
+        "points_charged": 0.14,
+        "seconds": 14.2
+      },
+      {
+        "part": 18,
+        "parts": 19,
+        "points_charged": 0.119,
+        "seconds": 9.17
+      }
+    ],
+    "report_requests": 19,
+    "transcript_sha256": "ba5af2a44fd3390aed877f3d0a2c5544eae5d5d1fccc0a0bc7dd2c6f8dfa29f1",
+    "system_sha256": "a7b0b817afd5405ac248ef1a17d5dc0a7c026af86ff3d1278a6669dbccd47a72",
+    "server_job_aggregate": [
+      {
+        "model": "qwen3.7-plus",
+        "status": "succeeded",
+        "jobs": 26,
+        "points_charged": 3.207
+      }
+    ]
+  },
+  "quality_checks": {
+    "total_characters": 14586,
+    "heading_count_h3": 9,
+    "transcription_review_marker_count": 0,
+    "term_occurrences": {
+      "共情": 9,
+      "来访者": 115,
+      "咨询师": 50,
+      "无条件的积极关注": 12,
+      "侧重点": 1,
+      "童年": 4,
+      "治疗师甲": 2,
+      "治疗师乙": 2,
+      "元认知": 1,
+      "被试": 1,
+      "性少数": 1,
+      "4W1H": 2,
+      "judge": 1
+    },
+    "garbled_term_occurrences": {
+      "共行": 0,
+      "来防者": 0,
+      "白访": 0,
+      "自行事": 0,
+      "机器关注": 0,
+      "腾年": 0,
+      "策证点": 0,
+      "治疗师假": 0,
+      "治疗医": 0,
+      "原认识": 0,
+      "鄙视": 0,
+      "慎少数": 0,
+      "杂购": 0,
+      "炸去": 0
+    },
+    "literal_context_only_echoes": [],
+    "cross_part_duplicate_sentences": [],
+    "pytest": {
+      "passed": 447,
+      "failed": 0
+    },
+    "receipt_integrity": "passed"
+  }
+}

@@ -251,7 +251,7 @@ def test_plus_budget_includes_json_escaping_and_metadata_before_submission(tmp_p
     cfg.notes_model = "qwen3.7-plus"
     # Reference metadata is no longer submitted; the actual course title is.
     with pytest.raises(RuntimeError, match="任务未提交"):
-        transcript_notes.write_notes(transcript(), tmp_path / "notes.md", cfg, "t" * 31000,
+        transcript_notes.write_notes(transcript(), tmp_path / "notes.md", cfg, "t" * 201000,
                                      ask=lambda *a: calls.append(a) or response())
     assert calls == [] and not (tmp_path / "notes.md").exists()
 

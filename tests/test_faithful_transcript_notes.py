@@ -13,6 +13,96 @@ def config(model="qwen3.5-flash"):
         _metered_operation_context={"purpose":"lecture-notes", "source_id":"pku:test:lecture"})
 
 
+@pytest.mark.parametrize("name", ["SYSTEM", "TOPIC_SYSTEM", "MERGE_SYSTEM", "SOURCED_MERGE_SYSTEM"])
+def test_prompts_correct_asr_without_losing_lecture_quality_or_factual_boundaries(name):
+    system = getattr(notes, name)
+    for rule in (
+        "course", "previous_context", "courseware", "领域常识", "同音、近音", "英文单词",
+        "统一术语拼写", "共行→共情", "来防者/白访→来访者", "机器关注→积极关注",
+        "策证点→侧重点", "治疗师假/治疗医→治疗师甲/治疗师乙", "明确纠错不加（转写待回听）",
+        "鄙视→被试", "慎少数→性少数", "四个杂购一个H→四个 W 一个 H（4W1H）",
+        "不要炸去/No炸去→不要 judge", "大家晚上好", "是不是？、是吧？、对不对？",
+        "保留实质问答与反问含义", "进入独立新主题或模块时必须加", "### 主题小标题",
+        "仅当分段开头直接延续 previous_context 的同一段落/主题时省略开头标题",
+        "previous_context 是只读的衔接上下文，其中的句子绝不能在输出中重复",
+        "绝不用于普通词汇、口语语法修复", "外国人名", "符号/代码", "关键数字",
+        "仍确实无法辨认", "同一不确定词最多标一次", "0细胞", "清晰连贯的大学课堂讲义",
+        "推导步骤", "课堂问答", "作业考试安排", "不重复标题", "### 小标题",
+        "要点列表/关键概念/总结/待核问题", "绝不编造课堂未提及", "普遍规律或因果结论",
+        "个人猜测、未证实、研究分歧、仅供参考、了解即可、不考",
+    ):
+        assert rule in system
+    assert "不要纠正或替换转写里的名词" not in system
+    assert "只能保留原词" not in system
+    assert len(system) < 2000
+    assert "JSON" in notes.SYSTEM and "轻度编辑" in notes.TOPIC_SYSTEM
+    assert "优先使用课件中的准确写法" in notes.SOURCED_MERGE_SYSTEM
+
+
+@pytest.mark.parametrize("previous_system", [notes.PREVIOUS_SYSTEM, notes.LEGACY_SYSTEM])
+def test_previous_transcript_prompt_receipts_restore_and_reuse_paid_parts(tmp_path, monkeypatch, previous_system):
+    from pku_sync.note_editor import report_path, review_record_issues
+
+    target = tmp_path / "old.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(notes, "SYSTEM", previous_system)
+        notes.write_notes(original(), target, config(), "课程", ask=lambda *a: "原付费正文。")
+    saved = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    fail = lambda *a: pytest.fail("previous transcript response billed again")
+    assert notes.record_issues(target, original()) == []
+    assert review_record_issues(target, original()) == []
+    notes.write_notes(original(), target, config(), "课程", ask=fail)
+    target.unlink()
+    notes.write_notes(original(), target, config(), "课程", ask=fail)
+    assert all(p.read_bytes() == raw for p, raw in saved.items())
+    # A new output without a final report must discover old prompt cache keys.
+    fresh = tmp_path / "new.md"
+    notes.write_notes(original(), fresh, config(), "课程", ask=fail)
+    assert fresh.read_bytes() == target.read_bytes()
+    old_report = json.loads(report_path(target).read_text("utf-8"))
+    new_report = json.loads(report_path(fresh).read_text("utf-8"))
+    assert new_report["requests"] == old_report["requests"]
+    assert notes.record_issues(fresh, original()) == []
+
+
+@pytest.mark.parametrize("merge_name", [
+    "LEGACY_MERGE_SYSTEM", "LEGACY_SOURCED_MERGE_SYSTEM", "PREVIOUS_SOURCED_MERGE_SYSTEM",
+])
+def test_previous_topic_prompts_restore_notes_and_reuse_paid_parts(tmp_path, monkeypatch, merge_name):
+    from pku_sync.note_editor import review_record_issues
+
+    sourced = merge_name != "LEGACY_MERGE_SYSTEM"
+    sources = [{"title": "课件", "text": "本课术语", "status": "readable"}] if sourced else []
+    target = tmp_path / "old.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(notes, "TOPIC_SYSTEM", notes.LEGACY_TOPIC_SYSTEM)
+        patch.setattr(notes, "SOURCED_MERGE_SYSTEM" if sourced else "MERGE_SYSTEM",
+                      getattr(notes, merge_name))
+        notes.write_topic_notes(original(), target, config(), "课程", source_context=sources,
+                                ask=lambda *a: "原付费分段。", merge_ask=lambda *a: "原合并正文。")
+    saved = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    fail = lambda *a: pytest.fail("previous topic response billed again")
+    assert notes.topic_record_issues(target, original(), sources) == []
+    assert review_record_issues(target, original(), sources) == []
+    notes.write_topic_notes(original(), target, config(), "课程", source_context=sources,
+                            ask=fail, merge_ask=fail)
+    target.unlink()
+    notes.write_topic_notes(original(), target, config(), "课程", source_context=sources,
+                            ask=fail, merge_ask=fail)
+    calls = []
+    fresh = tmp_path / "new.md"
+    def merge(system, prompt):
+        assert system == (notes.SOURCED_MERGE_SYSTEM if sourced else notes.MERGE_SYSTEM)
+        calls.append(json.loads(prompt))
+        return "新合并正文。"
+    notes.write_topic_notes(original(), fresh, config(), "课程", source_context=sources,
+                            ask=fail, merge_ask=merge)
+    assert len(calls) == 1
+    assert [r["note"] for r in calls[0]["section_drafts"]] == ["原付费分段。"] * 2
+    assert notes.topic_record_issues(fresh, original(), sources) == []
+    assert all(p.read_bytes() == raw for p, raw in saved.items())
+
+
 @pytest.mark.parametrize("strategy", ["topics", "transcript"])
 @pytest.mark.parametrize("model", [None, "qwen3.7-plus", "qwen3.5-flash", "qwen3.8-max", "test-model"])
 @pytest.mark.parametrize("via_settings", [False, True])
@@ -630,3 +720,11 @@ def test_default_cloud_path_recovers_lost_result_without_second_billable_job(tmp
     media.write_notes(original(),[],target,cfg,'课程')
     assert len(sent)==3 and len(jobs)==2 and sent[1]==sent[2]
     assert notes.record_issues(target,original())==[]
+
+
+@pytest.mark.parametrize("responses, expected", [
+    (["正文一。", " \n<!-- 本段无新增授课内容 -->\n", "正文二。"], "正文一。\n\n正文二。"),
+    (["<!-- 本段无新增授课内容 -->"], "<!-- 本段无新增授课内容 -->"),
+])
+def test_assembly_omits_break_placeholders_unless_all_parts_are_empty(responses, expected):
+    assert notes._body("课程", responses) == "# 课程\n\n" + expected + "\n"

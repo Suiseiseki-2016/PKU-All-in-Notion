@@ -37,6 +37,91 @@ def normal(system, prompt):
     return f"第{json.loads(prompt)['unit']}个知识点的原始响应。"
 
 
+@pytest.mark.parametrize("stage", ["unit", "merge", "standalone-unit"])
+def test_knowledge_prompts_correct_asr_and_require_coherent_faithful_prose(stage):
+    from pku_sync import knowledge_notes
+
+    system = {"unit": notes.UNIT_SYSTEM, "merge": notes.MERGE_SYSTEM,
+              "standalone-unit": knowledge_notes.SYSTEM}[stage]
+    for rule in (
+        "course", "reference_context", "courseware", "领域常识", "同音、近音", "成语、英文单词",
+        "共行→共情", "自行事→咨询师", "腾年→童年", "原认识→元认知", "统一术语拼写",
+        "明确纠错不加（转写待回听）", "绝不用于普通词汇、口语语法修复", "孤立专名、外国人名",
+        "符号/代码或关键数字", "仍确实无法辨认", "同一不确定词最多标一次", "0细胞",
+        "清晰连贯的大学课堂讲义", "课堂问答", "推导步骤", "作业考试安排", "不重复标题",
+        "主题真正转变", "### 小标题", "要点列表/关键概念/总结/待核问题",
+        "绝不编造课堂未提及", "普遍规律或因果结论",
+        "可能、大概、个人猜测、未证实、研究分歧、仅供参考、了解即可、不考",
+    ):
+        assert rule in system
+    assert len(system) < 2000
+    assert "保留原词并标待回听" not in system
+    assert "不要凭发音、常识或自己的知识换成另一个确定名称" not in system
+
+
+@pytest.mark.parametrize("assembly,repair", [
+    ("source-order", False), ("model-merge", False), ("model-merge", True),
+])
+def test_previous_unit_and_merge_prompts_preserve_paid_receipts(tmp_path, monkeypatch, assembly, repair):
+    from pku_sync.note_editor import review_record_issues
+
+    target = tmp_path / "notes.md"
+    def combine(system, prompt):
+        if system == notes.REPAIR_SYSTEM:
+            assert json.loads(prompt)["response_contract"] == notes.PREVIOUS_MERGE_SYSTEM
+            return merge()
+        assert system == notes.PREVIOUS_MERGE_SYSTEM
+        return "invalid JSON: saved paid response" if repair else merge()
+    with monkeypatch.context() as patch:
+        patch.setitem(notes._SYSTEMS, "unit", notes.PREVIOUS_UNIT_SYSTEM)
+        patch.setitem(notes._SYSTEMS, "merge", notes.PREVIOUS_MERGE_SYSTEM)
+        notes.write_notes(lecture(), target, config(), "课程", ask=normal,
+                          merge_ask=combine, assembly=assembly)
+    original = target.read_bytes()
+    saved = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    fail = lambda *a: pytest.fail("previous prompt response billed again")
+    assert notes.record_issues(target, lecture()) == []
+    assert review_record_issues(target, lecture()) == []
+    assert notes.saved_sections(target, lecture())[0] == original.decode("utf-8")
+    notes.write_notes(lecture(), target, config(), "课程", ask=fail, merge_ask=fail, assembly=assembly)
+    target.unlink()
+    notes.write_notes(lecture(), target, config(), "课程", ask=fail, merge_ask=fail, assembly=assembly)
+    assert target.read_bytes() == original
+    # With no final report, resume from the same paid plan, units and merge.
+    fresh = tmp_path / "new.md"
+    notes.write_notes(lecture(), fresh, config(), "课程", ask=fail, merge_ask=fail, assembly=assembly)
+    assert fresh.read_bytes() == original
+    assert notes.record_issues(fresh, lecture()) == []
+    assert all(p.read_bytes() == raw for p, raw in saved.items())
+
+
+def test_prompt_upgrade_resumes_unfinished_paid_units_without_rebilling(tmp_path, monkeypatch):
+    target = tmp_path / "notes.md"
+    def old_ask(system, prompt):
+        if system == notes.PLAN_SYSTEM:
+            return plan()
+        assert system == notes.PREVIOUS_UNIT_SYSTEM
+        if json.loads(prompt)["unit"] == 1:
+            raise RuntimeError("interrupted old work")
+        return "已付费的第0段。"
+    with monkeypatch.context() as patch:
+        patch.setitem(notes._SYSTEMS, "unit", notes.PREVIOUS_UNIT_SYSTEM)
+        with pytest.raises(RuntimeError, match="interrupted old work"):
+            notes.write_notes(lecture(), target, config(), "课程", ask=old_ask, workers=1)
+    saved = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    calls = []
+    def new_ask(system, prompt):
+        assert system == notes.UNIT_SYSTEM
+        index = json.loads(prompt)["unit"]
+        assert index in {1, 2}
+        calls.append(index)
+        return f"新整理第{index}段。"
+    notes.write_notes(lecture(), target, config(), "课程", ask=new_ask, workers=1)
+    assert calls == [1, 2]
+    assert notes.record_issues(target, lecture()) == []
+    assert all(p.read_bytes() == raw for p, raw in saved.items())
+
+
 def test_full_lecture_merge_keeps_every_owned_original_once_and_restores_paid_output(tmp_path, monkeypatch):
     original = {'segments': [
         {'start': i * 6.0, 'end': i * 6.0 + 5,
