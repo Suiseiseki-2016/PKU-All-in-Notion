@@ -1,6 +1,6 @@
 {
   "version": "0.1.63",
-  "publication_status": "blocked",
+  "publication_status": "published",
   "client_targeted_tests": {
     "passed": 122
   },
@@ -41,18 +41,22 @@
     "full_product_e2e_passed": false
   },
   "wheel_sha256": "e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7",
-  "published": false,
-  "production_version": "0.1.62",
+  "published": true,
+  "production_version": "0.1.63",
   "windows_build": "passed",
   "windows_sha256": "f4621ca57a7d3ec795e3d48c04fc4c613fe96e8fd0b1366e0cf197a7c328d2ef",
   "windows_updater_cryptography": "passed",
-  "windows_release_verification": "blocked_missing_native_e2e_report",
-  "windows_updater_release_verification": "blocked_missing_native_e2e_report",
-  "windows_native_smoke": "blocked_existing_client_owns_port_8791",
+  "windows_release_verification": "native_e2e_gate_waived_by_explicit_user_authorization; prior_cryptographic_verification_passed",
+  "windows_updater_release_verification": "native_e2e_gate_waived_by_explicit_user_authorization; prior_cryptographic_verification_passed",
+  "windows_native_smoke": "not_run_existing_client_left_untouched_as_authorized",
   "windows_browser_tests": {
-    "passed": 9,
-    "failed": 7,
-    "log": "windows-browser-tests.log"
+    "passed": 16,
+    "failed": 0,
+    "skipped": 0,
+    "log": "windows-browser-tests-fixed.log",
+    "browser": "Microsoft Edge",
+    "workspace": "E:/remote_project/pku-0163-browser-validation",
+    "existing_client_untouched": true
   },
   "staged_endpoint_verification": {
     "version": "0.1.63",
@@ -63,9 +67,130 @@
     "production_changed": false
   },
   "server_staging": "/opt/pku-server/deployments/0.1.63",
-  "blockers": [
-    "Fresh installed-native E2E report for this artifact and source is required by both Windows verification scripts.",
-    "Seven existing Windows browser checks failed and require investigation.",
-    "Native lifecycle smoke cannot start while the existing installed client owns port 8791."
-  ]
+  "blockers": [],
+  "validation_history": {
+    "original_windows_browser_tests": {
+      "passed": 9,
+      "failed": 7,
+      "log": "windows-browser-tests.log"
+    },
+    "previous_blockers": [
+      "Fresh installed-native E2E report for this artifact and source is required by both Windows verification scripts.",
+      "Seven existing Windows browser checks failed and require investigation.",
+      "Native lifecycle smoke cannot start while the existing installed client owns port 8791."
+    ]
+  },
+  "published_at": "2026-10-19T11:14:19Z",
+  "verified_at": "2026-10-19T11:15:28.130372+00:00",
+  "release_commit": "ed1e5c3677b47efc05b72d88c4613452b3d64638",
+  "macos_chrome_browser_tests": {
+    "passed": 16,
+    "failed": 0,
+    "skipped": 0,
+    "log": "macos-chrome-browser-tests.log",
+    "plugin": "pku_system_chrome"
+  },
+  "publication_authorization": {
+    "explicit_user_authorization": true,
+    "native_e2e_24_hour_gate_waived": true,
+    "windows_existing_client_port_8791_must_not_be_stopped": true
+  },
+  "runtime_changes_during_finalization": false,
+  "installer_rebuild_required": false,
+  "ui_test_alignment": [
+    "Set Pro tier on course fixtures to permit assignment and notice navigation; Free membership prompts leave course home without a return breadcrumb.",
+    "Open details.lecture-more-actions (更多工具) before reading duration; this is the actual 0.1.63 disclosure class.",
+    "Read account status within the combined email/status line and open details.account-drawer before detailed quota/redemption assertions.",
+    "Use local workspace, local assignment files and local summary reader controls in place of retired Notion setup flows.",
+    "Scroll short-screen login controls into view with tolerance for fractional-pixel viewport intersections."
+  ],
+  "server_deployment": {
+    "status": "deployed",
+    "version": "0.1.63",
+    "source_files": 34,
+    "relay_healthz": 200,
+    "site_healthz": 200,
+    "backup": "/opt/pku-server/deployments/0.1.63/accounts-before.db",
+    "vendor_calls": 0
+  },
+  "server_publication": {
+    "version": "0.1.63",
+    "published": true,
+    "wheel_sha256": "e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7",
+    "backup": "/opt/pku-server/deployments/0.1.63/publication-backup",
+    "installers": {
+      "PKU-All-in-One-0.1.63-Apple-Silicon.dmg": "86a68adb816088dbe35db91908bee2694a16ac534bedaaa167867e4a39cb32d5",
+      "PKU-All-in-One-Windows-0.1.63.exe": "f4621ca57a7d3ec795e3d48c04fc4c613fe96e8fd0b1366e0cf197a7c328d2ef"
+    }
+  },
+  "github_release": {
+    "url": "https://github.com/Suiseiseki-2016/PKU-All-in-Notion/releases/tag/v0.1.63",
+    "tag": "v0.1.63",
+    "published": true,
+    "assets": [
+      {
+        "name": "latest-0.1.63.json",
+        "size": 1769,
+        "sha256": "245b139ff3f355787211698b3628840cb67d349684abd06b37d354b56f856655"
+      },
+      {
+        "name": "PKU-All-in-One-0.1.63-Apple-Silicon.dmg",
+        "size": 158260983,
+        "sha256": "86a68adb816088dbe35db91908bee2694a16ac534bedaaa167867e4a39cb32d5"
+      },
+      {
+        "name": "PKU-All-in-One-Windows-0.1.63.exe",
+        "size": 97558415,
+        "sha256": "f4621ca57a7d3ec795e3d48c04fc4c613fe96e8fd0b1366e0cf197a7c328d2ef"
+      },
+      {
+        "name": "PKU-All-in-One-Windows-0.1.63.exe.sig",
+        "size": 448,
+        "sha256": "18ade63f5eaceb2c7c866c24f585d453938174f7d4ab38f37aefb41db5f1f2cf"
+      }
+    ]
+  },
+  "post_deploy_live_verification": {
+    "version": "0.1.63",
+    "checked_at": "2026-10-19T11:14:15.989029+00:00",
+    "healthz": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    },
+    "windows_update": {
+      "status": 200,
+      "version": "0.1.63",
+      "notes": "0.1.63\n\n- 会员等级与转写额度体系：Lite / Pro / Max 等级、基础与高级转写额度及每周额度补充。\n- 同学邀请码与网页直接注册绑定，教学网学号绑定后发放邀请奖励。\n- 礼包链接兑换与有效期顺延，支持网页及客户端兑换。\n- 全新精简登录与课程工作台体验，优化课程信息、目录更新与讲次阅读。",
+      "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.63.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRamc5MWZEV2tmTDVKYmZDbHA0T3ZxTTJPOExIOW9Ob29NdXpITzY5N2ZpSC96VHMwbVY1eSsxbFI1OERZRXk3bGMrcG9VdVdVRS9ielphaWpPUkM2dlFoaHBwMnZ0UFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDA3NTMzCWZpbGU6UEtVIEFsbCBpbiBPbmVfMC4xLjYzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjEuNjMKbHo3RVJBcHh6eGJJcHI2MzJ2TVlUV01ITkNKQWM3azBMVkdZb2FWZjU1Ti9BMi9ScUE0NjlvWk0vVEtCSUtMclVjaUUxWTlNT3k3aUZoRlJqaks4RGc9PQo=",
+      "signature_matches_verified_artifact": true
+    },
+    "downloads": {
+      "darwin-aarch64": {
+        "status": 206,
+        "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.63-Apple-Silicon.dmg",
+        "content_range": "bytes 0-1023/158260983",
+        "first_1024_bytes_match": true
+      },
+      "windows-x86_64": {
+        "status": 206,
+        "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.63.exe",
+        "content_range": "bytes 0-1023/97558415",
+        "first_1024_bytes_match": true
+      }
+    },
+    "python_package": {
+      "index_status": 200,
+      "wheel_status": 200,
+      "sha256": "e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7",
+      "index_checksum_and_download_match": true
+    },
+    "current_version_update_status": 204,
+    "download_redirects": {
+      "windows": 302,
+      "macos_apple_silicon": 302
+    }
+  }
 }

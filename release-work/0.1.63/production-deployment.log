@@ -1,0 +1,1 @@
+{"status": "deployed", "version": "0.1.63", "source_files": 34, "relay_healthz": 200, "site_healthz": 200, "backup": "/opt/pku-server/deployments/0.1.63/accounts-before.db", "vendor_calls": 0}

@@ -1,0 +1,43 @@
+{
+  "version": "0.1.63",
+  "checked_at": "2026-10-19T11:14:15.989029+00:00",
+  "healthz": {
+    "status": 200,
+    "body": {
+      "ok": true
+    }
+  },
+  "windows_update": {
+    "status": 200,
+    "version": "0.1.63",
+    "notes": "0.1.63\n\n- 会员等级与转写额度体系：Lite / Pro / Max 等级、基础与高级转写额度及每周额度补充。\n- 同学邀请码与网页直接注册绑定，教学网学号绑定后发放邀请奖励。\n- 礼包链接兑换与有效期顺延，支持网页及客户端兑换。\n- 全新精简登录与课程工作台体验，优化课程信息、目录更新与讲次阅读。",
+    "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.63.exe",
+    "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRamc5MWZEV2tmTDVKYmZDbHA0T3ZxTTJPOExIOW9Ob29NdXpITzY5N2ZpSC96VHMwbVY1eSsxbFI1OERZRXk3bGMrcG9VdVdVRS9ielphaWpPUkM2dlFoaHBwMnZ0UFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNDA3NTMzCWZpbGU6UEtVIEFsbCBpbiBPbmVfMC4xLjYzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjEuNjMKbHo3RVJBcHh6eGJJcHI2MzJ2TVlUV01ITkNKQWM3azBMVkdZb2FWZjU1Ti9BMi9ScUE0NjlvWk0vVEtCSUtMclVjaUUxWTlNT3k3aUZoRlJqaks4RGc9PQo=",
+    "signature_matches_verified_artifact": true
+  },
+  "downloads": {
+    "darwin-aarch64": {
+      "status": 206,
+      "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-0.1.63-Apple-Silicon.dmg",
+      "content_range": "bytes 0-1023/158260983",
+      "first_1024_bytes_match": true
+    },
+    "windows-x86_64": {
+      "status": 206,
+      "url": "https://pku.aeoluswu.info/download/release/PKU-All-in-One-Windows-0.1.63.exe",
+      "content_range": "bytes 0-1023/97558415",
+      "first_1024_bytes_match": true
+    }
+  },
+  "python_package": {
+    "index_status": 200,
+    "wheel_status": 200,
+    "sha256": "e098fc58f912daeae8698ee6bbdcfd182d7ef8d35e36be6473075bb7be2d2ce7",
+    "index_checksum_and_download_match": true
+  },
+  "current_version_update_status": 204,
+  "download_redirects": {
+    "windows": 302,
+    "macos_apple_silicon": 302
+  }
+}
