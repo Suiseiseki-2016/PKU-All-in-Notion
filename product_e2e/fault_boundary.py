@@ -245,16 +245,16 @@ class AccountFaultBoundary:
             with socket.socket() as reserved:
                 reserved.bind(('127.0.0.1', 0))
                 port = reserved.getsockname()[1]
-                # This owned bound socket does not listen and cannot belong
-                # to another process. Preserve original method/path/payload.
-                with httpx.Client(proxy=f'http://127.0.0.1:{port}', timeout=3, trust_env=False) as client:
-                    try:
-                        client.request(method, 'https://pku.aeoluswu.info' + path,
-                                       content=body, headers=headers)
-                    except httpx.TransportError as exc:
-                        proof['error_chain'] = self._error_chain(exc)
-                        proof['failure_observed'] = any(row['errno'] in {10061, 111, errno.ECONNREFUSED}
-                            or row['winerror'] == 10061 for row in proof['error_chain'])
+            # The ephemeral port is immediately released so no listening PCB
+            # exists on 127.0.0.1:port across Linux, macOS (XNU), and Windows.
+            with httpx.Client(proxy=f'http://127.0.0.1:{port}', timeout=3, trust_env=False) as client:
+                try:
+                    client.request(method, 'https://pku.aeoluswu.info' + path,
+                                   content=body, headers=headers)
+                except httpx.TransportError as exc:
+                    proof['error_chain'] = self._error_chain(exc)
+                    proof['failure_observed'] = any(row['errno'] in {10061, errno.ECONNREFUSED}
+                        or row['winerror'] == 10061 for row in proof['error_chain'])
             if not proof['failure_observed']:
                 raise ResourceBlocked('proxy_failure_not_observed')
             proof['mechanism'] = 'original-request-through-owned-nonlistening-proxy'

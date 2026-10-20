@@ -108,7 +108,7 @@ def confirmed_ledger(root, settings):
 def test_single_refresh_preserves_other_confirmed_course_without_global_success(tmp_path):
     settings = configuration(tmp_path)
     confirmed_ledger(tmp_path, settings)
-    other = json.loads((tmp_path / "portal-read-status.json").read_text())["courses"]["other"]
+    other = json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))["courses"]["other"]
     catalog.read_status(tmp_path, False, "reading", course_id="selected")
     catalog.course_read_status(tmp_path, "selected", False, "reading")
     catalog.assert_portal_readable(tmp_path, "other")
@@ -116,7 +116,7 @@ def test_single_refresh_preserves_other_confirmed_course_without_global_success(
         catalog.assert_portal_readable(tmp_path, "selected")
     catalog.course_read_status(tmp_path, "selected", True, "complete")
     catalog.read_status(tmp_path, True, "complete", course_id="selected")
-    status = json.loads((tmp_path / "portal-read-status.json").read_text())
+    status = json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))
     assert status["courses"]["other"] == other
     assert status["complete"] is False and status["scope"] == "course"
     assert status["course_id"] == "selected" and status["reason"] == "complete"
@@ -132,13 +132,13 @@ def test_single_refresh_cannot_preserve_another_accounts_confirmation(tmp_path):
     catalog.course_read_status(tmp_path, "selected", True, "complete")
     with pytest.raises(catalog.CatalogUnavailable):
         catalog.assert_portal_readable(tmp_path, "other")
-    assert "other" not in json.loads((tmp_path / "portal-read-status.json").read_text())["courses"]
+    assert "other" not in json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))["courses"]
 
 
 def test_original_full_refresh_still_invalidates_all_previous_course_confirmations(tmp_path):
     confirmed_ledger(tmp_path, configuration(tmp_path))
     catalog.read_status(tmp_path, False, "reading")
-    assert json.loads((tmp_path / "portal-read-status.json").read_text())["courses"] == {}
+    assert json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))["courses"] == {}
 
 
 def portal_fixture(tmp_path, monkeypatch):
@@ -182,7 +182,7 @@ def test_real_index_function_scopes_observation_reads_writes_and_retains_other_l
     assert {str(path.relative_to(other_dir)): path.read_bytes() for path in other_dir.iterdir()} == original
     catalog.assert_portal_readable(tmp_path, "other")
     catalog.assert_portal_readable(tmp_path, "selected")
-    assert json.loads((tmp_path / "portal-read-status.json").read_text())["complete"] is False
+    assert json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))["complete"] is False
 
 
 def test_unknown_selected_course_fails_before_observation_or_ledger_mutation(tmp_path, monkeypatch):
@@ -237,7 +237,7 @@ def test_selected_unconfirmed_cannot_succeed_using_other_confirmed_course(tmp_pa
     if has_selected_status:
         catalog.course_read_status(tmp_path, "selected", False, "account_unconfirmed")
     else:
-        payload = json.loads((tmp_path / "portal-read-status.json").read_text())
+        payload = json.loads((tmp_path / "portal-read-status.json").read_text("utf-8"))
         del payload["courses"]["selected"]
         (tmp_path / "portal-read-status.json").write_text(json.dumps(payload), "utf-8")
     manager = synchronous_manager(settings, monkeypatch)
@@ -311,7 +311,7 @@ def test_selected_material_failure_keeps_its_previous_files_and_other_course_usa
     monkeypatch.setattr(materials, "walk_materials", failed_materials)
     recordings_api.sync_recording_index(settings, lambda stage: None, course_id="selected")
     assert (index / "index.json").read_bytes() == b"[]"
-    assert json.loads((selected_dir / "course.json").read_text())["synced_at"] == old_course["synced_at"]
+    assert json.loads((selected_dir / "course.json").read_text("utf-8"))["synced_at"] == old_course["synced_at"]
     assert ("publish", "selected") not in calls
     assert {str(path.relative_to(other_dir)): path.read_bytes() for path in other_dir.iterdir()} == original
     catalog.assert_portal_readable(tmp_path, "other")

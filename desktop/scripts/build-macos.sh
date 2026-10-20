@@ -41,7 +41,7 @@ PATH="$SCRIPT_DIR/macos-tools:$PATH" npx tauri bundle --bundles app \
   --config '{"bundle":{"createUpdaterArtifacts":false}}'
 /usr/bin/xattr -cr "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
-rm -rf "$DMG_STAGE"
+rm -rf "$DMG_STAGE" "$DMG_DIR"/*.dmg
 mkdir -p "$DMG_STAGE" "$DMG_DIR"
 /usr/bin/ditto "$APP" "$DMG_STAGE/PKU All in One.app"
 ln -s /Applications "$DMG_STAGE/Applications"
@@ -51,4 +51,5 @@ ln -s /Applications "$DMG_STAGE/Applications"
   -ov \
   -format UDZO \
   "$DMG"
+rm -rf "$DMG_STAGE"
 echo "DMG ready: $DMG"

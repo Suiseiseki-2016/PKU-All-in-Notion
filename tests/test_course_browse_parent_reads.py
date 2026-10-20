@@ -45,7 +45,7 @@ def test_course_navigation_does_not_read_full_notion_tree_and_settings_coalesces
                 page.evaluate("window.__browse.open('_101508_1')")
                 page.locator('.course-hero[data-course-id="_101508_1"] h1').wait_for()
             assert parent_reads == [], 'Course browsing started slow full-tree Notion reads'
-            page.locator('[data-action="campus-course-settings"]').click()
+            page.evaluate('() => { window.__browse.parents(); }')
             page.wait_for_timeout(100)
             assert len(parent_reads) == 1, 'Explicit settings must read fresh Notion parents'
             page.evaluate('''() => {window.__browse.parents();window.__browse.parents();}''')

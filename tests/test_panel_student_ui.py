@@ -112,11 +112,11 @@ def test_auth_copy_is_shipped_for_product_account_flows():
     assert auth["forgot"]["submit"] == "发送重置邮件"
     account = PANEL_COPY["account"]
     assert account["unverified"] == "邮箱未验证"
-    assert account["redeem"] == "兑换额度"
+    assert account["redeem"] == "兑换 / 续费"
     assert account["redeem_gated"] == "完成邮箱验证后即可兑换额度。"
     page = student_page()
     assert "登录学习空间" in page
-    assert "兑换额度" in page
+    assert "兑换 / 续费" in page
 
 
 def test_student_ui_never_carries_content_paths_or_tokens():

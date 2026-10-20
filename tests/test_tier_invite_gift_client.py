@@ -46,7 +46,7 @@ def test_client_copy_describes_tiers_quotas_invites_and_password():
 def test_registration_password_hint_and_validation_in_real_browser():
     from playwright.sync_api import sync_playwright
     from browser_support import browser_launch_options
-    script=(ROOT/'pku_sync/panel/static/app.js').read_text()
+    script=(ROOT/'pku_sync/panel/static/app.js').read_text('utf-8')
     script=script.rstrip()[:-5]+'window.__tierTest={state:state,render:render,submitAuth:submitAuth};})();'
     posted=[]
     def serve(route):
@@ -91,9 +91,9 @@ def test_registration_password_hint_and_validation_in_real_browser():
 def test_invite_code_and_link_copy_and_full_width_redeem_in_browser(mobile, verified):
     from playwright.sync_api import sync_playwright, expect
     from browser_support import browser_launch_options
-    script=(ROOT/'pku_sync/panel/static/app.js').read_text()
+    script=(ROOT/'pku_sync/panel/static/app.js').read_text('utf-8')
     script=script.rstrip()[:-5]+'window.__tierTest={state:state,render:render};})();'
-    css=(ROOT/'pku_sync/panel/static/app.css').read_text()
+    css=(ROOT/'pku_sync/panel/static/app.css').read_text('utf-8')
     def serve(route):
         path=urlsplit(route.request.url).path
         if path=='/app': route.fulfill(body=student_page(),content_type='text/html')
@@ -327,7 +327,7 @@ def test_quota_copies_pending_campus_reward(tmp_path, monkeypatch):
 
 def test_tier_onboarding_and_course_gates_in_browser():
     from playwright.sync_api import sync_playwright, expect
-    script = (ROOT/'pku_sync/panel/static/app.js').read_text()
+    script = (ROOT/'pku_sync/panel/static/app.js').read_text('utf-8')
     script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + '''window.__ux={state:state,render:render,
         credentials:recordingCredentialsForm,setup:campusSetupGuide,noteStyle:recordingNoteStyle,
         summary:startCourseSummary,centers:campusOfficialSections,prepare:prepareCampusAssignment,

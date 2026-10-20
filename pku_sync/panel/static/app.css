@@ -1377,3 +1377,133 @@ section[data-materials-unassigned] > ul {
 
 .sidebar .invite-copy-actions { gap: 4px; margin-bottom: 6px; }
 .sidebar .invite-copy-actions .btn { min-height: 28px; padding: 4px 5px; font-size: 11px; }
+
+/* Local recordings notice banner & storage management panel */
+.local-recordings-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 12px 16px;
+  border: 1px solid #d5e5db;
+  border-radius: 12px;
+  background: #eff7f2;
+  font-size: 13px;
+}
+.local-recordings-banner-text {
+  min-width: 0;
+  flex: 1 1 280px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.local-recordings-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.local-recordings-panel {
+  margin: 16px 0;
+  padding: 20px;
+  border: 1px solid var(--line, #dfe8e2);
+  border-radius: 14px;
+  background: #fafcf9;
+}
+.local-recordings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.local-recordings-header h2 {
+  margin-bottom: 4px;
+  font-size: 18px;
+}
+.local-recordings-settings {
+  display: grid;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: #f1f6f2;
+  margin-bottom: 18px;
+}
+.local-recordings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.local-recordings-toggle input {
+  accent-color: var(--green, #2e7761);
+  flex-shrink: 0;
+}
+.local-recordings-dir-row label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.local-recordings-dir-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.local-recordings-dir-controls .text-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+.local-recordings-list-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.local-recordings-list-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.local-recordings-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.local-recording-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line, #dfe8e2);
+}
+.local-recording-info {
+  min-width: 0;
+  flex: 1 1 280px;
+  overflow-wrap: anywhere;
+}
+.local-recording-info strong {
+  display: block;
+  font-size: 14px;
+}
+.local-recording-info small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.local-recording-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+

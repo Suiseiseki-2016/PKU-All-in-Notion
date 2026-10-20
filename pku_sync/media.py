@@ -786,6 +786,549 @@ def extract_keyframes(
     return frames
 
 
+def _fetch_segment_bytes(
+    client: httpx.Client,
+    seg: HlsSegment,
+    index: int,
+    media_sequence: int,
+    key_cache: dict[str, bytes],
+    key_lock: threading.Lock,
+) -> bytes:
+    """Fetch and decrypt one HLS segment purely in RAM (never writes to disk)."""
+    for attempt in range(3):
+        try:
+            resp = client.get(seg.uri, headers=_hls_headers(client), follow_redirects=True)
+            if resp.status_code != 200:
+                resp.raise_for_status()
+                raise RuntimeError(f"HLS segment #{index} failed (HTTP {resp.status_code})")
+            data = resp.content
+            if seg.key_uri is not None:
+                with key_lock:
+                    key = key_cache.get(seg.key_uri)
+                if key is None:
+                    fetched_key = _hls_key(client, seg.key_uri)
+                    with key_lock:
+                        key = key_cache.setdefault(seg.key_uri, fetched_key)
+                iv = seg.iv if seg.iv is not None else (media_sequence + index).to_bytes(16, "big")
+                data = _decrypt_segment(data, key, iv)
+            return data
+        except httpx.HTTPStatusError:
+            raise
+        except (httpx.HTTPError, RuntimeError):
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")
+
+
+class _HlsMemoryStream:
+    """Sequential file-like reader that prefetches and decrypts HLS .ts segments in RAM."""
+
+    container_format: str | None = "mpegts"
+
+    def __init__(
+        self,
+        client: httpx.Client,
+        segments: list[HlsSegment],
+        media_sequence: int,
+        *,
+        first_segment_bytes: bytes,
+        signature: str = "",
+        workers: int = HLS_WORKERS,
+        progress: DownloadProgress | None = None,
+    ) -> None:
+        self._client = client
+        self._segments = segments
+        self._media_sequence = media_sequence
+        self.signature = signature
+        self._progress = progress
+        self._workers = max(1, workers)
+        self._window = max(self._workers * 2, 4)
+        self._key_cache: dict[str, bytes] = {}
+        self._key_lock = threading.Lock()
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._workers)
+        self._futures: dict[int, concurrent.futures.Future[bytes]] = {}
+        self._current_index = 0
+        self._current_buf = first_segment_bytes
+        self._current_offset = 0
+        self._next_to_submit = 1
+        self._completed = 1
+        self._downloaded = len(first_segment_bytes)
+        self._closed = False
+        if self._progress:
+            self._progress(self._completed, len(self._segments), "segments", self._downloaded)
+        self._fill_window()
+
+    def _fill_window(self) -> None:
+        if self._closed:
+            return
+        limit = min(len(self._segments), self._current_index + self._window)
+        while self._next_to_submit < limit:
+            idx = self._next_to_submit
+            seg = self._segments[idx]
+            self._futures[idx] = self._pool.submit(
+                _fetch_segment_bytes,
+                self._client,
+                seg,
+                idx,
+                self._media_sequence,
+                self._key_cache,
+                self._key_lock,
+            )
+            self._next_to_submit += 1
+
+    def read(self, size: int = -1) -> bytes:
+        if self._closed or self._current_index >= len(self._segments):
+            return b""
+        if size is None or size < 0:
+            size = CHUNK
+        out = bytearray()
+        while len(out) < size and self._current_index < len(self._segments):
+            available = len(self._current_buf) - self._current_offset
+            if available > 0:
+                take = min(size - len(out), available)
+                out.extend(self._current_buf[self._current_offset : self._current_offset + take])
+                self._current_offset += take
+                if self._current_offset < len(self._current_buf):
+                    break
+            # Current segment exhausted; release its buffer and load the next segment.
+            self._current_buf = b""
+            self._current_offset = 0
+            self._current_index += 1
+            if self._current_index >= len(self._segments):
+                break
+            self._fill_window()
+            future = self._futures.pop(self._current_index)
+            self._current_buf = future.result()
+            self._completed += 1
+            self._downloaded += len(self._current_buf)
+            if self._progress:
+                self._progress(self._completed, len(self._segments), "segments", self._downloaded)
+        return bytes(out)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._current_buf = b""
+        for fut in self._futures.values():
+            fut.cancel()
+        self._futures.clear()
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def __enter__(self) -> "_HlsMemoryStream":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+
+class _HttpRangeMemoryStream:
+    """Seekable file-like reader backed by an in-memory LRU cache of HTTP Range blocks."""
+
+    container_format: str | None = None
+    _BLOCK_SIZE = 2 * 1024 * 1024  # 2 MiB
+    _MAX_CACHED_BLOCKS = 8  # At most 16 MiB held in RAM at once
+
+    def __init__(
+        self,
+        client: httpx.Client,
+        url: str,
+        headers: dict[str, str],
+        total: int,
+        ranges_supported: bool,
+        *,
+        signature: str = "",
+        progress: DownloadProgress | None = None,
+    ) -> None:
+        import io
+        from collections import OrderedDict
+
+        self._client = client
+        self._url = url
+        self._headers = headers
+        self._total = total
+        self._ranges_supported = ranges_supported and total > 0
+        self.signature = signature or hashlib.sha256(f"{url}:{total}".encode()).hexdigest()[:16]
+        self._progress = progress
+        self._pos = 0
+        self._downloaded = 0
+        self._seen_blocks: set[int] = set()
+        self._cache: OrderedDict[int, bytes] = OrderedDict()
+        self._inflight: dict[int, concurrent.futures.Future[bytes]] = {}
+        self._lock = threading.Lock()
+        self._pool: concurrent.futures.ThreadPoolExecutor | None = None
+        self._full_buf: io.BytesIO | None = None
+        self._closed = False
+
+        if not self._ranges_supported:
+            data = bytearray()
+            with self._client.stream("GET", self._url, headers=self._headers, follow_redirects=True) as resp:
+                resp.raise_for_status()
+                header_len = resp.headers.get("content-length", "")
+                expected_total = int(header_len) if header_len.isdigit() else self._total
+                for chunk in resp.iter_bytes(CHUNK):
+                    data.extend(chunk)
+                    if self._progress:
+                        self._progress(len(data), expected_total, "bytes", len(data))
+            self._total = len(data)
+            self._full_buf = io.BytesIO(bytes(data))
+        else:
+            self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            # Fetch block 0 immediately to validate stream access before decoding.
+            self._get_block(0)
+
+    def _fetch_block_network(self, block_index: int) -> bytes:
+        start = block_index * self._BLOCK_SIZE
+        end = min(self._total - 1, start + self._BLOCK_SIZE - 1)
+        expected = end - start + 1
+        for attempt in range(3):
+            try:
+                resp = self._client.get(
+                    self._url,
+                    headers={**self._headers, "Range": f"bytes={start}-{end}"},
+                    follow_redirects=True,
+                )
+                if resp.status_code not in (200, 206):
+                    resp.raise_for_status()
+                data = resp.content
+                if resp.status_code == 200 and len(data) >= end + 1:
+                    data = data[start : end + 1]
+                if len(data) != expected:
+                    raise RuntimeError("incomplete ranged media block")
+                return data
+            except httpx.HTTPStatusError:
+                raise
+            except (httpx.HTTPError, RuntimeError):
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable")
+
+    def _get_block(self, block_index: int) -> bytes:
+        with self._lock:
+            if block_index in self._cache:
+                self._cache.move_to_end(block_index)
+                return self._cache[block_index]
+            fut = self._inflight.get(block_index)
+            if fut is None and self._pool is not None:
+                fut = self._pool.submit(self._fetch_block_network, block_index)
+                self._inflight[block_index] = fut
+            # Prefetch the next block when reading sequentially.
+            next_idx = block_index + 1
+            if (next_idx * self._BLOCK_SIZE < self._total
+                    and next_idx not in self._cache
+                    and next_idx not in self._inflight
+                    and self._pool is not None):
+                self._inflight[next_idx] = self._pool.submit(self._fetch_block_network, next_idx)
+
+        data = fut.result() if fut is not None else self._fetch_block_network(block_index)
+        with self._lock:
+            self._inflight.pop(block_index, None)
+            self._cache[block_index] = data
+            self._cache.move_to_end(block_index)
+            while len(self._cache) > self._MAX_CACHED_BLOCKS:
+                self._cache.popitem(last=False)
+            if block_index not in self._seen_blocks:
+                self._seen_blocks.add(block_index)
+                self._downloaded += len(data)
+                if self._progress:
+                    self._progress(self._downloaded, self._total, "bytes", self._downloaded)
+        return data
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if self._full_buf is not None:
+            return self._full_buf.seek(offset, whence)
+        if whence == 0:
+            self._pos = max(0, min(self._total, offset))
+        elif whence == 1:
+            self._pos = max(0, min(self._total, self._pos + offset))
+        elif whence == 2:
+            self._pos = max(0, min(self._total, self._total + offset))
+        return self._pos
+
+    def tell(self) -> int:
+        if self._full_buf is not None:
+            return self._full_buf.tell()
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if self._closed:
+            return b""
+        if self._full_buf is not None:
+            return self._full_buf.read(size)
+        if self._pos >= self._total:
+            return b""
+        if size is None or size < 0:
+            size = self._total - self._pos
+        size = min(size, self._total - self._pos)
+        out = bytearray()
+        while len(out) < size and self._pos < self._total:
+            block_index = self._pos // self._BLOCK_SIZE
+            block_offset = self._pos % self._BLOCK_SIZE
+            block = self._get_block(block_index)
+            if not block:
+                break
+            take = min(size - len(out), len(block) - block_offset)
+            out.extend(block[block_offset : block_offset + take])
+            self._pos += take
+        return bytes(out)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with self._lock:
+            for fut in self._inflight.values():
+                fut.cancel()
+            self._inflight.clear()
+            self._cache.clear()
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+        if self._full_buf is not None:
+            self._full_buf.close()
+            self._full_buf = None
+
+    def __enter__(self) -> "_HttpRangeMemoryStream":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+
+def _open_hls_memory_stream(
+    client: httpx.Client, url: str, progress: DownloadProgress | None = None
+) -> tuple[_HlsMemoryStream | None, DownloadResult]:
+    """Open an HLS playlist as an in-memory MPEG-TS stream (zero disk files)."""
+    for _ in range(3):
+        resp = client.get(url, headers=_hls_headers(client), follow_redirects=True)
+        if resp.status_code != 200:
+            return None, DownloadResult(
+                path=None, error=f"HLS playlist HTTP {resp.status_code}", http_status=resp.status_code
+            )
+        segments, is_master = _parse_media_playlist(resp.text, str(resp.url))
+        if not is_master:
+            break
+        url = _master_variant(resp.text, str(resp.url))
+        if not url:
+            return None, DownloadResult(path=None, error="HLS master playlist has no variant")
+    if is_master or not segments:
+        return None, DownloadResult(path=None, error="HLS playlist has no supported segments")
+
+    media_sequence = 0
+    for line in resp.text.splitlines():
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                media_sequence = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                media_sequence = 0
+            break
+
+    identity = json.dumps(
+        {
+            "sequence": media_sequence,
+            "segments": [
+                {"uri": seg.uri, "key": seg.key_uri, "iv": seg.iv.hex() if seg.iv else None}
+                for seg in segments
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    signature = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    key_cache: dict[str, bytes] = {}
+    key_lock = threading.Lock()
+    try:
+        first_bytes = _fetch_segment_bytes(client, segments[0], 0, media_sequence, key_cache, key_lock)
+    except httpx.HTTPStatusError as exc:
+        return None, _http_failure(exc)
+    except Exception as exc:
+        return None, DownloadResult(path=None, error=str(exc))
+
+    stream = _HlsMemoryStream(
+        client,
+        segments,
+        media_sequence,
+        first_segment_bytes=first_bytes,
+        signature=signature,
+        progress=progress,
+    )
+    stream._key_cache.update(key_cache)
+    return stream, DownloadResult(path=None, downloaded_bytes=len(first_bytes))
+
+
+def _open_mp4_memory_stream(
+    client: httpx.Client, url: str, progress: DownloadProgress | None = None
+) -> tuple[_HttpRangeMemoryStream | None, DownloadResult]:
+    """Open an MP4 recording as an in-memory HTTP Range stream (zero disk files)."""
+    headers = {"Referer": PLAYER_REFERER}
+    try:
+        total, ranges_supported = _probe_mp4(client, url, headers)
+        stream = _HttpRangeMemoryStream(
+            client, url, headers, total, ranges_supported, progress=progress
+        )
+        return stream, DownloadResult(path=None, downloaded_bytes=total)
+    except httpx.HTTPStatusError as exc:
+        return None, _http_failure(exc)
+    except (httpx.HTTPError, OSError, RuntimeError) as exc:
+        return None, DownloadResult(path=None, error=str(exc))
+
+
+def open_recording_memory_stream(
+    client: httpx.Client,
+    recording: Recording,
+    progress: DownloadProgress | None = None,
+) -> tuple[_HlsMemoryStream | _HttpRangeMemoryStream | None, DownloadResult]:
+    """Open one lecture recording as an in-memory stream without writing video.mp4 to disk."""
+    if recording.m3u8_url:
+        stream, result = _open_hls_memory_stream(client, recording.m3u8_url, progress=progress)
+        if stream is not None:
+            return stream, result
+        if result.http_status in EXPIRED_MEDIA_STATUSES:
+            return None, result
+        if recording.mp4_url:
+            return _open_mp4_memory_stream(client, recording.mp4_url, progress=progress)
+        return None, result
+    if recording.mp4_url:
+        return _open_mp4_memory_stream(client, recording.mp4_url, progress=progress)
+    return None, DownloadResult(path=None, error=recording.unavailable_reason or "no media URL")
+
+
+def _decode_stream_audio_and_keyframes(
+    stream: _HlsMemoryStream | _HttpRangeMemoryStream,
+    keyframes_dir: Path | None,
+    *,
+    need_audio: bool = True,
+    need_keyframes: bool = True,
+    threshold: float = 30.0,
+    min_gap_sec: float = 3.0,
+    progress=None,
+) -> tuple[list, list[dict]]:
+    """Decode audio chunks into RAM and slide keyframes from an in-memory media stream in one pass."""
+    import av
+    from .transcription import _AUDIO_RATE, _CHUNK_SECONDS, _MemoryAudioChunkEncoder, _NoAudioTrack
+
+    index_path = (keyframes_dir / "index.json") if keyframes_dir is not None else None
+    existing_keyframes: list[dict] | None = None
+    if need_keyframes and index_path is not None and index_path.exists():
+        try:
+            existing_keyframes = json.loads(index_path.read_text("utf-8")).get("keyframes", [])
+        except (OSError, ValueError):
+            existing_keyframes = None
+
+    extract_frames_now = bool(need_keyframes and keyframes_dir is not None and not existing_keyframes)
+    cv2 = None
+    np = None
+    if extract_frames_now:
+        import cv2 as _cv2
+        import numpy as _np
+        cv2 = _cv2
+        np = _np
+        keyframes_dir.mkdir(parents=True, exist_ok=True)
+
+    open_kwargs = {"format": stream.container_format} if getattr(stream, "container_format", None) else {}
+    encoder: _MemoryAudioChunkEncoder | None = None
+    frames: list[dict] = existing_keyframes or []
+    fps = 25.0
+    frame_index = 0
+
+    with av.open(stream, **open_kwargs) as container:
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None) if need_audio else None
+        if need_audio and audio_stream is None:
+            raise _NoAudioTrack("stream")
+        video_stream = (
+            next((s for s in container.streams if s.type == "video"), None)
+            if extract_frames_now
+            else None
+        )
+        if extract_frames_now and video_stream is None:
+            raise RuntimeError("录像流中没有可读取的视频画面。")
+
+        active_streams = [s for s in (audio_stream, video_stream) if s is not None]
+        for s in active_streams:
+            try:
+                s.thread_type = "AUTO"
+            except Exception:
+                pass
+
+        if audio_stream is not None:
+            total_samples = (
+                int(float(audio_stream.duration * audio_stream.time_base) * _AUDIO_RATE)
+                if audio_stream.duration and audio_stream.time_base
+                else 0
+            )
+            encoder = _MemoryAudioChunkEncoder(
+                chunk_seconds=_CHUNK_SECONDS, progress=progress, total_samples=total_samples
+            )
+
+        if video_stream is not None:
+            rate = video_stream.average_rate or video_stream.base_rate
+            fps = float(rate) if rate else 25.0
+        sample_interval = max(int(fps), 1)
+        min_gap_frames = int(min_gap_sec * fps)
+        previous = None
+        last_saved = -min_gap_frames
+
+        try:
+            for packet in container.demux(active_streams):
+                if packet.dts is None:
+                    continue
+                try:
+                    decoded = packet.decode()
+                except Exception:
+                    continue
+                for frame in decoded:
+                    if encoder is not None and isinstance(frame, av.AudioFrame):
+                        encoder.feed(frame)
+                    elif extract_frames_now and isinstance(frame, av.VideoFrame):
+                        if frame_index % sample_interval == 0:
+                            bgr = frame.to_ndarray(format="bgr24")
+                            gray = cv2.cvtColor(cv2.resize(bgr, (320, 180)), cv2.COLOR_BGR2GRAY)
+                            diff = (
+                                float(np.mean(cv2.absdiff(gray, previous)))
+                                if previous is not None
+                                else 0.0
+                            )
+                            if previous is None or (
+                                diff > threshold and (frame_index - last_saved) >= min_gap_frames
+                            ):
+                                seconds = frame_index / fps
+                                name = f"frame_{len(frames):04d}_{_stamp(seconds, compact=True)}.jpg"
+                                if _write_jpeg(cv2, keyframes_dir / name, bgr):
+                                    frames.append(
+                                        {
+                                            "index": len(frames),
+                                            "timestamp": round(seconds, 2),
+                                            "time": _stamp(seconds),
+                                            "file": name,
+                                            "diff": round(diff, 2),
+                                        }
+                                    )
+                                    last_saved = frame_index
+                            previous = gray
+                        frame_index += 1
+            audio_parts = encoder.finish() if encoder is not None else []
+        finally:
+            if encoder is not None:
+                encoder.close()
+
+    if extract_frames_now and index_path is not None:
+        index_path.write_text(
+            json.dumps(
+                {
+                    "video": "video.mp4",
+                    "fps": fps,
+                    "duration": round(frame_index / fps, 2) if fps else 0,
+                    "keyframes": frames,
+                },
+                ensure_ascii=False,
+                indent=1,
+            ),
+            "utf-8",
+        )
+    return audio_parts, frames
+
+
+
 def _write_jpeg(cv2, target: Path, frame) -> bool:
     """Encode in memory and write with Python's file API.
 

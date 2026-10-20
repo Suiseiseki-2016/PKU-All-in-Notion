@@ -149,6 +149,184 @@ def _audio_duration(video: Path) -> float:
     return 0.0
 
 
+class MemoryAudioPart:
+    """In-memory encoded 16 kHz mono AAC (.m4a) chunk — never touches disk."""
+
+    def __init__(self, name: str, data: bytes) -> None:
+        self.name = name
+        self.stem = Path(name).stem
+        self.suffix = Path(name).suffix
+        self._data = data
+
+    @property
+    def data(self) -> bytes:
+        return self._data
+
+    def size_bytes(self) -> int:
+        return len(self._data)
+
+    def open(self, mode: str = "rb"):
+        import io
+        return io.BytesIO(self._data)
+
+
+class _MemoryAudioChunkEncoder:
+    """Stateful 16 kHz mono AAC (.m4a) chunk encoder that muxes entirely into RAM."""
+
+    def __init__(self, chunk_seconds: int = _CHUNK_SECONDS, progress=None, total_samples: int = 0) -> None:
+        import av
+        from av.audio.fifo import AudioFifo
+        from av.audio.resampler import AudioResampler
+
+        if type(chunk_seconds) is not int or chunk_seconds <= 0:
+            raise ValueError("音频分段长度必须是正整数秒。")
+        self._av = av
+        self._limit = chunk_seconds * _AUDIO_RATE
+        self._progress = progress
+        self._total_samples = total_samples
+        self._fifo = AudioFifo()
+        self._resampler = AudioResampler(format="fltp", layout=_AUDIO_LAYOUT, rate=_AUDIO_RATE)
+        self._buf = None
+        self._sink = None
+        self._track = None
+        self._part_offset = 0.0
+        self._samples = 0
+        self._start = 0
+        self._last_report = 0
+        self.parts: list[tuple[MemoryAudioPart, float]] = []
+        if self._progress:
+            self._progress(0, self._total_samples, "audio_extract", 0)
+
+    def _open_sink(self) -> None:
+        import io
+        self._buf = io.BytesIO()
+        self._part_offset = self._start / _AUDIO_RATE
+        self._sink = self._av.open(
+            self._buf, mode="w", format="mp4",
+            options={"movie_timescale": str(_AUDIO_RATE)},
+        )
+        self._track = self._sink.add_stream(_AUDIO_CODEC, rate=_AUDIO_RATE)
+        self._track.layout = _AUDIO_LAYOUT
+
+    def _close_sink(self) -> None:
+        if self._sink is None:
+            return
+        for packet in self._track.encode(None):
+            self._sink.mux(packet)
+        self._sink.close()
+        name = f"part-{len(self.parts):04d}.m4a"
+        self.parts.append((MemoryAudioPart(name, self._buf.getvalue()), self._part_offset))
+        self._sink = None
+        self._track = None
+        self._buf = None
+
+    def _write_resampled(self, frame) -> None:
+        frame.pts = None
+        self._fifo.write(frame)
+        while self._fifo.samples:
+            if self._sink is None:
+                self._open_sink()
+            piece = self._fifo.read(min(self._fifo.samples, self._limit - (self._samples - self._start)))
+            piece.pts = self._samples - self._start
+            piece.time_base = Fraction(1, _AUDIO_RATE)
+            for packet in self._track.encode(piece):
+                self._sink.mux(packet)
+            self._samples += piece.samples
+            if self._progress and self._samples - self._last_report >= 30 * _AUDIO_RATE:
+                self._progress(
+                    min(self._samples, self._total_samples) if self._total_samples else self._samples,
+                    self._total_samples, "audio_extract", 0,
+                )
+                self._last_report = self._samples
+            if self._samples - self._start == self._limit:
+                self._close_sink()
+                self._start = self._samples
+
+    def feed(self, frame) -> None:
+        for resampled in self._resampler.resample(frame):
+            self._write_resampled(resampled)
+
+    def finish(self) -> list[tuple[MemoryAudioPart, float]]:
+        try:
+            for resampled in self._resampler.resample(None):
+                self._write_resampled(resampled)
+            if self._sink is not None:
+                self._close_sink()
+            if self._progress:
+                total = self._total_samples or self._samples
+                self._progress(total, total, "audio_extract", 0)
+        finally:
+            if self._sink is not None:
+                try:
+                    self._sink.close()
+                except Exception:
+                    pass
+                self._sink = None
+                self._track = None
+                self._buf = None
+        return self.parts
+
+    def close(self) -> None:
+        if self._sink is not None:
+            try:
+                self._sink.close()
+            except Exception:
+                pass
+            self._sink = None
+            self._track = None
+            self._buf = None
+
+
+def _encode_audio_parts_in_memory(
+    frames, chunk_seconds: int = _CHUNK_SECONDS, progress=None, total_samples: int = 0,
+) -> list[tuple[MemoryAudioPart, float]]:
+    """Encode resampled audio frames into in-memory .m4a chunks without touching disk."""
+    encoder = _MemoryAudioChunkEncoder(chunk_seconds=chunk_seconds, progress=progress, total_samples=total_samples)
+    try:
+        for frame in frames:
+            encoder.feed(frame)
+        return encoder.finish()
+    finally:
+        encoder.close()
+
+
+def _extract_audio_parts_in_memory(
+    video: Path, chunk_seconds: int = _CHUNK_SECONDS, progress=None,
+) -> list[tuple[MemoryAudioPart, float]]:
+    """Decode audio from ``video`` and encode 16 kHz mono AAC parts purely in RAM."""
+    try:
+        import av
+    except Exception as exc:
+        raise RuntimeError(
+            f"云端转写需要应用内置的音频解码器（PyAV），当前安装里无法加载："
+            f"{_detail(exc)}。请重新安装本应用后重试{_decoder_note()}。"
+        ) from exc
+
+    try:
+        with av.open(str(video)) as container:
+            source = next((s for s in container.streams if s.type == "audio"), None)
+            if source is None:
+                raise _NoAudioTrack(video.name)
+            total_samples = (int(float(source.duration * source.time_base) * _AUDIO_RATE)
+                             if source.duration and source.time_base else 0)
+            parts = _encode_audio_parts_in_memory(
+                container.decode(source), chunk_seconds, progress=progress, total_samples=total_samples
+            )
+            if not parts:
+                raise _NoAudioTrack(video.name)
+            return parts
+    except _NoAudioTrack as exc:
+        raise RuntimeError(
+            f"云端转写在该录像里找不到音轨：{exc.args[0]}。"
+            f"请确认录像下载完整，或重新下载该录像后重试{_decoder_note()}。"
+        ) from None
+    except Exception as exc:
+        raise RuntimeError(
+            f"云端转写无法读取该录像的音轨：{_detail(exc)}。"
+            f"请确认录像文件完整，重新下载该录像后重试{_decoder_note()}。"
+        ) from exc
+
+
 def _encode_audio_parts(frames, directory: Path, chunk_seconds: int, progress=None,
                         total_samples: int = 0) -> list[tuple[Path, float]]:
     """Bound each part by resampled samples, with timestamps local to the part."""
@@ -258,7 +436,7 @@ def _extract_audio_parts(video: Path, directory: Path, chunk_seconds: int, progr
 _RETRY_DELAY = 2.0  # covers an edge/failover reconnect window; tests zero it
 
 
-def _part_index_from_audio(audio: Path) -> int:
+def _part_index_from_audio(audio: Path | MemoryAudioPart) -> int:
     name = audio.stem  # e.g. "part-0002" or "audio"
     if name.startswith("part-"):
         suffix = name[5:]
@@ -267,7 +445,13 @@ def _part_index_from_audio(audio: Path) -> int:
     return 0
 
 
-def _transcribe_headers(key: str, audio: Path, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict[str, str]:
+def _audio_size_bytes(audio: Path | MemoryAudioPart) -> int:
+    if isinstance(audio, MemoryAudioPart):
+        return audio.size_bytes()
+    return audio.stat().st_size
+
+
+def _transcribe_headers(key: str, audio: Path | MemoryAudioPart, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {key}"}
     if source_id:
         headers["X-PKU-Source-Id"] = str(source_id)
@@ -277,7 +461,7 @@ def _transcribe_headers(key: str, audio: Path, *, source_id: str | None = None, 
     return headers
 
 
-def _upload(url: str, key: str, audio: Path, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict:
+def _upload(url: str, key: str, audio: Path | MemoryAudioPart, *, source_id: str | None = None, transcribe_mode: str | None = None) -> dict:
     """POST the audio to the relay; the relay answers with the transcript.
 
     Retry one transport failure or transient upstream 502/503/504 response.
@@ -331,7 +515,7 @@ def _upload(url: str, key: str, audio: Path, *, source_id: str | None = None, tr
     return payload
 
 
-def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcribe_mode: str | None = None) -> dict:
+def _upload_direct(url: str, key: str, audio: Path | MemoryAudioPart, *, source_id=None, transcribe_mode: str | None = None) -> dict:
     """With explicit consent, send this audio part straight to private OSS."""
     import httpx
     from urllib.parse import urlsplit
@@ -342,10 +526,11 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcrib
         raise RuntimeError("云端直传地址配置不正确。")
     base = url.rstrip("/")[:-len(suffix)]
     headers = _transcribe_headers(key, audio, source_id=source_id, transcribe_mode=transcribe_mode)
+    size_bytes = _audio_size_bytes(audio)
     for cycle in (1, 2):
         try:
             with httpx.Client(trust_env=not dead_loopback_proxy()) as client:
-                body = {'size_bytes': audio.stat().st_size}
+                body = {'size_bytes': size_bytes}
                 if source_id is not None:
                     body['source_id'] = source_id
                     body['part_index'] = _part_index_from_audio(audio)
@@ -365,7 +550,7 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcrib
                     raise RuntimeError("云端返回的上传授权无效。")
                 with audio.open("rb") as source:
                     uploaded = client.put(put_url, content=source,
-                                          headers={"Content-Type": "audio/mp4", "Content-Length": str(audio.stat().st_size)},
+                                          headers={"Content-Type": "audio/mp4", "Content-Length": str(size_bytes)},
                                           timeout=600)
                 if uploaded.status_code >= 500 and cycle == 1:
                     time.sleep(_RETRY_DELAY)
@@ -374,7 +559,10 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcrib
                     raise RuntimeError(f"音频直传到 OSS 失败（HTTP {uploaded.status_code}）；请检查网络后重试。")
                 completed = client.post(base + suffix + "/direct/complete", headers=headers,
                                         json={"upload_id": upload_id}, timeout=1900)
-                if completed.status_code in (429, 500, 502, 503, 504) and cycle == 1:
+                # 408/429 are throttle or timeout signals, 409 marks an
+                # in-flight complete the server is still finishing, and
+                # 5xx/52x covers gateway and Cloudflare-style failovers.
+                if completed.status_code in (408, 409, 429, 500, 502, 503, 504, 520, 522, 524) and cycle == 1:
                     time.sleep(_RETRY_DELAY)
                     continue
                 if completed.status_code != 200:
@@ -388,6 +576,61 @@ def _upload_direct(url: str, key: str, audio: Path, *, source_id=None, transcrib
                 time.sleep(_RETRY_DELAY)
                 continue
             raise RuntimeError("音频直传连接中断；请检查网络后重试。") from exc
+
+
+def transcribe_memory_parts(
+    parts: list[tuple[MemoryAudioPart | Path, float]],
+    target: Path,
+    settings: "Settings",
+    *,
+    video: Path | None = None,
+    stream_signature: str = "",
+    progress=None,
+    direct_oss: bool = False,
+    elapsed_start: float | None = None,
+) -> dict:
+    """Upload in-memory encoded AAC parts and write ``target`` without touching disk for audio."""
+    started = elapsed_start if elapsed_start is not None else time.perf_counter()
+    url = (getattr(settings, "cloud_transcribe_url", "") or "").strip()
+    token = (getattr(settings, "platform_token", "") or "").strip()
+    if not url:
+        raise RuntimeError(
+            "云端转写服务地址缺失（CLOUD_TRANSCRIBE_URL）；请检查安装或服务配置。"
+        )
+    if not token:
+        raise RuntimeError(
+            "云端转写需要平台登录；请登录账号后重试（PLATFORM_TOKEN 缺失）。"
+        )
+    if not parts:
+        raise RuntimeError(
+            f"云端转写在该录像里找不到音轨。"
+            f"请确认录像完整后重试{_decoder_note()}。"
+        )
+    if progress:
+        progress(0, len(parts), "audio_parts", 0)
+    uploader = _upload_direct if direct_oss else _upload
+    source_id = getattr(settings, '_metered_operation_context', {}).get('source_id')
+    strategy = getattr(settings, 'notes_strategy', None)
+    transcribe_mode = "advanced" if strategy == "topics" else "basic"
+    if (source_id or transcribe_mode == "advanced") and uploader in (_upload, _upload_direct):
+        from functools import partial
+        uploader = partial(uploader, source_id=source_id, transcribe_mode=transcribe_mode)
+    video_ref = video if video is not None else (target.parent / "video.mp4")
+    if len(parts) == 1:
+        payload = uploader(url, token, parts[0][0])
+        if progress:
+            progress(1, 1, "audio_parts", 0)
+    else:
+        payload = _transcribe_parts(
+            parts, url, token, video_ref, target,
+            progress=progress, uploader=uploader, stream_signature=stream_signature,
+        )
+    payload = dict(payload)
+    payload["elapsed"] = round(time.perf_counter() - started, 1)
+    _atomic_json(target, payload)
+    if len(parts) > 1:
+        _clear_part_cache(video_ref, target, len(parts), stream_signature=stream_signature)
+    return payload
 
 
 def transcribe_cloud(video: Path, target: Path, settings: "Settings", progress=None, direct_oss: bool = False) -> dict:
@@ -406,6 +649,21 @@ def transcribe_cloud(video: Path, target: Path, settings: "Settings", progress=N
         raise RuntimeError(
             "云端转写需要平台登录；请登录账号后重试（PLATFORM_TOKEN 缺失）。"
         )
+    # In production, encode 16 kHz mono AAC chunks directly in RAM (io.BytesIO)
+    # so temporary .m4a files never touch the user's disk. Fall back to the
+    # TemporaryDirectory path only when a unit test monkeypatches the file-based
+    # extraction or upload hooks.
+    if (_upload is _DEFAULT_UPLOAD
+            and _upload_direct is _DEFAULT_UPLOAD_DIRECT
+            and _extract_audio is _DEFAULT_EXTRACT_AUDIO
+            and _extract_audio_parts is _DEFAULT_EXTRACT_AUDIO_PARTS
+            and _split_audio is _DEFAULT_SPLIT_AUDIO):
+        parts = _extract_audio_parts_in_memory(video, _CHUNK_SECONDS, progress=progress)
+        return transcribe_memory_parts(
+            parts, target, settings, video=video, progress=progress,
+            direct_oss=direct_oss, elapsed_start=started,
+        )
+
     with tempfile.TemporaryDirectory(prefix="pku-sync-audio-") as tmp:
         if _audio_duration(video) > _CHUNK_SECONDS:
             parts = _extract_audio_parts(video, Path(tmp), _CHUNK_SECONDS, progress=progress)
@@ -457,13 +715,33 @@ def _split_audio(audio: Path, directory: Path, chunk_seconds: int) -> list[tuple
         return _encode_audio_parts(source.decode(stream), directory, chunk_seconds) or [(audio, 0.0)]
 
 
+def _part_cache_signature(
+    parts: list[tuple[Path | MemoryAudioPart, float]],
+    video: Path | None,
+    stream_signature: str = "",
+) -> str:
+    if stream_signature:
+        return hashlib.sha256(f"{stream_signature}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
+    if video is not None and video.exists():
+        stat = video.stat()
+        return hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
+    digest = hashlib.sha256(f"{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode())
+    for item, offset in parts:
+        digest.update(f":{offset}:".encode())
+        if isinstance(item, MemoryAudioPart):
+            digest.update(hashlib.sha256(item.data).digest())
+        elif isinstance(item, Path) and item.exists():
+            stat = item.stat()
+            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()[:16]
+
+
 def _transcribe_parts(
-    parts: list[tuple[Path, float]], url: str, token: str, video: Path, target: Path,
-    progress=None, uploader=None,
+    parts: list[tuple[Path | MemoryAudioPart, float]], url: str, token: str, video: Path, target: Path,
+    progress=None, uploader=None, *, stream_signature: str = "",
 ) -> dict:
     """Run two uploads at a time; retain successful replies for a later retry."""
-    stat = video.stat()
-    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
+    signature = _part_cache_signature(parts, video, stream_signature=stream_signature)
     cache = target.parent / ".transcription-parts"
     cache.mkdir(parents=True, exist_ok=True)
     replies: list[dict | None] = [None] * len(parts)
@@ -519,9 +797,20 @@ def _transcribe_parts(
     return payload
 
 
-def _clear_part_cache(video: Path, target: Path, count: int) -> None:
-    stat = video.stat()
-    signature = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}:{_CHUNK_SECONDS}:{_AUDIO_PARTS_VERSION}".encode()).hexdigest()[:16]
+def _clear_part_cache(video: Path, target: Path, count: int, *, stream_signature: str = "") -> None:
     cache = target.parent / ".transcription-parts"
-    for index in range(count):
-        (cache / f"{signature}-{index:04d}.json").unlink(missing_ok=True)
+    if stream_signature or (video is not None and video.exists()):
+        signature = _part_cache_signature([], video, stream_signature=stream_signature)
+        for index in range(count):
+            (cache / f"{signature}-{index:04d}.json").unlink(missing_ok=True)
+    elif cache.is_dir():
+        for item in cache.glob("*.json"):
+            item.unlink(missing_ok=True)
+
+
+_DEFAULT_UPLOAD = _upload
+_DEFAULT_UPLOAD_DIRECT = _upload_direct
+_DEFAULT_EXTRACT_AUDIO = _extract_audio
+_DEFAULT_EXTRACT_AUDIO_PARTS = _extract_audio_parts
+_DEFAULT_SPLIT_AUDIO = _split_audio
+

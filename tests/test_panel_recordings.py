@@ -230,7 +230,12 @@ def test_catalog_transport_failure_names_the_failed_step(tmp_path, kind, stage, 
     ("准备 Notion 课程与讲次页", "写入 Notion 时中断"),
     ("下载录像", "读取教学网或录像时中断"),
     ("转写并生成笔记", "音频处理或转写时中断"),
+    ("提取音轨", "音频处理或转写时中断"),
+    ("上传音频并转写", "音频处理或转写时中断"),
+    ("划分课堂知识点", "生成课堂笔记时中断"),
     ("重新生成课堂笔记", "生成课堂笔记时中断"),
+    ("生成课堂笔记", "生成课堂笔记时中断"),
+    ("整合课堂笔记", "生成课堂笔记时中断"),
     ("提取课堂画面", "提取课堂画面时中断"),
     ("准备中", "任务在“准备中”阶段中断"),
 ])
@@ -248,6 +253,44 @@ def test_unexpected_process_failure_names_stage_and_keeps_details_private(
     assert expected in result["error"]
     assert "private token" not in result["error"]
     assert len(result["failure_id"]) == 8
+
+
+def test_process_progress_walks_stage_labels_and_never_resets_percent(tmp_path):
+    """Lecture organization shows one bar climbing 0-100, not three restarts."""
+    manager = recordings_api.RecordingWorkManager(settings(tmp_path))
+    manager._work = recordings_api.Work(kind="process", stage="转写并生成笔记")
+    ticks = [
+        ("audio_extract", 0, 96000), ("audio_extract", 48000, 96000), ("audio_extract", 96000, 96000),
+        ("audio_parts", 0, 3), ("audio_parts", 1, 3), ("audio_parts", 2, 3), ("audio_parts", 3, 3),
+        ("划分知识点", 0, 1), ("划分知识点", 1, 1),
+        ("整理知识点", 0, 4), ("整理知识点", 2, 4), ("整理知识点", 4, 4),
+        ("整合笔记", 0, 1), ("整合笔记", 1, 1),
+    ]
+    observed = []
+    for unit, done, total in ticks:
+        manager._progress(done, total, unit, 0)
+        observed.append((manager._work.stage, manager._work.progress_percent))
+    labels = [stage for stage, _ in observed]
+    assert labels == (["提取音轨"] * 3 + ["上传音频并转写"] * 4 + ["划分课堂知识点"] * 2 +
+                      ["生成课堂笔记"] * 3 + ["整合课堂笔记"] * 2)
+    percents = [percent for _, percent in observed]
+    assert all(percent > 0 for percent in percents), percents
+    assert all(later >= earlier for earlier, later in zip(percents, percents[1:])), percents
+    assert percents == sorted(percents) and percents[0] == 5 and percents[-1] == 99
+    # The raw counters still describe the running sub-stage for the detail line.
+    work = manager.state()
+    assert (work["progress_done"], work["progress_total"], work["progress_unit"]) == (1, 1, "整合笔记")
+
+
+@pytest.mark.parametrize(("unit", "done", "total", "stage", "expected"), [
+    ("segments", 3, 4, "下载录像", ("下载录像", 75)),
+    ("items", 1, 0, "读取目录", ("读取目录", 0)),
+    ("items", 1, 0, "", ("转写并生成笔记", 0)),
+    ("audio_extract", -48000, 96000, "转写并生成笔记", ("提取音轨", 5)),
+    ("audio_parts", 9, 3, "转写并生成笔记", ("上传音频并转写", 65)),
+])
+def test_process_stage_helper_clamps_and_keeps_unknown_units(unit, done, total, stage, expected):
+    assert recordings_api._process_stage_and_percent(unit, done, total, stage) == expected
 
 
 def test_list_never_exposes_campus_media_url_or_secret(tmp_path):
@@ -705,7 +748,7 @@ def test_cloud_notes_use_relay_without_local_ai_key(tmp_path, monkeypatch):
     assert write_notes(transcript, [], note, settings_obj, "第一讲") == note
     assert "考试重点" in note.read_text("utf-8")
     assert seen[0][0] == "notes" and "数据结构会考" in seen[0][1]
-    assert len(seen) == 1 and "文字整理" in seen[0][2]
+    assert len(seen) == 1 and ("文字整理" in seen[0][2] or "轻度编辑课堂口述" in seen[0][2])
 
     note.unlink()
     monkeypatch.setattr(platform, "llm", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("vendor failed")))
@@ -1796,3 +1839,214 @@ def test_cancel_sync_stops_before_next_course_and_preserves_completed_index(tmp_
     result = wait_done(manager)
     assert result["state"] == "cancelled"
     assert client.post("/api/recordings/cancel-sync").status_code == 409
+
+
+def test_local_mode_process_deletes_temporary_video_by_default_and_manages_local_storage(tmp_path, monkeypatch):
+    key, directory = setup_index(tmp_path)
+    cfg = settings(tmp_path)
+    cfg.notion_token = ""
+    cfg.delete_video_after_processing = True
+    cfg.save_recordings_locally = False
+    cfg.recordings_download_dir = ""
+
+    class Session:
+        def close(self):
+            pass
+
+    monkeypatch.setattr("pku_sync.auth.get_session", lambda **kwargs: Session())
+    monkeypatch.setattr(recordings_api, "assignment_catalog_publish_issues", lambda _job: [])
+
+    def fake_download(client, job, progress=None):
+        job.directory.mkdir(parents=True, exist_ok=True)
+        job.video.write_bytes(b"temporary-video-bytes")
+        return SimpleNamespace(path=job.video)
+
+    def fake_process(job, _settings, **kwargs):
+        save_reviewed_note(job.directory, _settings, "# 笔记\n- 内容", {"segments": [
+            {"start": 0, "end": 10, "text": "内容"}
+        ]})
+        frames = job.directory / "keyframes"
+        frames.mkdir(exist_ok=True)
+        (frames / "frame_0000_00m00s.jpg").write_bytes(b"frame")
+        (frames / "index.json").write_text(json.dumps({"keyframes": [
+            {"file": "frame_0000_00m00s.jpg", "timestamp": 0, "time": "00:00"}
+        ]}), "utf-8")
+        return SimpleNamespace(notes=True, transcribed=True, errors=[])
+
+    monkeypatch.setattr(recordings_api, "download_job", fake_download)
+    monkeypatch.setattr(recordings_api, "process_job", fake_process)
+
+    manager = recordings_api.RecordingWorkManager(cfg)
+    job = recordings_api.find_job(tmp_path, key)
+    preview_url = manager._process(job, "")
+    assert preview_url.endswith("/note-preview")
+    # Default: video.mp4 is NOT kept locally after local_mode note generation!
+    assert not job.video.exists()
+    assert not (directory / ".keep-video").exists()
+
+    # If a run downloads video.mp4 temporarily and fails during transcription, video.mp4 is also cleaned up
+    (directory / "notes.md").unlink(missing_ok=True)
+    (directory / "transcript.json").unlink(missing_ok=True)
+    monkeypatch.setattr(
+        recordings_api,
+        "process_job",
+        lambda *_a, **_kw: SimpleNamespace(notes=False, transcribed=False, errors=["transcribe: 网络中断"]),
+    )
+    with pytest.raises(ValueError, match="已完成片段会在重试时复用"):
+        manager._process(job, "")
+    assert not job.video.exists()
+
+    # Now enable save_recordings_locally and set a custom download directory via API
+    app = FastAPI()
+    recordings_api.add_recording_routes(app, manager)
+    client = TestClient(app)
+    custom_dir = tmp_path / "my-course-videos"
+    res = client.post("/api/recordings/local-storage", json={
+        "save_recordings_locally": True,
+        "recordings_download_dir": str(custom_dir),
+    })
+    assert res.status_code == 200
+    assert res.json()["save_recordings_locally"] is True
+    assert res.json()["effective_download_dir"] == str(custom_dir.resolve())
+
+    monkeypatch.setattr(recordings_api, "process_job", fake_process)
+    manager._process(job, "")
+    assert job.video.exists()
+    assert (directory / ".keep-video").exists()
+
+    storage = client.get("/api/recordings/local-storage").json()
+    assert storage["count"] == 1
+    assert storage["total_bytes"] == len(b"temporary-video-bytes")
+    assert storage["items"][0]["recording_id"] == key
+    assert Path(storage["items"][0]["path"]).is_file()
+    assert Path(storage["items"][0]["path"]).resolve().is_relative_to(custom_dir.resolve())
+
+    # Deleting the local recording removes both internal video.mp4 and exported copy
+    after_del = client.delete(f"/api/recordings/local-storage/{key}").json()
+    assert after_del["count"] == 0
+    assert after_del["total_bytes"] == 0
+    assert not job.video.exists()
+
+
+@pytest.mark.parametrize("transport_mode", ["hls", "mp4"])
+def test_zero_disk_in_memory_streaming_never_writes_video_or_audio_files(tmp_path, monkeypatch, transport_mode):
+    import io
+    from fractions import Fraction
+    import av
+    import httpx
+    import numpy as np
+    from pku_sync import media, pipeline, transcription
+
+    key, directory = setup_index(tmp_path)
+    cfg = settings(tmp_path)
+    cfg.notion_token = ""
+    cfg.delete_video_after_processing = True
+    cfg.save_recordings_locally = False
+    cfg.cloud_transcribe_url = "https://relay.example/v1/transcribe"
+
+    # Build a synthetic lecture stream in memory (video + audio)
+    stream_buf = io.BytesIO()
+    fmt = "mpegts" if transport_mode == "hls" else "mp4"
+    with av.open(stream_buf, mode="w", format=fmt) as out:
+        vs = out.add_stream("libx264", rate=25)
+        vs.width, vs.height, vs.pix_fmt = 320, 180, "yuv420p"
+        as_ = out.add_stream("aac", rate=16000)
+        as_.layout = "mono"
+        for i in range(50):
+            img = np.full((180, 320, 3), 25 if i < 25 else 225, dtype=np.uint8)
+            vf = av.VideoFrame.from_ndarray(img, format="bgr24")
+            for pkt in vs.encode(vf):
+                out.mux(pkt)
+        for i in range(32):
+            af = av.AudioFrame(format="fltp", layout="mono", samples=1024)
+            af.planes[0].update(bytes(af.planes[0].buffer_size))
+            af.sample_rate = 16000
+            af.time_base = Fraction(1, 16000)
+            af.pts = i * 1024
+            for pkt in as_.encode(af):
+                out.mux(pkt)
+        for pkt in vs.encode(None):
+            out.mux(pkt)
+        for pkt in as_.encode(None):
+            out.mux(pkt)
+    raw_bytes = stream_buf.getvalue()
+
+    def handle_campus(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/lecture.m3u8":
+            body = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2.0,\nhttps://media.example/seg0.ts\n#EXT-X-ENDLIST\n"
+            return httpx.Response(200, text=body)
+        if request.url.path == "/seg0.ts":
+            return httpx.Response(200, content=raw_bytes)
+        if request.url.path == "/lecture.mp4":
+            rng = request.headers.get("range", "")
+            if rng.startswith("bytes="):
+                spec = rng[len("bytes="):]
+                start_s, end_s = spec.split("-", 1)
+                start = int(start_s)
+                end = int(end_s) if end_s else len(raw_bytes) - 1
+                end = min(end, len(raw_bytes) - 1)
+                chunk = raw_bytes[start : end + 1]
+                return httpx.Response(
+                    206,
+                    content=chunk,
+                    headers={
+                        "Content-Range": f"bytes {start}-{end}/{len(raw_bytes)}",
+                        "Content-Length": str(len(chunk)),
+                    },
+                )
+            return httpx.Response(200, content=raw_bytes, headers={"Content-Length": str(len(raw_bytes))})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        "pku_sync.auth.get_session",
+        lambda **kwargs: httpx.Client(transport=httpx.MockTransport(handle_campus)),
+    )
+    monkeypatch.setattr(recordings_api, "assignment_catalog_publish_issues", lambda _job: [])
+
+    def fake_resolve(client, rec):
+        if transport_mode == "hls":
+            rec.m3u8_url = "https://media.example/lecture.m3u8"
+            rec.mp4_url = ""
+        else:
+            rec.m3u8_url = ""
+            rec.mp4_url = "https://media.example/lecture.mp4"
+
+    monkeypatch.setattr(pipeline, "resolve_media", fake_resolve)
+    #Forbid any disk video download!
+    monkeypatch.setattr(
+        media,
+        "download_recording",
+        lambda *_a, **_kw: pytest.fail("download_recording must never be called during zero-disk streaming"),
+    )
+
+    seen_audio_parts = []
+
+    def fake_upload(url, token, audio, **_kw):
+        # Verify audio is an in-memory MemoryAudioPart, NEVER a disk file, and video.mp4 does NOT exist on disk
+        assert isinstance(audio, transcription.MemoryAudioPart)
+        assert not (directory / "video.mp4").exists()
+        assert not list(directory.glob("*.mp4*"))
+        assert not list(directory.glob("*.hls*"))
+        seen_audio_parts.append(audio.size_bytes())
+        return {"language": "zh", "segments": [{"start": 0.0, "end": 2.0, "text": "课堂流式内存转写内容"}]}
+
+    monkeypatch.setattr(transcription, "_upload", fake_upload)
+
+    def fake_write_notes(transcript, keyframes, target, _settings, title, **kwargs):
+        assert not (directory / "video.mp4").exists()
+        assert len(keyframes) >= 1
+        save_reviewed_note(directory, _settings, "# 零落盘流式笔记\n- 核心内容", transcript, target=target)
+        return target
+
+    monkeypatch.setattr(pipeline, "write_notes", fake_write_notes)
+
+    manager = recordings_api.RecordingWorkManager(cfg)
+    job = recordings_api.find_job(tmp_path, key)
+    preview_url = manager._process(job, "")
+    assert preview_url.endswith("/note-preview")
+    assert seen_audio_parts and seen_audio_parts[0] > 0
+    assert not job.video.exists()
+    assert (directory / "transcript.json").is_file()
+    assert (directory / "notes.md").is_file()
+    assert (directory / "keyframes" / "index.json").is_file()
+

@@ -1476,7 +1476,7 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             pw.expect(page.locator('#toast')).to_have_text('已下载 Markdown 文件')
             assert page.locator('.campus-centers').bounding_box()['height'] < 65
             page.screenshot(path=str(tmp_path / 'summary-workbench.png'), full_page=True)
-            page.locator('[data-action="campus-toggle-preview"]').click()
+            page.locator('[data-action="campus-preview-course-summary"]').click()
             page.locator('[data-action="campus-open-lesson"]').first.click()
             pw.expect(page.locator('.study-markdown')).to_contain_text('滑动窗口')
             images = page.locator('.study-markdown .note-visual-card img')
@@ -1503,6 +1503,7 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
             page.set_viewport_size({'width': 1440, 'height': 1000})
             pw.expect(page.locator('.lesson-title-date')).to_be_visible()
             pw.expect(page.locator('.lesson-topic-line')).to_have_text('TCP 可靠传输')
+            page.locator('.lecture-more-actions > summary').click()
             with page.expect_response(lambda response: response.url.endswith('/download')):
                 page.locator('[data-action="recording-download"]').click()
             assert free_actions[-1].endswith('/download')
@@ -1529,7 +1530,7 @@ def test_summary_reading_and_mcp_navigation_in_edge(tmp_path):
                 '![恶意图片](javascript:alert(1))\n```\n![代码图片](/do-not-load.jpg)\n```',
                 'utf8',
             )
-            page.locator('[data-action="campus-toggle-preview"]').click()
+            page.locator('[data-action="campus-preview-lecture-note"]').click()
             page.locator('[data-action="campus-preview-lecture-note"]').click()
             pw.expect(page.locator('.study-markdown')).to_contain_text('<script>')
             assert page.evaluate('window.noteXss === undefined')

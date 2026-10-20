@@ -50,10 +50,11 @@ def test_account_controls_survive_refresh_with_unfinished_quizzes_hidden():
             account = page.locator('.sidebar [data-persistent-disclosure="desktop-account"]')
             assert not account.evaluate('el => el.open')
             assert not page.locator('#redeem-form').is_visible()
-            assert 'AI 点 12' in page.locator('.sidebar [data-block="quota"]').inner_text()
+            assert '可用转写 60 分钟' in page.locator('.sidebar [data-block="quota"]').inner_text()
             account.locator('summary').focus()
             page.keyboard.press('Enter')
             assert page.locator('#redeem-form').is_visible()
+            assert 'AI 点 12' in page.locator('.sidebar [data-block="quota"]').inner_text()
             page.evaluate('window.__layout.render()')
             assert account.evaluate('el => el.open')
             account.locator('summary').click()
@@ -212,6 +213,7 @@ def test_portal_first_layout_and_account_settings():
             page.locator('[data-action="campus-open-lesson"][data-recording="sep29"]').click()
             playwright.expect(page.get_by_role("button", name="收起本讲笔记")).to_be_visible()
             playwright.expect(page.locator('.study-markdown')).to_contain_text('第五讲总结')
+            page.locator('.lecture-more-actions > summary').click()
             assert page.get_by_role("link", name="下载原始录像").get_attribute("href") == "/api/recordings/sep29/video"
             assert page.locator('.recording-row .course-meta').first.inner_text() == '第 1 节课'
             page.locator('[data-action="campus-course-home"]').click()

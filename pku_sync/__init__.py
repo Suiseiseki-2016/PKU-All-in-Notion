@@ -2,4 +2,4 @@
 
 __all__ = ["config", "auth", "discover", "recordings", "materials", "manifest"]
 
-__version__ = "0.1.65"
+__version__ = "0.1.67"

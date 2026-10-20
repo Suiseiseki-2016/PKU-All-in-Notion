@@ -99,7 +99,7 @@ def test_budget_reservation_is_whole_run_not_per_case(run):
     second = core.NativeRun({**run.scenario, "id": "ANOTHER-CASE"}, "live", run.context)
     with pytest.raises(core.ResourceBlocked, match="total_run_budget_exceeded"):
         second.authorize_cost(points=4)
-    assert json.loads((run.context["run_dir"] / "cost-reservations.json").read_text())["points"] == 7
+    assert json.loads((run.context["run_dir"] / "cost-reservations.json").read_text("utf-8"))["points"] == 7
 
 
 def test_unsupported_fault_is_software_gap_not_a_pass_or_account_problem(run):

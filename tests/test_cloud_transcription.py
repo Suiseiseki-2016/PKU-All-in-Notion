@@ -19,8 +19,9 @@ def mock_client(monkeypatch, handler):
 
 
 @pytest.mark.parametrize("stage,status", [
-    ("complete", 429), ("complete", 500), ("complete", 502),
-    ("complete", 503), ("complete", 504), ("put", 500), ("put", 503),
+    ("complete", 408), ("complete", 409), ("complete", 429), ("complete", 500),
+    ("complete", 502), ("complete", 503), ("complete", 504), ("complete", 520),
+    ("complete", 522), ("complete", 524), ("put", 500), ("put", 503),
     ("init", None), ("put", None), ("complete", None),
 ])
 def test_direct_retry_renews_entire_upload_cycle(tmp_path, monkeypatch, stage, status):

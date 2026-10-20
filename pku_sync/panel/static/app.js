@@ -80,6 +80,7 @@
     view: "dashboard",
     campus: { courses: [], course: null, courseCache: {}, courseId: "", loading: false, error: "", configured: false, home: null, parents: [], parentId: "", catalogAutoStarted: false, parentError: "", query: "", category: "all", dateQuery: "", materialQuery: "", demoConnection: false, submission: { selectedId: "", draft: null, error: "", form: { submission_mode: "zip", notion_url: "", archive_name: "", code_filename: "", attachments: [] } } },
     recordings: { configured: false, editingCredentials: false, loading: false, syncPending: false, backgroundPending: false, background: { state: "idle" }, batch: { state: "idle" }, error: "", task: { state: "idle" }, taskCourseId: "", noteStrategyByKey: {}, directOss: false },
+    localRecordings: { open: false, loading: false, saveLocally: false, downloadDir: "", effectiveDir: "", count: 0, totalBytes: 0, items: [] },
     termReview: { courseId: "", recordingId: "", status: "idle", target: null, transcriptSha256: "", videoAvailable: false, confirmed: false, error: "" },
     notice: "",
     noticeKind: "hint"
@@ -440,6 +441,116 @@
   }
 
 
+  function applyLocalRecordingsPayload(data) {
+    if (!data) return;
+    state.localRecordings.saveLocally = Boolean(data.save_recordings_locally);
+    state.localRecordings.downloadDir = data.recordings_download_dir || "";
+    state.localRecordings.effectiveDir = data.effective_download_dir || "";
+    state.localRecordings.count = Number(data.count) || 0;
+    state.localRecordings.totalBytes = Number(data.total_bytes) || 0;
+    state.localRecordings.items = Array.isArray(data.items) ? data.items : [];
+  }
+
+  function loadLocalRecordings() {
+    var epoch = accountQuotaEpoch;
+    state.localRecordings.loading = true;
+    render();
+    return requestJson("/api/recordings/local-storage").then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (result.ok && result.body) applyLocalRecordingsPayload(result.body);
+    }).catch(function () {}).finally(function () {
+      if (epoch === accountQuotaEpoch) {
+        state.localRecordings.loading = false;
+        render();
+      }
+    });
+  }
+
+  function updateLocalStorageSettings(payload, toastMessage) {
+    var epoch = accountQuotaEpoch;
+    return requestJson("/api/recordings/local-storage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) {
+        showToast((result.body && result.body.detail) || "本地存储设置未保存，请检查路径权限。");
+        render();
+        return;
+      }
+      applyLocalRecordingsPayload(result.body);
+      render();
+      if (toastMessage) showToast(toastMessage);
+    }).catch(function () {
+      if (epoch === accountQuotaEpoch) showToast("本地存储设置保存失败，请稍后重试。");
+    });
+  }
+
+  function pickLocalStorageDirectory() {
+    var epoch = accountQuotaEpoch;
+    return requestJson("/api/recordings/local-storage/pick-directory", { method: "POST" }).then(function (result) {
+      if (epoch !== accountQuotaEpoch || !result.ok || !result.body) return;
+      if (!result.body.cancelled && result.body.path) {
+        return updateLocalStorageSettings({ recordings_download_dir: result.body.path }, "已更新录像下载目录。");
+      }
+    }).catch(function () {});
+  }
+
+  function openLocalStoragePath(recordingId) {
+    return requestJson("/api/recordings/local-storage/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recording_id: recordingId || "" })
+    }).then(function (result) {
+      if (!result.ok) showToast((result.body && result.body.detail) || "无法打开本地目录。");
+    }).catch(function () {
+      showToast("无法打开本地目录。");
+    });
+  }
+
+  function deleteOneLocalRecording(recordingId) {
+    if (!recordingId) return Promise.resolve();
+    var epoch = accountQuotaEpoch;
+    return requestJson("/api/recordings/local-storage/" + encodeURIComponent(recordingId), {
+      method: "DELETE"
+    }).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) {
+        showToast((result.body && result.body.detail) || "未能删除本地录像文件。");
+        return;
+      }
+      applyLocalRecordingsPayload(result.body);
+      showToast("已删除本地录像文件。");
+      if (state.view === "campus-course" && state.campus.courseId) {
+        return loadCampusCourse(state.campus.courseId);
+      }
+      render();
+    }).catch(function () {
+      if (epoch === accountQuotaEpoch) showToast("未能删除本地录像文件。");
+    });
+  }
+
+  async function clearAllLocalRecordings() {
+    if (!await confirmAction("确认清理本机保存的全部原始录像文件？\n（已生成的课堂笔记、转写与课件不受影响）")) return;
+    var epoch = accountQuotaEpoch;
+    return requestJson("/api/recordings/local-storage/clear", { method: "POST" }).then(function (result) {
+      if (epoch !== accountQuotaEpoch) return;
+      if (!result.ok || !result.body) {
+        showToast((result.body && result.body.detail) || "清理本地录像失败。");
+        return;
+      }
+      applyLocalRecordingsPayload(result.body);
+      showToast("已清理全部本地原始录像。");
+      if (state.view === "campus-course" && state.campus.courseId) {
+        return loadCampusCourse(state.campus.courseId);
+      }
+      render();
+    }).catch(function () {
+      if (epoch === accountQuotaEpoch) showToast("清理本地录像失败。");
+    });
+  }
+
   function loadCampusCourses() {
     var epoch = accountQuotaEpoch;
     return requestJson("/api/campus/courses").then(function (result) {
@@ -449,6 +560,9 @@
       if (Object.prototype.hasOwnProperty.call(result.body, 'notion_home')) {
         state.campus.home = result.body.notion_home && result.body.notion_home.id && result.body.notion_home.schema === 2 ? result.body.notion_home : null;
         state.campus.workspace = state.campus.home && state.campus.home.schema === 2 ? state.campus.home : null;
+      }
+      if (result.body.local_recordings) {
+        applyLocalRecordingsPayload(result.body.local_recordings);
       }
       state.campus.configured = Boolean(result.body.campus_configured);
       state.campus.demoConnection = Boolean(result.body.demo_connection);
@@ -650,7 +764,7 @@
     if (!panel.preview) return header + '<p role="alert">' + esc(panel.error) + '</p>' +
       button('重新读取', 'batch-preview-retry', {small:true}) + '</section>';
     var bundledQuota = state.quota || {};
-    var bundledNotes = Number(bundledQuota.transcribe_seconds_remaining) > 0 || Number(bundledQuota.tier_expires_at) * 1000 > Date.now();
+    var bundledNotes = Boolean(bundledQuota.tier) || Number(bundledQuota.tier_expires_at) * 1000 > Date.now() || Number(bundledQuota.weekly_rollover_seconds) > 0;
     var useFlashForTranscript = panel.notesStrategy === 'transcript' && panel.preview.notes_model === 'qwen3.7-plus';
     var activeModel = useFlashForTranscript ? 'qwen3.5-flash' : panel.preview.notes_model;
     var items = selectedBatchItems();
@@ -755,8 +869,12 @@
       ' 门课正在处理</p><progress aria-label="批量整理进度" value="' + (batch.progress_done || 0) + '" max="' + (batch.progress_total || 1) + '"></progress>' +
       '<details data-persistent-disclosure="batch-progress"><summary>查看各讲进度</summary><ul class="batch-progress-items">' +
       (batch.items || []).map(function (item) {
+        // Running rows carry the lecture-wide stage label; keep a stage that
+        // already reads as an activity untouched instead of double-prefixing.
+        var runningStage = String(item.stage || "").indexOf('正在') === 0
+          ? item.stage : '正在' + (item.stage || '转写并生成笔记');
         return '<li><div><strong>' + esc(item.course_title) + ' · ' + esc(item.title) + '</strong><small>' +
-          esc(item.state === 'done' ? '✓ 已完成' : item.state === 'pending' ? '等待中' : item.stage) +
+          esc(item.state === 'done' ? '✓ 已完成' : item.state === 'pending' ? '等待中' : runningStage) +
           (item.state === 'running' ? ' · ' + Math.round(item.progress_percent || 0) + '%' : '') + '</small>' +
           (item.error ? '<small class="batch-item-error">' + esc(item.error) + '</small>' : '') + '</div>' +
           (item.state === 'done' ? button('查看笔记', 'batch-open-note', {small:true, quiet:true, attrs:{'data-course':item.course_id, 'data-recording':item.recording_id}}) : '') + '</li>';
@@ -767,6 +885,56 @@
     var times = state.campus.courses.map(function (course) { return course.synced_at; }).filter(function (value) { return parseTime(value); });
     times.sort(function (a, b) { return parseTime(b) - parseTime(a); });
     return times.length ? (Date.now() - parseTime(times[0]).getTime() < 60000 ? '刚刚' : friendlyTime(times[0])) : '尚未更新';
+  }
+
+  function localRecordingsNoticeBar() {
+    var lr = state.localRecordings;
+    if (!lr || lr.count <= 0 || lr.open) return "";
+    return '<div class="local-recordings-banner" data-local-recordings-banner role="status">' +
+      '<div><strong>本机已保存 ' + esc(lr.count) + ' 节课程录像</strong><span> · 共占用 ' + esc(formatTransfer(lr.totalBytes)) +
+      (lr.effectiveDir ? ' · 目录：' + esc(lr.effectiveDir) : '') + '</span></div>' +
+      '<div class="local-recordings-banner-actions">' +
+      button("查看已下载录像", "toggle-local-recordings", { small: true }) +
+      button("打开下载目录", "local-storage-open-dir", { small: true, quiet: true }) +
+      button("全部清理", "local-storage-clear-all", { small: true, quiet: true }) +
+      '</div></div>';
+  }
+
+  function localRecordingsPanel(alwaysVisible) {
+    var lr = state.localRecordings;
+    if (!alwaysVisible && (!lr || !lr.open)) return "";
+    var rows = (lr.items || []).map(function (item) {
+      return '<li class="local-recording-item" data-local-recording-item="' + esc(item.recording_id) + '">' +
+        '<div class="local-recording-info">' +
+        '<strong>' + esc(item.course_title) + ' · ' + esc(item.title) + '</strong>' +
+        '<small>' + esc(item.date || "日期未记录") + ' · ' + esc(formatTransfer(item.size_bytes)) + ' · ' + esc(item.path) + '</small>' +
+        '</div>' +
+        '<div class="local-recording-actions">' +
+        button("在文件夹中显示", "local-storage-reveal", { small: true, quiet: true, attrs: { "data-recording": item.recording_id } }) +
+        '<a class="btn btn-small btn-quiet" href="/api/recordings/' + encodeURIComponent(item.recording_id) + '/video" download>导出 MP4</a>' +
+        button("删除本地文件", "local-storage-delete-one", { small: true, quiet: true, attrs: { "data-recording": item.recording_id } }) +
+        '</div></li>';
+    }).join("");
+    return '<section class="panel local-recordings-panel" data-local-recordings-panel aria-label="已下载录像与本地存储设置">' +
+      '<div class="local-recordings-header"><div><h2>已下载录像与本地存储设置</h2>' +
+      '<p class="form-note">默认不保留原始录像与音频：整理笔记时仅临时提取音轨与课堂画面，整理完成后立即自动删除本地视频文件。</p></div>' +
+      (!alwaysVisible ? button("收起", "toggle-local-recordings", { small: true, quiet: true }) : "") + '</div>' +
+      '<div class="local-recordings-settings">' +
+      '<label class="local-recordings-toggle"><input type="checkbox" data-local-storage-save-toggle' + (lr.saveLocally ? " checked" : "") + '>' +
+      '<span>整理笔记后也在本地保留原始录像（默认关闭，开启后每节课约占用 500–800 MB）</span></label>' +
+      '<div class="local-recordings-dir-row">' +
+      '<label for="local-recordings-dir-input">录像下载保存目录</label>' +
+      '<div class="local-recordings-dir-controls">' +
+      '<input id="local-recordings-dir-input" type="text" class="text-input" data-local-storage-dir-input value="' + esc(lr.downloadDir) + '" placeholder="' + esc(lr.effectiveDir || "默认：数据目录下的 recordings-downloads") + '">' +
+      button("选择文件夹…", "local-storage-pick-dir", { small: true, quiet: true }) +
+      button("保存目录", "local-storage-save-dir", { small: true }) +
+      button("打开目录", "local-storage-open-dir", { small: true, quiet: true }) +
+      '</div><small class="form-note hint">当前生效目录：' + esc(lr.effectiveDir || "默认目录") + '</small></div></div>' +
+      '<div class="local-recordings-list-section">' +
+      '<div class="local-recordings-list-header"><h3>本机已保存录像（' + esc(lr.count) + ' 节 · 共 ' + esc(formatTransfer(lr.totalBytes)) + '）</h3>' +
+      (lr.count > 0 ? button("清空全部本地录像", "local-storage-clear-all", { small: true, quiet: true }) : "") + '</div>' +
+      (lr.count > 0 ? '<ul class="local-recordings-list">' + rows + '</ul>' : '<p class="form-note hint">当前本机没有保存任何原始录像文件，不占用额外磁盘空间。</p>') +
+      '</div></section>';
   }
 
   function campusDashboardScreen() {
@@ -796,7 +964,9 @@
         '<div class="topline"><div><h1 class="page-title">连接设置</h1><p class="page-desc">连接教学网获取课程，资料与笔记保存在本机。</p></div></div>' +
         campusSetupGuide() + recordingTaskStatus() + backgroundSyncStatus() +
         (state.recordings.error ? '<p role="alert">' + esc(state.recordings.error) + '</p>' : '') +
-        '<section class="panel"><h2>教学网账号</h2>' + credentials + '</section>';
+        '<section class="panel"><h2>教学网账号</h2>' + credentials + '</section>' +
+        (state.campus.home || state.campus.homeSync ? campusHomeControls() : '') +
+        localRecordingsPanel(true);
     }
     var empty = state.campus.courses.length ? (visible.length ? '<div class="course-grid">' + items + '</div>' : '<div class="empty-materials">没有找到匹配的课程。</div>') :
       '<div class="empty-materials">还没有课程。连接教学网账号后，点击「更新课程目录」。</div>';
@@ -811,7 +981,16 @@
       (state.campus.courses.some(function (course) { return course.recordings > 0; }) ?
         button(state.batchOrganize && state.batchOrganize.open ? '收起一键整理' : '一键整理笔记', 'toggle-batch-organize',
           {small:true, quiet:Boolean(state.batchOrganize && state.batchOrganize.open)}) : '') +
-      '</div></div>' + recordingTaskStatus() + backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel() +
+      '<span class="local-recordings-action-wrap">' + button(
+        state.localRecordings.open
+          ? "收起已下载录像"
+          : state.localRecordings.count > 0
+            ? "已下载录像 (" + state.localRecordings.count + " · " + formatTransfer(state.localRecordings.totalBytes) + ")"
+            : "已下载录像",
+        "toggle-local-recordings",
+        { small: true, quiet: true }
+      ) + '</span>' +
+      '</div></div>' + localRecordingsNoticeBar() + localRecordingsPanel(false) + recordingTaskStatus() + backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel() +
        (state.campus.courses.some(function (course) { return !course.synced_at; }) ?
          '<p class="form-note hint">部分课程尚未更新，请先更新目录。</p>' : '') +
        (state.campus.courses.length ? '<label class="campus-search-label">查找课程<input class="text-input" type="search" data-campus-search placeholder="输入课程名或课程号" value="' + esc(state.campus.query) + '"></label>' : '') + (state.recordings.error ? '<p role="alert">' + esc(state.recordings.error) + '</p>' : '') +
@@ -1053,8 +1232,8 @@
         '<div class="empty-materials lecture-empty-materials"><p>本讲尚未关联课件</p><small>可从教学网选择课件、从电脑上传，或按视频关键帧匹配。</small></div>') +
       '<div class="lecture-materials-toolbar">' + button('从教学网选择课件', 'lecture-toggle-material-picker',
         {small:true, quiet:true, attrs:Object.assign({'aria-expanded':String(lectureMaterialPicker.recording === lesson.id)}, attrs)}) +
-      '<label class="btn btn-small btn-quiet lecture-upload-label"' + ((state.quota || {}).tier !== 'max' ? ' role="button" tabindex="0" data-action="membership-upgrade" data-tier="Max" data-feature="上传补充材料"' : '') + '>Max · 上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)<input type="file" data-lecture-local-upload="' +
-        esc(lesson.id) + '" accept=".pdf,.pptx,.docx,.md,.txt" multiple hidden' + (busy || (state.quota || {}).tier !== 'max' ? ' disabled' : '') + '></label></div>' + picker + '</section>';
+      '<label class="btn btn-small btn-quiet lecture-upload-label"' + (Boolean((state.quota || {}).tier) && (state.quota || {}).tier !== 'max' ? ' role="button" tabindex="0" data-action="membership-upgrade" data-tier="Max" data-feature="上传补充材料"' : '') + '>Max · 上传补充材料 / 课堂笔记 (.pdf/.pptx/.docx/.md/.txt)<input type="file" data-lecture-local-upload="' +
+        esc(lesson.id) + '" accept=".pdf,.pptx,.docx,.md,.txt" multiple hidden' + (busy || (Boolean((state.quota || {}).tier) && (state.quota || {}).tier !== 'max') ? ' disabled' : '') + '></label></div>' + picker + '</section>';
   }
 
   function updateLectureMaterials(url, options) {
@@ -1813,7 +1992,9 @@
         (lesson.video_available || lesson['keyframe' + 's_available'] ? button('按关键帧匹配课件', 'campus-match-slides-keyframe' + 's', {small:true, quiet:true, disabled:courseTaskBusy(course.id), attrs:{'data-recording':lesson.id}}) : '') +
         (!lesson.duration_seconds && state.campus.configured ? button('读取时长', 'campus-estimate-duration', { small: true, quiet: true, attrs: { 'data-recording': lesson.id } }) : '') +
         (lesson.video_available
-          ? '<a class="btn btn-small btn-quiet" href="/api/recordings/' + encodeURIComponent(lesson.id) + '/video" download>下载原始录像</a>'
+          ? '<a class="btn btn-small btn-quiet" href="/api/recordings/' + encodeURIComponent(lesson.id) + '/video" download>下载原始录像</a>' +
+            button("在文件夹中显示", "local-storage-reveal", { small: true, quiet: true, attrs: { "data-recording": lesson.id } }) +
+            button("删除本地录像", "local-storage-delete-one", { small: true, quiet: true, attrs: { "data-recording": lesson.id } })
           : button("下载原始录像", "recording-download", { small: true, quiet: true,
               disabled: !state.campus.configured || courseTaskBusy(course.id) || Boolean(lesson.unavailable_reason),
               attrs: { "data-recording": lesson.id } })) +
@@ -1866,7 +2047,7 @@
     notice += backgroundSyncStatus() + batchOrganizeStatus() + batchOrganizePanel();
     if (section === "assignments" || section === "notices") return header + hero + notice + recordingTaskStatus() + campusOfficialSections(course, section);
     var cachedSummary = readingPreviews[course.id + ':summary'];
-    var hasSummary = Boolean(summary || course.has_summary || (cachedSummary && cachedSummary.markdown && !cachedSummary.error));
+    var hasSummary = Boolean(summary || course.has_summary || (course.has_summary === undefined && (course.lessons || []).some(function (lesson) { return lesson.notes_available; })) || (cachedSummary && cachedSummary.markdown && !cachedSummary.error));
     var summaryPreviewOpen = Boolean(cachedSummary && cachedSummary.open);
     var summaryReadControl = hasSummary ? button(summaryPreviewOpen ? '收起课程总结' : '阅读课程总结',
       'campus-preview-course-summary', {small:true, primary:!summaryPreviewOpen, quiet:summaryPreviewOpen,
@@ -1889,7 +2070,7 @@
         summaryReadControl +
         previewReader(course.id + ':summary', false) + '</section>' + materialFilter + linkedMaterials + infoSection + pending + emptyMaterials;
     }
-
+    if (section === "settings") return header + hero + notice + recordingTaskStatus() + '<details class="panel campus-settings" open><summary>课程笔记与 Notion 主页设置</summary>' + campusHomeControls() + campusExistingNotionControl(course) + '</details>';
     if (section === "lecture") return header + hero + notice + '<section class="panel" id="course-lessons">' + recordingTaskStatus() + lessons + (needsTranscription ? directOssConsent(state.campus.lessonId) : "") + '</section>';
     var centers = [['assignments', '作业中心'], ['notices', '通知中心'], ['materials', '课程资料']].map(function (entry) {
       var count = entry[0] === 'assignments' ? (course.assignments || []).length + ' 项记录' :
@@ -2278,7 +2459,8 @@
   }
 
   function isLiteTier() {
-    return ['pro', 'max'].indexOf(String((state.quota || {}).tier || 'free').toLowerCase()) < 0;
+    var tier = String((state.quota || {}).tier || '').toLowerCase();
+    return Boolean(tier) && ['pro', 'max'].indexOf(tier) < 0;
   }
 
   function membershipValidity(quota) {
@@ -2614,13 +2796,20 @@
     return minutes + ":" + String(seconds % 60).padStart(2, "0");
   }
 
+  function isNoteProgressUnit(unit) {
+    return unit === "划分知识点" || unit === "整理知识点" || unit === "知识点分段" ||
+      unit === "段" || unit === "章节" || unit === "笔记段" || unit === "整合笔记";
+  }
+
   function taskUnitName(task) {
     var unit = task.progress_unit;
     if (unit === "bytes") return "未传输";
     if (unit === "segments") return "段录像";
     if (unit === "audio_extract") return "音频";
     if (unit === "audio_parts") return "段音频";
-    if (unit === "笔记段") return "部分笔记";
+    if (unit === "划分知识点") return "个知识模块";
+    if (unit === "整合笔记") return "步整合";
+    if (isNoteProgressUnit(unit)) return "个知识点";
     if (unit === "courses") return "门课程";
     return "项";
   }
@@ -2635,14 +2824,22 @@
     var done = Math.max(0, Number(task.progress_done) || 0);
     var total = Math.max(0, Number(task.progress_total) || 0);
     var remaining = Math.max(0, Number(task.progress_remaining) || (total ? total - done : 0));
-    var percent = total ? Math.min(100, Math.floor(done / total * 100)) : 0;
+    var isNoteUnit = isNoteProgressUnit(task.progress_unit);
+    // Lecture organization reports one overall percent; other kinds still
+    // derive it from the raw sub-stage counts.
+    var overallPercent = task.kind === "process" && typeof task.progress_percent === "number" &&
+      task.progress_percent > 0;
+    var percent = overallPercent
+      ? (task.state === "done" ? 100 : Math.max(1, Math.min(99, Math.round(task.progress_percent))))
+      : (total ? Math.min(100, Math.round(done / total * 100)) : 0);
     var detail = task.progress_unit === "bytes"
       ? (total ? formatTransfer(done) + " / " + formatTransfer(total) : formatTransfer(task.bytes_done))
       : task.progress_unit === "segments" ? done + " / " + total + " 段录像"
       : task.progress_unit === "audio_extract" ? "已处理 " + formatAudioPosition(done) +
         (total ? " / " + formatAudioPosition(total) : "") + " 音频"
       : task.progress_unit === "audio_parts" ? done + " / " + total + " 段音频"
-      : task.progress_unit === "笔记段" ? "已完成 " + done + " / " + total + " 部分笔记"
+      : task.progress_unit === "整合笔记" ? "正在整合课堂笔记"
+      : isNoteUnit ? "已完成 " + done + " / " + total + " 个知识点"
       : task.progress_unit === "courses" ? "已完成 " + done + " / " + total + " 门课程"
       : task.progress_unit === "items" ? "已完成 " + done + " / " + total + " 项"
       : task.progress_unit === "remux" ? "正在封装录像文件" : "请稍候";
@@ -2653,8 +2850,9 @@
       detail += " · " + formatTransfer(task.speed_bps) + "/秒";
     }
     if (task.current_item) detail += " · " + task.current_item;
-    return '<div class="recording-progress"><progress aria-label="' + esc(campusReadError(task.stage)) + '进度" ' +
-      (total ? 'value="' + esc(done) + '" max="' + esc(total) + '"' : '') + '></progress>' +
+    return '<div class="recording-progress"><progress class="recording-progress-bar" aria-label="' + esc(campusReadError(task.stage)) + '进度" ' +
+      (overallPercent ? 'value="' + esc(percent) + '" max="100"'
+        : total ? 'value="' + esc(done) + '" max="' + esc(total) + '"' : '') + '></progress>' +
       '<span>' + esc(total ? percent + "% · " + detail : detail) + '</span></div>';
   }
 
@@ -2667,7 +2865,7 @@
     if (state.recordings.taskCourseId && state.recordings.taskCourseId !== activeCourseId &&
         task.kind === "sync" && state.view === "campus-course") return "";
     var activeStage = task.progress_unit === "audio_extract" ? "提取音轨" :
-      task.progress_unit === "audio_parts" ? "上传音频并转写" : task.stage;
+      task.progress_unit === "audio_parts" ? "上传音频并转写" : (task.stage || "转写并生成笔记");
     var stepPrefix = task.stage_total
       ? "第 " + Math.max(1, Number(task.stage_index) || 1) + "/" + task.stage_total + " 步 · " : "";
     var message = task.state === "running" ? stepPrefix + "正在" + activeStage + "…" :
@@ -3352,10 +3550,13 @@
 
   function recordingNoteStyle(recordingId, disabled) {
     var lite = isLiteTier();
+    var hasTier = Boolean((state.quota || {}).tier);
     var selected = lite ? "transcript" : (state.recordings.noteStrategyByKey[recordingId] || "topics");
+    var topicsLabel = hasTier ? "按知识点图文整理（高级转写 · 笔记不扣 AI 点）" : "按知识点图文整理（Plus · 约 2–4 点）";
+    var transcriptLabel = hasTier ? "按讲课时间线整理（普通转写 · 笔记不扣 AI 点）" : "按讲课时间线整理（Flash · 约 1–2 点）";
     return '<label class="recording-note-style">笔记方式<select data-recording-note-strategy="' + esc(recordingId) + '" aria-label="笔记方式"' + (disabled ? ' disabled' : '') + '>' +
-      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + (lite ? ' disabled' : '') + '>按知识点图文整理（高级转写 · 笔记不扣 AI 点）</option>' +
-      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>按讲课时间线整理（普通转写 · 笔记不扣 AI 点）</option></select>' + (lite ? '<small class="recording-note-tier-hint">当前为 Lite 等级，默认使用普通转写；升级 Pro / Max 可解锁按知识点图文整理。</small>' : '') + '</label>';
+      '<option value="topics"' + (selected === "topics" ? ' selected' : '') + (lite ? ' disabled' : '') + '>' + topicsLabel + '</option>' +
+      '<option value="transcript"' + (selected === "transcript" ? ' selected' : '') + '>' + transcriptLabel + '</option></select>' + (lite ? '<small class="recording-note-tier-hint">当前为 Lite 等级，默认使用普通转写；升级 Pro / Max 可解锁按知识点图文整理。</small>' : '') + '</label>';
   }
 
   function openNotionPreview(url, onFailure) {
@@ -3579,6 +3780,7 @@
     else if (action === "campus-account-settings" || action === "open-campus-setup") {
       state.view = "campus-account";
       render();
+      if (state.campus.configured && state.connection.connected && !state.campus.home) loadNotionParents();
       var settingsPanel = document.querySelector(state.campus.configured ? ".home-setup" : "#recording-credentials-form");
       if (settingsPanel) settingsPanel.scrollIntoView({ block: "start" });
       if (!state.campus.configured) {
@@ -3719,6 +3921,20 @@
     else if (action === "recording-cancel-background") updateBackgroundSync(false);
     else if (action === "recording-resume-background") updateBackgroundSync(true);
     else if (action === "recording-download") downloadRecording(target.dataset.recording);
+    else if (action === "toggle-local-recordings") {
+      state.localRecordings.open = !state.localRecordings.open;
+      if (state.localRecordings.open) loadLocalRecordings();
+      else render();
+    }
+    else if (action === "local-storage-pick-dir") pickLocalStorageDirectory();
+    else if (action === "local-storage-save-dir") {
+      var dirInput = document.querySelector("[data-local-storage-dir-input]");
+      updateLocalStorageSettings({ recordings_download_dir: dirInput ? dirInput.value.trim() : "" }, "已保存录像下载目录。");
+    }
+    else if (action === "local-storage-open-dir") openLocalStoragePath("");
+    else if (action === "local-storage-reveal") openLocalStoragePath(target.dataset.recording || "");
+    else if (action === "local-storage-delete-one") deleteOneLocalRecording(target.dataset.recording || "");
+    else if (action === "local-storage-clear-all") clearAllLocalRecordings();
     else if (action === "recording-open-result" && target.dataset.url) {
       var localResult = target.dataset.url.match(/^\/api\/campus\/courses\/([^/]+)\/(?:recordings\/([^/]+)\/note-preview|summary-preview)$/);
       if (localResult) {
@@ -3817,6 +4033,14 @@
     }
   });
   document.addEventListener("change", function (event) {
+    if (event.target.matches('[data-local-storage-save-toggle]')) {
+      var enabled = Boolean(event.target.checked);
+      updateLocalStorageSettings(
+        { save_recordings_locally: enabled },
+        enabled ? "已开启：整理笔记后在本地保留原始录像。" : "已关闭：整理笔记后自动删除本地临时录像。"
+      );
+      return;
+    }
     if (event.target.matches('[data-lecture-local-upload]')) {
       var files = Array.from(event.target.files || []);
       if (!files.length) return;

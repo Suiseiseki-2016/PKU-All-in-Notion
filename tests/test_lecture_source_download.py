@@ -203,7 +203,7 @@ def test_extensionless_preparation_creates_bound_typed_cache_and_preserves_edite
     paths, failures = prepare_lesson_sources(job, "selected", settings)
     assert not failures and len(paths) == 1 and paths[0].suffix == ".pdf"
     receipts = list(paths[0].parent.glob("*.source.json"))
-    assert len(receipts) == 1 and set(json.loads(receipts[0].read_text())) == {"schema", "source_sha256", "suffix", "bytes", "sha256"}
+    assert len(receipts) == 1 and set(json.loads(receipts[0].read_text("utf-8"))) == {"schema", "source_sha256", "suffix", "bytes", "sha256"}
     retry, failures = prepare_lesson_sources(job, "selected", SimpleNamespace(pku_username="", pku_password=""))
     assert retry == paths and not failures and len(calls) == 1
     paths[0].write_bytes(b"%PDF-student-edit")

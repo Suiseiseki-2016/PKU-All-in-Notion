@@ -12,7 +12,7 @@ ROOT = Path(__file__).parents[1]
 
 @pytest.mark.parametrize('width', [390, 1440])
 def test_quota_summary_and_lecture_actions(width):
-    source = (ROOT / 'pku_sync/panel/static/app.js').read_text()
+    source = (ROOT / 'pku_sync/panel/static/app.js').read_text('utf-8')
     source = source[:source.index('  window.setInterval(refreshAccount, 8000);')] + '''
     window.__ux = {state:state, render:render, previews:readingPreviews}; render();})();'''
     with pw.sync_playwright() as driver:

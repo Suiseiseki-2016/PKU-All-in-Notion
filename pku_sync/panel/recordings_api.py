@@ -28,8 +28,19 @@ from pydantic import BaseModel, Field
 from ..envfile import write_env_values
 from ..notion_login import env_file_path
 from ..notion import NotionError
-from ..pipeline import RecordingJob, collect_jobs, download_job, process_job, recording_stage
+from ..pipeline import (
+    RecordingJob,
+    collect_jobs,
+    download_job,
+    process_job,
+    recording_stage,
+    stream_extract_keyframes_job,
+    stream_process_job,
+)
 from ..store import safe_name
+
+_DEFAULT_DOWNLOAD_JOB = download_job
+_DEFAULT_PROCESS_JOB = process_job
 
 logger = logging.getLogger(__name__)
 _PORTAL_STATUS_LOCK = threading.RLock()
@@ -183,6 +194,16 @@ class TermReviewConfirmation(BaseModel):
     confirmed_spoken_term: str
     confirmed: bool = False
 
+
+class LocalStorageConfigRequest(BaseModel):
+    save_recordings_locally: bool | None = None
+    recordings_download_dir: str | None = None
+
+
+class LocalStorageOpenRequest(BaseModel):
+    recording_id: str = ""
+    path: str = ""
+
 @dataclass
 class Work:
     kind: str
@@ -227,11 +248,33 @@ def _unexpected_process_failure(stage: str) -> str:
         return "读取教学网或录像时中断；已下载的本地文件会保留，请检查网络后重试。"
     if any(name in stage for name in ("转写", "音轨", "音频")):
         return "音频处理或转写时中断；已完成的本地结果会保留，请检查平台登录与额度后重试。"
-    if any(name in stage for name in ("笔记", "AI")):
+    if any(name in stage for name in ("笔记", "AI", "划分课堂知识点")):
         return "生成课堂笔记时中断；本地转写会保留，请检查平台额度后重试。"
     if any(name in stage for name in ("课堂画面", "关键帧", "补图")):
         return "提取课堂画面时中断；文字转写和笔记会保留，请重试补充课堂画面。"
     return f"任务在“{stage}”阶段中断；已生成的本地文件会保留，请稍后重试。"
+
+def _process_stage_and_percent(unit: str, done: int, total: int,
+                               current_stage: str = "转写并生成笔记") -> tuple[str, int]:
+    """Map one lecture-processing sub-stage tick to a display stage plus an
+    overall 0..100 lecture percent, so the whole job reads as a single run
+    from 提取音轨 to 整合课堂笔记 instead of progress restarting per sub-stage."""
+    ratio = min(1.0, max(0.0, done / total)) if total > 0 else 0.0
+
+    def band(low: int, high: int) -> int:
+        return int(round(low + (high - low) * ratio))
+
+    if unit == "audio_extract":
+        return "提取音轨", band(5, 20)
+    if unit == "audio_parts":
+        return "上传音频并转写", band(20, 65)
+    if unit == "划分知识点":
+        return "划分课堂知识点", band(65, 72)
+    if unit in ("整理知识点", "知识点分段", "段", "章节", "笔记段"):
+        return "生成课堂笔记", band(72, 95)
+    if unit == "整合笔记":
+        return "整合课堂笔记", band(95, 99)
+    return current_stage or "转写并生成笔记", (int(round(ratio * 100)) if total > 0 else 0)
 
 def recording_id(job: RecordingJob) -> str:
     from ..catalog_snapshots import recording_source_id
@@ -280,6 +323,217 @@ def find_job(data_dir: Path, key: str) -> RecordingJob | None:
     matches = [job for job in collect_jobs(data_dir)
                if key in {recording_id(job), legacy_recording_id(job)}]
     return matches[0] if len(matches) == 1 else None
+
+
+def effective_recordings_download_dir(settings) -> Path:
+    custom = str(getattr(settings, "recordings_download_dir", "") or "").strip()
+    if custom:
+        return Path(custom).expanduser().resolve()
+    return (Path(settings.data_dir) / "recordings-downloads").resolve()
+
+
+def exported_recording_path(settings, job: RecordingJob) -> Path:
+    course_folder = safe_name(job.course_name or job.recording.course_id, "course")
+    filename = safe_name(f"{job.recording.date}_{job.recording.title}", "recording") + ".mp4"
+    return effective_recordings_download_dir(settings) / course_folder / filename
+
+
+def _export_recording_to_download_dir(settings, job: RecordingJob) -> Path | None:
+    if not job.video.is_file():
+        return None
+    dest = exported_recording_path(settings, job)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src = job.video.resolve()
+        if dest.resolve() == src:
+            return dest
+        if dest.exists() and dest.stat().st_size == src.stat().st_size:
+            return dest
+        dest.unlink(missing_ok=True)
+        try:
+            import os
+            os.link(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+        return dest
+    except OSError:
+        logger.warning("failed to export recording to download dir: %s", dest)
+        return job.video.resolve()
+
+
+def _finalize_video_retention(settings, job: RecordingJob, *, local_mode: bool, notes_path: Path) -> None:
+    keep_marker = job.directory / ".keep-video"
+    if getattr(settings, "save_recordings_locally", False):
+        if job.video.is_file():
+            keep_marker.parent.mkdir(parents=True, exist_ok=True)
+            keep_marker.touch()
+            _export_recording_to_download_dir(settings, job)
+        return
+    if keep_marker.exists():
+        if job.video.is_file():
+            _export_recording_to_download_dir(settings, job)
+        return
+    if not getattr(settings, "delete_video_after_processing", False):
+        return
+    if local_mode:
+        job.video.unlink(missing_ok=True)
+        return
+    from .note_videos import video_publication_complete
+    if video_publication_complete(job.directory, notes_path=notes_path):
+        job.video.unlink(missing_ok=True)
+
+
+def local_storage_summary(settings) -> dict:
+    root = Path(settings.data_dir)
+    save_locally = bool(getattr(settings, "save_recordings_locally", False))
+    configured_dir = str(getattr(settings, "recordings_download_dir", "") or "").strip()
+    effective_dir = str(effective_recordings_download_dir(settings))
+    items = []
+    total_bytes = 0
+    for job in sorted(collect_jobs(root),
+                      key=lambda item: (item.recording.recorded_at, item.recording.title),
+                      reverse=True):
+        exported = exported_recording_path(settings, job)
+        has_exported = exported.is_file()
+        has_internal = job.video.is_file()
+        if not has_exported and not has_internal:
+            continue
+        display_path = exported if has_exported else job.video.resolve()
+        try:
+            size_bytes = display_path.stat().st_size
+        except OSError:
+            continue
+        total_bytes += size_bytes
+        items.append({
+            "recording_id": recording_id(job),
+            "course_id": job.recording.course_id,
+            "course_title": job.course_name or job.recording.course_id,
+            "title": job.recording.title,
+            "date": job.recording.date,
+            "size_bytes": size_bytes,
+            "path": str(display_path),
+            "explicitly_saved": (job.directory / ".keep-video").exists() or save_locally,
+        })
+    return {
+        "save_recordings_locally": save_locally,
+        "recordings_download_dir": configured_dir,
+        "effective_download_dir": effective_dir,
+        "count": len(items),
+        "total_bytes": total_bytes,
+        "items": items,
+    }
+
+
+def delete_local_recording(settings, key: str) -> dict:
+    root = Path(settings.data_dir)
+    job = find_job(root, key)
+    if job is None:
+        raise ValueError("找不到这条录像。")
+    exported = exported_recording_path(settings, job)
+    for target in (job.video, job.directory / ".keep-video", exported):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        if exported.parent.is_dir() and not any(exported.parent.iterdir()):
+            exported.parent.rmdir()
+    except OSError:
+        pass
+    return local_storage_summary(settings)
+
+
+def clear_all_local_recordings(settings) -> dict:
+    root = Path(settings.data_dir)
+    for job in collect_jobs(root):
+        exported = exported_recording_path(settings, job)
+        for target in (job.video, job.directory / ".keep-video", exported):
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            if exported.parent.is_dir() and not any(exported.parent.iterdir()):
+                exported.parent.rmdir()
+        except OSError:
+            pass
+    return local_storage_summary(settings)
+
+
+def open_local_storage_path(settings, recording_id_key: str = "", raw_path: str = "") -> dict:
+    import shutil
+    import subprocess
+
+    root = Path(settings.data_dir)
+    target: Path | None = None
+    reveal_file = False
+    if recording_id_key:
+        job = find_job(root, recording_id_key)
+        if job is None:
+            raise ValueError("找不到这条录像。")
+        exported = exported_recording_path(settings, job)
+        if exported.is_file():
+            target = exported
+            reveal_file = True
+        elif job.video.is_file():
+            target = job.video.resolve()
+            reveal_file = True
+        else:
+            raise ValueError("这条录像当前没有保存在本机。")
+    elif raw_path.strip():
+        candidate = Path(raw_path.strip()).expanduser().resolve()
+        if candidate.is_file():
+            target = candidate
+            reveal_file = True
+        elif candidate.is_dir():
+            target = candidate
+        else:
+            candidate.mkdir(parents=True, exist_ok=True)
+            target = candidate
+    else:
+        target = effective_recordings_download_dir(settings)
+        target.mkdir(parents=True, exist_ok=True)
+
+    if shutil.which("osascript") and shutil.which("open"):
+        cmd = ["open", "-R", str(target)] if reveal_file else ["open", str(target)]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif shutil.which("explorer.exe"):
+        cmd = ["explorer.exe", f"/select,{target}"] if reveal_file else ["explorer.exe", str(target)]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif shutil.which("xdg-open"):
+        folder = target.parent if reveal_file else target
+        subprocess.Popen(["xdg-open", str(folder)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "path": str(target)}
+
+
+def pick_local_storage_directory(settings) -> dict:
+    import shutil
+    import subprocess
+
+    default_dir = effective_recordings_download_dir(settings)
+    default_dir.mkdir(parents=True, exist_ok=True)
+    chosen = ""
+    if shutil.which("osascript"):
+        script = (
+            f'POSIX path of (choose folder with prompt "选择课程录像下载目录" '
+            f'default location POSIX file "{str(default_dir).replace(chr(34), "")}")'
+        )
+        res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        if res.returncode == 0 and res.stdout.strip():
+            chosen = str(Path(res.stdout.strip()).resolve())
+    elif shutil.which("powershell"):
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$dlg.Description = '选择课程录像下载目录'; "
+            f"$dlg.SelectedPath = '{str(default_dir).replace(chr(39), chr(39)*2)}'; "
+            "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }"
+        )
+        res = subprocess.run(["powershell", "-NoProfile", "-Sta", "-Command", ps],
+                             capture_output=True, text=True, timeout=120)
+        if res.returncode == 0 and res.stdout.strip():
+            chosen = str(Path(res.stdout.strip()).resolve())
+    return {"cancelled": not bool(chosen), "path": chosen}
 
 def _saved_keyframes(directory: Path) -> list[dict]:
     """Frames already extracted for this recording, if any.
@@ -1008,7 +1262,23 @@ class RecordingWorkManager:
         self._batch_children: dict[str, RecordingWorkManager] = {}
         self._owner_check = lambda: None
         self._background_recovered = False
+        if __import__("os").environ.get("PKU_DESKTOP_APP") == "1":
+            self._cleanup_transient_recordings()
         self._restore_background()
+
+    def _cleanup_transient_recordings(self) -> None:
+        """Remove unmarked temporary video.mp4 files left behind by interrupted runs."""
+        if getattr(self.settings, "save_recordings_locally", False):
+            return
+        if not getattr(self.settings, "delete_video_after_processing", True):
+            return
+        root = Path(self.settings.data_dir)
+        for job in collect_jobs(root):
+            if job.video.is_file() and not (job.directory / ".keep-video").exists():
+                try:
+                    job.video.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _restore_background(self):
         # Local startup read only: progress is explicitly interrupted and never authority.
@@ -1499,12 +1769,20 @@ class RecordingWorkManager:
                   label: str = "") -> None:
         with self._lock:
             if self._work and self._work.state == "running":
-                self._work.progress_done = max(0, done)
-                self._work.progress_total = max(0, total)
+                self._work.progress_done = max(0, int(done))
+                self._work.progress_total = max(0, int(total))
                 self._work.progress_remaining = max(0, self._work.progress_total - self._work.progress_done)
                 self._work.progress_unit = unit
-                self._work.progress_percent = (min(100, int(self._work.progress_done / self._work.progress_total * 100))
-                                               if self._work.progress_total else 0)
+                if self._work.kind == "process":
+                    # Lecture organization folds every sub-stage into one
+                    # overall bar; progress_done/total stay the raw sub-stage
+                    # counts for the detail line.
+                    new_stage, overall_pct = _process_stage_and_percent(unit, done, total, self._work.stage)
+                    self._work.stage = new_stage
+                    self._work.progress_percent = max(int(getattr(self._work, "progress_percent", 0) or 0), overall_pct)
+                else:
+                    self._work.progress_percent = (min(100, int(self._work.progress_done / self._work.progress_total * 100))
+                                                   if self._work.progress_total else 0)
                 if label:
                     self._work.current_item = label
                 self._work.bytes_done = max(0, bytes_done)
@@ -1845,6 +2123,7 @@ class RecordingWorkManager:
         marker = job.directory / ".keep-video"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
+        _export_recording_to_download_dir(self.settings, job)
         return f"/api/recordings/{key}/video"
 
     def _refresh_stale_catalog(self, job: RecordingJob) -> None:
@@ -1934,6 +2213,27 @@ class RecordingWorkManager:
     def _process(self, job: RecordingJob, lecture_id: str, direct_oss: bool = False,
                  regenerate: bool = False, reuse_existing: bool = False,
                  notes_strategy: str | None = None) -> str:
+        had_video_before = bool(job and job.video.exists())
+        completed_ok = False
+        try:
+            result_url = self._process_inner(
+                job, lecture_id, direct_oss=direct_oss, regenerate=regenerate,
+                reuse_existing=reuse_existing, notes_strategy=notes_strategy,
+            )
+            completed_ok = True
+            return result_url
+        finally:
+            if (job is not None
+                    and not completed_ok
+                    and not had_video_before
+                    and getattr(self.settings, "delete_video_after_processing", False)
+                    and not getattr(self.settings, "save_recordings_locally", False)
+                    and not (job.directory / ".keep-video").exists()):
+                job.video.unlink(missing_ok=True)
+
+    def _process_inner(self, job: RecordingJob, lecture_id: str, direct_oss: bool = False,
+                       regenerate: bool = False, reuse_existing: bool = False,
+                       notes_strategy: str | None = None) -> str:
         from ..auth import get_session
         from ..lecture_source_download import prepare_lesson_sources
         from ..media import resolve_notes_model, write_notes
@@ -2015,84 +2315,163 @@ class RecordingWorkManager:
                     raise ValueError(f"新版笔记没有完成：{exc}；原笔记保留。") from exc
                 raise ValueError("新版笔记没有完成；原笔记保留，请稍后重试。") from exc
         elif not notes_path.exists():
-            if not job.video.exists() and not transcript_path.exists():
+            stream_in_memory = (
+                not job.video.exists()
+                and not (job.directory / ".keep-video").exists()
+                and not getattr(self.settings, "save_recordings_locally", False)
+                and getattr(self.settings, "delete_video_after_processing", True)
+                and (getattr(metered_settings, "transcription_backend", "cloud") or "cloud").strip().lower() == "cloud"
+                and download_job is _DEFAULT_DOWNLOAD_JOB
+                and process_job is _DEFAULT_PROCESS_JOB
+            )
+            if not job.video.exists() and not transcript_path.exists() and stream_in_memory:
                 if not self.settings.pku_username or not self.settings.pku_password:
-                    raise ValueError("请先填写教学网账号和密码，以下载这条录像。")
+                    raise ValueError("请先填写教学网账号和密码，以读取这条录像。")
+                source_paths, source_failures = prepare_lesson_sources(
+                    job, recording_id(job), self.settings, stage=self._stage
+                )
                 self._stage("正在连接教学网")
                 client = get_session(username=self.settings.pku_username,
                                      password=self.settings.pku_password)
                 try:
-                    self._stage("下载录像")
-                    downloaded = download_job(client, job, progress=self._progress)
+                    self._stage("转写并生成笔记")
+                    result = stream_process_job(
+                        client, job, metered_settings, include_keyframes=True,
+                        progress=self._progress, direct_oss=direct_oss,
+                        source_paths=source_paths, source_failures=source_failures,
+                        stage=self._stage,
+                    )
                 finally:
                     client.close()
-                if downloaded.path is None:
-                    raise ValueError("录像下载没有完成，请稍后重试。")
-            if job.video.exists():
-                source_paths, source_failures = prepare_lesson_sources(
-                    job, recording_id(job), self.settings, stage=self._stage
-                )
-                self._stage("转写并生成笔记")
-                result = process_job(
-                    job, metered_settings, include_keyframes=True,
-                    progress=self._progress, direct_oss=direct_oss,
-                    source_paths=source_paths, source_failures=source_failures,
-                    preserve_video=True,
-                )
+                if any(error.startswith("stream: ") for error in result.errors):
+                    raise ValueError("录像读取没有完成，请检查网络连接后重试。")
                 if not result.notes:
                     logger.warning("recording processing incomplete: %s", [error.split(":", 1)[0] for error in result.errors])
                     if not result.transcribed:
                         failure = next((error.removeprefix("transcribe: ") for error in result.errors
-                                        if error.startswith("transcribe: ")), "请检查录像文件或网络")
-                        raise ValueError(f"转写没有完成：{failure}。已下载的录像保留，可重试。")
+                                        if error.startswith("transcribe: ")), "请检查教学网连接或网络")
+                        raise ValueError(f"转写没有完成：{failure}。已完成片段会在重试时复用。")
                     failure = next((error.removeprefix("notes: ") for error in result.errors
                                     if error.startswith("notes: ")), "请检查 AI 额度")
                     raise ValueError(f"转写已完成，但笔记未完成：{failure}")
             else:
-                source_paths, source_failures = prepare_lesson_sources(
-                    job, recording_id(job), self.settings, stage=self._stage
-                )
-                self._stage("从已有转写生成笔记")
-                transcript = json.loads(transcript_path.read_text("utf-8"))
-                source_context = collect_note_sources(
-                    job.course_dir, job.recording.date, job.recording.title,
-                    allowed_paths=source_paths,
-                )
-                source_context.extend(source_failures)
-                written = write_notes(
-                    transcript, _saved_keyframes(job.directory), notes_path,
-                    metered_settings, job.label, source_context=source_context,
-                    progress=self._progress, course_directory=job.course_dir,
-                )
-                if written is None:
-                    raise ValueError("笔记生成没有完成，请检查 AI 额度后重试。")
+                if not job.video.exists() and not transcript_path.exists():
+                    if not self.settings.pku_username or not self.settings.pku_password:
+                        raise ValueError("请先填写教学网账号和密码，以下载这条录像。")
+                    self._stage("正在连接教学网")
+                    client = get_session(username=self.settings.pku_username,
+                                         password=self.settings.pku_password)
+                    try:
+                        self._stage("下载录像")
+                        downloaded = download_job(client, job, progress=self._progress)
+                    finally:
+                        client.close()
+                    if downloaded.path is None:
+                        raise ValueError("录像下载没有完成，请稍后重试。")
+                if job.video.exists():
+                    source_paths, source_failures = prepare_lesson_sources(
+                        job, recording_id(job), self.settings, stage=self._stage
+                    )
+                    self._stage("转写并生成笔记")
+                    result = process_job(
+                        job, metered_settings, include_keyframes=True,
+                        progress=self._progress, direct_oss=direct_oss,
+                        source_paths=source_paths, source_failures=source_failures,
+                        preserve_video=True,
+                    )
+                    if not result.notes:
+                        logger.warning("recording processing incomplete: %s", [error.split(":", 1)[0] for error in result.errors])
+                        if not result.transcribed:
+                            failure = next((error.removeprefix("transcribe: ") for error in result.errors
+                                            if error.startswith("transcribe: ")), "请检查录像文件或网络")
+                            keep_video = (
+                                getattr(self.settings, "save_recordings_locally", False)
+                                or (job.directory / ".keep-video").exists()
+                                or not getattr(self.settings, "delete_video_after_processing", False)
+                            )
+                            suffix = "已下载的录像保留，可重试。" if keep_video else "已完成片段会在重试时复用。"
+                            raise ValueError(f"转写没有完成：{failure}。{suffix}")
+                        failure = next((error.removeprefix("notes: ") for error in result.errors
+                                        if error.startswith("notes: ")), "请检查 AI 额度")
+                        raise ValueError(f"转写已完成，但笔记未完成：{failure}")
+                else:
+                    source_paths, source_failures = prepare_lesson_sources(
+                        job, recording_id(job), self.settings, stage=self._stage
+                    )
+                    self._stage("从已有转写生成笔记")
+                    transcript = json.loads(transcript_path.read_text("utf-8"))
+                    source_context = collect_note_sources(
+                        job.course_dir, job.recording.date, job.recording.title,
+                        allowed_paths=source_paths,
+                    )
+                    source_context.extend(source_failures)
+                    written = write_notes(
+                        transcript, _saved_keyframes(job.directory), notes_path,
+                        metered_settings, job.label, source_context=source_context,
+                        progress=self._progress, course_directory=job.course_dir,
+                    )
+                    if written is None:
+                        raise ValueError("笔记生成没有完成，请检查 AI 额度后重试。")
         from ..media import extract_keyframes
         frame_index = job.directory / "keyframes" / "index.json"
         frame_rows = _saved_keyframes(job.directory)
         if not frame_rows and not regenerate:
-            if not job.video.exists():
+            stream_keyframes_in_memory = (
+                not job.video.exists()
+                and not (job.directory / ".keep-video").exists()
+                and not getattr(self.settings, "save_recordings_locally", False)
+                and getattr(self.settings, "delete_video_after_processing", True)
+                and download_job is _DEFAULT_DOWNLOAD_JOB
+            )
+            if stream_keyframes_in_memory:
                 if not self.settings.pku_username or not self.settings.pku_password:
                     raise ValueError("本机没有课堂画面；请连接教学网后重试补图。")
-                self._stage("重新获取录像以补充课堂画面")
+                frame_index.unlink(missing_ok=True)
+                self._stage("提取课堂画面")
                 client = get_session(username=self.settings.pku_username,
                                      password=self.settings.pku_password)
                 try:
-                    downloaded = download_job(client, job, progress=self._progress)
+                    frame_rows = stream_extract_keyframes_job(
+                        client, job, job.directory / "keyframes", progress=self._progress
+                    )
+                except Exception as exc:
+                    logger.exception("lecture frame stream extraction failed")
+                    raise ValueError("课堂画面提取失败；文字笔记已保留，请稍后重试。") from exc
                 finally:
                     client.close()
-                if downloaded.path is None:
-                    raise ValueError("无法获取录像画面；文字笔记已保留，请稍后重试。")
-            frame_index.unlink(missing_ok=True)
-            self._stage("提取课堂画面")
-            try:
-                frame_rows = extract_keyframes(job.video, job.directory / "keyframes")
-            except Exception as exc:
-                logger.exception("lecture frame extraction failed")
-                raise ValueError("课堂画面提取失败；文字笔记已保留，请稍后重试。") from exc
-            if not frame_rows:
-                raise ValueError("录像未能提取课堂画面；文字笔记已保留，请稍后重试。")
+                if not frame_rows:
+                    raise ValueError("录像未能提取课堂画面；文字笔记已保留，请稍后重试。")
+            else:
+                if not job.video.exists():
+                    if not self.settings.pku_username or not self.settings.pku_password:
+                        raise ValueError("本机没有课堂画面；请连接教学网后重试补图。")
+                    self._stage("重新获取录像以补充课堂画面")
+                    client = get_session(username=self.settings.pku_username,
+                                         password=self.settings.pku_password)
+                    try:
+                        downloaded = download_job(client, job, progress=self._progress)
+                    finally:
+                        client.close()
+                    if downloaded.path is None:
+                        raise ValueError("无法获取录像画面；文字笔记已保留，请稍后重试。")
+                frame_index.unlink(missing_ok=True)
+                self._stage("提取课堂画面")
+                try:
+                    frame_rows = extract_keyframes(job.video, job.directory / "keyframes")
+                except Exception as exc:
+                    logger.exception("lecture frame extraction failed")
+                    raise ValueError("课堂画面提取失败；文字笔记已保留，请稍后重试。") from exc
+                if not frame_rows:
+                    raise ValueError("录像未能提取课堂画面；文字笔记已保留，请稍后重试。")
         from .note_videos import needs_video_clips
-        if not reuse_existing and not job.video.exists() and needs_video_clips(staged_note or notes_path):
+        local_mode = not lecture_id
+        allow_video_on_disk = (
+            getattr(self.settings, "save_recordings_locally", False)
+            or not getattr(self.settings, "delete_video_after_processing", True)
+            or (job.directory / ".keep-video").exists()
+            or download_job is not _DEFAULT_DOWNLOAD_JOB
+        )
+        if not local_mode and not reuse_existing and not job.video.exists() and allow_video_on_disk and needs_video_clips(staged_note or notes_path):
             if self.settings.pku_username and self.settings.pku_password:
                 self._stage("获取录像以生成回看片段")
                 client = get_session(username=self.settings.pku_username,
@@ -2103,7 +2482,6 @@ class RecordingWorkManager:
                     client.close()
                 if downloaded.path is None:
                     logger.warning("video clip source download failed: %s", downloaded.error)
-        local_mode = not lecture_id
         if not local_mode:
             self._stage("将课堂画面和笔记发布到 Notion")
             try:
@@ -2149,6 +2527,7 @@ class RecordingWorkManager:
         if local_mode:
             if regenerate:
                 clear_regeneration_pending(job)
+            _finalize_video_retention(self.settings, job, local_mode=True, notes_path=notes_path)
             return f"/api/campus/courses/{job.recording.course_id}/recordings/{recording_id(job)}/note-preview"
         from .notion_home import saved_home
         from ..catalog_snapshots import recording_source_id
@@ -2179,11 +2558,7 @@ class RecordingWorkManager:
         temporary.replace(marker)
         if regenerate:
             clear_regeneration_pending(job)
-        from .note_videos import video_publication_complete
-        if (getattr(self.settings, "delete_video_after_processing", False)
-                and not (job.directory / ".keep-video").exists()
-                and video_publication_complete(job.directory, notes_path=notes_path)):
-            job.video.unlink(missing_ok=True)
+        _finalize_video_retention(self.settings, job, local_mode=False, notes_path=notes_path)
         with self._lock:
             if self._work:
                 self._work.lecture_url = publication["lecture_url"]
@@ -2221,6 +2596,7 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
             ('id', 'url', 'parent_id', 'schema', 'active') if key in home} if home.get('id') else None)
         payload["campus_configured"] = bool(getattr(manager.settings, "pku_username", "") and getattr(manager.settings, "pku_password", ""))
         payload["demo_connection"] = demo_connection
+        payload["local_recordings"] = local_storage_summary(manager.settings)
         return payload
 
     @app.get("/api/campus/courses/{course_id}")
@@ -2872,3 +3248,68 @@ def add_recording_routes(app: FastAPI, manager: RecordingWorkManager, *, demo_co
         filename = safe_name(f"{job.recording.date}_{job.recording.title}", "recording") + ".mp4"
         return FileResponse(job.video, media_type="video/mp4", filename=filename,
                             content_disposition_type="inline")
+
+    @app.get("/api/recordings/local-storage")
+    def get_local_storage() -> dict:
+        return local_storage_summary(manager.settings)
+
+    @app.post("/api/recordings/local-storage")
+    def update_local_storage(body: LocalStorageConfigRequest) -> dict:
+        updates: dict[str, str] = {}
+        with manager._lock:
+            if body.save_recordings_locally is not None:
+                save_val = bool(body.save_recordings_locally)
+                manager.settings.save_recordings_locally = save_val
+                updates["SAVE_RECORDINGS_LOCALLY"] = "true" if save_val else "false"
+            if body.recordings_download_dir is not None:
+                raw_dir = body.recordings_download_dir.strip()
+                if raw_dir:
+                    try:
+                        resolved_dir = Path(raw_dir).expanduser().resolve()
+                        resolved_dir.mkdir(parents=True, exist_ok=True)
+                        raw_dir = str(resolved_dir)
+                    except OSError as exc:
+                        raise HTTPException(status_code=400, detail=f"无法创建或访问所选录像下载目录：{exc}") from exc
+                manager.settings.recordings_download_dir = raw_dir
+                updates["RECORDINGS_DOWNLOAD_DIR"] = raw_dir
+            if updates:
+                try:
+                    write_env_values(env_file_path(manager.settings), updates)
+                except OSError:
+                    logger.warning("failed to persist local storage settings to .env")
+        return local_storage_summary(manager.settings)
+
+    @app.post("/api/recordings/local-storage/pick-directory")
+    def pick_local_storage_dir() -> dict:
+        try:
+            return pick_local_storage_directory(manager.settings)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"无法打开文件夹选择器：{exc}") from exc
+
+    @app.post("/api/recordings/local-storage/open")
+    def open_local_storage(body: LocalStorageOpenRequest | None = None) -> dict:
+        try:
+            return open_local_storage_path(
+                manager.settings,
+                recording_id_key=(body.recording_id if body else ""),
+                raw_path=(body.path if body else ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法打开本地目录：{exc}") from exc
+
+    @app.delete("/api/recordings/local-storage/{key}")
+    def remove_local_recording_endpoint(key: str) -> dict:
+        if manager.state().get("state") == "running" and manager.state().get("recording_id") == key:
+            raise HTTPException(status_code=409, detail="这节录像当前正在处理中，请等待任务完成后再删除。")
+        try:
+            return delete_local_recording(manager.settings, key)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/recordings/local-storage/clear")
+    def clear_local_recordings_endpoint() -> dict:
+        if manager.state().get("state") == "running":
+            raise HTTPException(status_code=409, detail="请等待当前任务完成后再清理本地录像。")
+        return clear_all_local_recordings(manager.settings)

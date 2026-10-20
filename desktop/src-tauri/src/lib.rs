@@ -244,8 +244,13 @@ fn validate_alternate_app_dir(path: PathBuf) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod profile_path_tests {
-    use super::{validate_alternate_app_dir, healthz_matches};
+    use super::{
+        cleanup_entries_in_dir, healthz_matches, is_leftover_installer_filename,
+        is_updater_temp_entry_name, validate_alternate_app_dir,
+    };
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn alternate_profile_rejects_relative_and_root_paths() {
@@ -269,6 +274,32 @@ mod profile_path_tests {
         assert!(!healthz_matches(r#"{"ok":true,"instance_id":"old-child"}"#, "current-child"));
         assert!(!healthz_matches(r#"{"ok":false,"instance_id":"current-child"}"#, "current-child"));
         assert!(healthz_matches(r#"{"ok":true,"instance_id":"current-child"}"#, "current-child"));
+    }
+
+    #[test]
+    fn installer_cleanup_identifies_and_removes_leftover_installers_only() {
+        assert!(is_leftover_installer_filename("PKU-All-in-One-macos-arm64.dmg"));
+        assert!(is_leftover_installer_filename("PKU All in One_0.1.66_aarch64.dmg"));
+        assert!(is_leftover_installer_filename("PKU-All-in-One-windows-x64-setup.exe"));
+        assert!(is_leftover_installer_filename("PKU All in One_0.1.66_x64-setup.exe"));
+        assert!(is_leftover_installer_filename("PKU All in One.app.tar.gz"));
+        assert!(!is_leftover_installer_filename("lecture-notes.pdf"));
+        assert!(!is_leftover_installer_filename("other-installer.dmg"));
+        assert!(is_updater_temp_entry_name("PKU All in One-updater-abc123"));
+        assert!(is_updater_temp_entry_name("tauri_current_app_123"));
+
+        let temp_dir = std::env::temp_dir().join(format!("pku-installer-clean-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let dmg = temp_dir.join("PKU-All-in-One-macos-arm64.dmg");
+        let keep = temp_dir.join("homework.pdf");
+        fs::write(&dmg, b"dmg").unwrap();
+        fs::write(&keep, b"pdf").unwrap();
+        let removed = cleanup_entries_in_dir(&temp_dir, is_leftover_installer_filename, Duration::ZERO);
+        assert_eq!(removed, vec![dmg.clone()]);
+        assert!(!dmg.exists());
+        assert!(keep.exists());
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
 
@@ -474,6 +505,141 @@ fn emit_error(app: &AppHandle, message: &str) {
     let _ = app.emit("panel-error", message);
 }
 
+fn is_leftover_installer_filename(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    let is_pku_installer_prefix = lower.starts_with("pku-all-in-one")
+        || lower.starts_with("pku all in one")
+        || lower.starts_with("pku_all_in_one")
+        || lower.starts_with("pku-all-in-notion")
+        || lower.starts_with("pku all in notion")
+        || lower.starts_with("pku_all_in_notion");
+    if !is_pku_installer_prefix {
+        return false;
+    }
+    lower.ends_with(".dmg")
+        || lower.ends_with(".app.tar.gz")
+        || lower.ends_with(".msi")
+        || lower.ends_with(".nsis.zip")
+        || (lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("install") || lower.contains("x64") || lower.contains("arm64")))
+}
+
+fn is_updater_temp_entry_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    if is_leftover_installer_filename(&lower) {
+        return true;
+    }
+    let is_pku = lower.contains("pku-all-in-one")
+        || lower.contains("pku all in one")
+        || lower.contains("pku_all_in_one")
+        || lower.contains("pku-all-in-notion")
+        || lower.contains("pku all in notion")
+        || lower.contains("pku_all_in_notion");
+    (is_pku && lower.contains("updater"))
+        || lower.starts_with("tauri_current_app")
+        || lower.starts_with("tauri_updated_app")
+}
+
+fn cleanup_entries_in_dir(dir: &Path, match_fn: fn(&str) -> bool, min_age: Duration) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return removed;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !match_fn(name) {
+            continue;
+        }
+        if !min_age.is_zero() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if now.duration_since(modified).unwrap_or_default() < min_age {
+                        continue;
+                    }
+                }
+            }
+        }
+        let ok = if path.is_dir() {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if ok {
+            removed.push(path);
+        }
+    }
+    removed
+}
+
+fn is_running_from_installed_location(exe: &Path, downloads_dir: Option<&Path>) -> bool {
+    if let Some(downloads) = downloads_dir {
+        if exe.starts_with(downloads) {
+            return false;
+        }
+    }
+    let exe_str = exe.to_string_lossy();
+    if cfg!(target_os = "macos") {
+        (exe_str.starts_with("/Applications/") || exe_str.contains("/Applications/"))
+            && !exe_str.starts_with("/Volumes/")
+    } else if cfg!(windows) {
+        let lower = exe_str.to_ascii_lowercase();
+        !lower.contains("\\downloads\\") && !lower.contains("\\temp\\")
+    } else {
+        false
+    }
+}
+
+fn cleanup_leftover_installers(log_path: &Path) {
+    if std::env::var_os("PKU_DESKTOP_SKIP_INSTALLER_CLEANUP").is_some()
+        || std::env::var_os("PKU_DESKTOP_DATA_DIR").is_some()
+    {
+        return;
+    }
+    let mut removed = cleanup_entries_in_dir(
+        &std::env::temp_dir(),
+        is_updater_temp_entry_name,
+        Duration::from_secs(60),
+    );
+    let downloads = home_dir().map(|h| h.join("Downloads"));
+    if let Ok(exe) = std::env::current_exe() {
+        if is_running_from_installed_location(&exe, downloads.as_deref()) {
+            #[cfg(target_os = "macos")]
+            if let Ok(volumes) = fs::read_dir("/Volumes") {
+                for entry in volumes.flatten() {
+                    let vpath = entry.path();
+                    if let Some(vname) = vpath.file_name().and_then(|s| s.to_str()) {
+                        let lower = vname.to_ascii_lowercase();
+                        if lower.starts_with("pku all in one") || lower.starts_with("pku-all-in-one") {
+                            let _ = Command::new("/usr/bin/hdiutil")
+                                .args(["detach", "-quiet"])
+                                .arg(&vpath)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                        }
+                    }
+                }
+            }
+            if let Some(ref dl) = downloads {
+                removed.extend(cleanup_entries_in_dir(
+                    dl,
+                    is_leftover_installer_filename,
+                    Duration::from_secs(10),
+                ));
+            }
+        }
+    }
+    for path in removed {
+        append_log(
+            log_path,
+            &format!("[launcher] {} 自动清理已安装残留安装包：{}", now_stamp(), path.display()),
+        );
+    }
+}
+
 fn start_panel(app: AppHandle) {
     let app_dir = match app_dir() {
         Ok(dir) => dir,
@@ -492,6 +658,8 @@ fn start_panel(app: AppHandle) {
     }
 
     let log_path = app_dir.join("panel.log");
+    let cleanup_log = log_path.clone();
+    std::thread::spawn(move || cleanup_leftover_installers(&cleanup_log));
     let Some(launch) = resolve_panel_launch(&app) else {
         let msg = "没有找到 pku-sync：应用尚未安装完成。请重新运行安装程序，或在本机开发环境安装 pku-sync 后再试。";
         append_log(

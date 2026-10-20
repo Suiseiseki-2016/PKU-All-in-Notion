@@ -177,8 +177,8 @@ def test_summary_uses_only_local_material_and_discloses_gaps(tmp_path):
 def test_summary_without_any_note_says_so_instead_of_summarizing(tmp_path):
     _campus(tmp_path)
     text = course_summary.summary_markdown(tmp_path, "campus-1")
-    assert "本课程还没有已发布笔记，无法汇总主题要点" in text
-    assert "已发布笔记中没有登记待确认条目" in text
+    assert "本课程还没有本机笔记，无法汇总主题要点" in text
+    assert "本机笔记中没有登记待确认条目" in text
 
 
 def test_outline_folds_sub_bullets_and_never_invents_a_topic():
@@ -329,7 +329,7 @@ def test_summary_api_needs_notion_and_a_course(tmp_path, monkeypatch):
     _campus(tmp_path)
     _home(tmp_path)
     client, _manager_instance, _tree = _manager(tmp_path, monkeypatch, notion_token="")
-    assert client.post("/api/campus/courses/campus-1/summary").status_code == 409
+    assert client.post("/api/campus/courses/campus-1/summary").status_code == 200
     empty = tmp_path / "empty"
     empty.mkdir()
     seed_old_home(empty, {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parent_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

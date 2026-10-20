@@ -25,7 +25,7 @@ def browser():
 
 
 def panel_page(browser, width):
-    script = (ROOT/'pku_sync/panel/static/app.js').read_text()
+    script = (ROOT/'pku_sync/panel/static/app.js').read_text('utf-8')
     script = script[:script.index('  window.setInterval(refreshAccount, 8000);')] + '''
     window.__ux={state:state,render:render,poll:pollRecordingTask};render();})();'''
     page = browser.new_page(viewport={'width':width,'height':1000})
@@ -202,3 +202,85 @@ def test_campus_reward_refreshes_balance_and_expiry_before_next_poll(browser):
     pw.expect(page.locator('.sidebar .quota-available')).to_have_text('可用转写 1500 分钟')
     pw.expect(page.locator('.sidebar [data-membership-expiry]')).to_have_text('有效期至 2030-01-01')
     assert not errors
+
+
+def test_local_recordings_notice_panel_and_directory_settings(browser):
+    page, errors = panel_page(browser, 1440)
+    page.evaluate(
+        """() => {
+            let s = __ux.state;
+            s.view = 'dashboard';
+            s.localRecordings = {
+                open: false,
+                loading: false,
+                saveLocally: false,
+                downloadDir: '/tmp/custom-recordings',
+                effectiveDir: '/tmp/custom-recordings',
+                count: 1,
+                totalBytes: 524288000,
+                items: [{
+                    recording_id: 'lesson',
+                    course_id: 'course',
+                    course_title: '软件工程',
+                    title: '第1讲 需求分析',
+                    date: '2026-09-08',
+                    size_bytes: 524288000,
+                    path: '/tmp/custom-recordings/软件工程-2026-09-08-第1讲 需求分析.mp4'
+                }]
+            };
+            __ux.render();
+        }"""
+    )
+    banner = page.locator('[data-local-recordings-banner]')
+    pw.expect(banner).to_be_visible()
+    pw.expect(banner).to_contain_text('1 节课程录像')
+    pw.expect(banner).to_contain_text('500 MB')
+    pw.expect(banner).to_contain_text('/tmp/custom-recordings')
+
+    page.route(
+        'http://panel.test/api/recordings/local-storage',
+        lambda route: route.fulfill(
+            json={
+                'save_recordings_locally': False,
+                'recordings_download_dir': '/tmp/custom-recordings',
+                'effective_download_dir': '/tmp/custom-recordings',
+                'count': 1,
+                'total_bytes': 524288000,
+                'items': [{
+                    'recording_id': 'lesson',
+                    'course_id': 'course',
+                    'course_title': '软件工程',
+                    'title': '第1讲 需求分析',
+                    'date': '2026-09-08',
+                    'size_bytes': 524288000,
+                    'path': '/tmp/custom-recordings/软件工程-2026-09-08-第1讲 需求分析.mp4',
+                }],
+            }
+        ),
+    )
+    banner.locator('[data-action="toggle-local-recordings"]').click()
+    panel = page.locator('[data-local-recordings-panel]')
+    pw.expect(panel).to_be_visible()
+    pw.expect(panel.locator('[data-local-storage-save-toggle]')).not_to_be_checked()
+    pw.expect(panel.locator('[data-local-storage-dir-input]')).to_have_value('/tmp/custom-recordings')
+    pw.expect(panel.locator('[data-local-recording-item="lesson"]')).to_contain_text('软件工程 · 第1讲 需求分析')
+
+    page.route(
+        'http://panel.test/api/recordings/local-storage/lesson',
+        lambda route: route.fulfill(
+            json={
+                'deleted': True,
+                'save_recordings_locally': False,
+                'recordings_download_dir': '/tmp/custom-recordings',
+                'effective_download_dir': '/tmp/custom-recordings',
+                'count': 0,
+                'total_bytes': 0,
+                'items': [],
+            }
+        ),
+    )
+    panel.locator('[data-action="local-storage-delete-one"]').click()
+    pw.expect(page.locator('[data-local-recordings-banner]')).to_have_count(0)
+    pw.expect(panel).to_contain_text('当前本机没有保存任何原始录像文件')
+    assert not errors
+

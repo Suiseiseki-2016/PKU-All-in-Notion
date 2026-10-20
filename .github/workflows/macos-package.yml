@@ -29,13 +29,13 @@ jobs:
           npm run build:macos
       - name: Verify bundled source and media regression
         run: |
-          APP='/private/tmp/pku-all-in-notion-target/release/bundle/macos/PKU All in Notion.app'
+          APP='/private/tmp/pku-all-in-notion-target/release/bundle/macos/PKU All in One.app'
           PY="$APP/Contents/Resources/resources/runtime/bin/python"
           "$PY" -B -I desktop/scripts/verify-bundled-source.py "$APP/Contents/Resources/resources/runtime"
           codesign --verify --deep --strict "$APP"
           mkdir -p macos-candidate
           VERSION=$(node -p "require('./desktop/package.json').version")
-          cp "/private/tmp/pku-all-in-notion-target/release/bundle/dmg/PKU All in Notion_${VERSION}_aarch64.dmg" "macos-candidate/PKU-All-in-Notion-${VERSION}-Apple-Silicon.dmg"
+          cp "/private/tmp/pku-all-in-notion-target/release/bundle/dmg/PKU All in One_${VERSION}_aarch64.dmg" "macos-candidate/PKU-All-in-One-${VERSION}-Apple-Silicon.dmg"
           git rev-parse HEAD > macos-candidate/source-commit.txt
           shasum -a 256 macos-candidate/*.dmg > macos-candidate/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4

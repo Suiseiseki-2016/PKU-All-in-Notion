@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     exercise_ui_e2e_mode: bool = False
 
     delete_video_after_processing: bool = True
+    save_recordings_locally: bool = False
+    recordings_download_dir: str = ""
 
     @property
     def allowlist(self) -> set[str]:

@@ -82,7 +82,7 @@ def test_previous_unit_and_merge_prompts_preserve_paid_receipts(tmp_path, monkey
     fail = lambda *a: pytest.fail("previous prompt response billed again")
     assert notes.record_issues(target, lecture()) == []
     assert review_record_issues(target, lecture()) == []
-    assert notes.saved_sections(target, lecture())[0] == original.decode("utf-8")
+    assert notes.saved_sections(target, lecture())[0] == target.read_text("utf-8")
     notes.write_notes(lecture(), target, config(), "课程", ask=fail, merge_ask=fail, assembly=assembly)
     target.unlink()
     notes.write_notes(lecture(), target, config(), "课程", ask=fail, merge_ask=fail, assembly=assembly)
