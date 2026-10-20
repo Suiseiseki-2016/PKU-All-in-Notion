@@ -1041,7 +1041,7 @@ h1, h2, h3, p { margin-top: 0; }
 .course-card-footer .course-meta-details { min-width: 0; flex: 1; }
 .course-card-footer [data-action="open-campus-course"] { flex: none; width: auto; margin: 0; color: var(--green-deep); background: #eaf5ee; border-color: transparent; font-weight: 800; padding: 6px 12px; border-radius: 999px; }
 .course-card-footer [data-action="open-campus-course"]::after { content: " →"; }
-.sidebar .account-card { margin: 8px 6px 0; padding: 11px 13px; background: rgba(242, 247, 242, .65); border-color: #e4ede6; }
+.sidebar .account-card { margin: 8px 2px 0; padding: 11px 9px; background: rgba(242, 247, 242, .65); border-color: #e4ede6; }
 .sidebar .campus-account [data-action="campus-account-settings"] { background: transparent; border: 0; padding: 4px 0; min-height: auto; color: var(--green-deep); font-size: 12px; font-weight: 700; justify-content: flex-start; }
 .sidebar .campus-account [data-action="campus-account-settings"]::before { content: "▸ "; }
 .campus-lesson-page [data-action="campus-open-lesson"] { background: #eaf5ee; border-color: transparent; color: var(--green-deep); border-radius: 999px; padding: 6px 13px; }
@@ -1373,7 +1373,7 @@ section[data-materials-unassigned] > ul {
   .course-list-actions { margin-left: 0; }
 }
 
-.sidebar .redeem-form .redeem-input-row .text-input { font-size: 11px; }
+.sidebar .redeem-form .redeem-input-row .text-input { font-size: 10px; padding: 10px 5px; }
 
 .sidebar .invite-copy-actions { gap: 4px; margin-bottom: 6px; }
 .sidebar .invite-copy-actions .btn { min-height: 28px; padding: 4px 5px; font-size: 11px; }
